@@ -121,7 +121,13 @@ class FuturesBot:
     
     def cerrar_posicion(self):
         try:
-            os.remove(self.pos_file)
+            pos = cargar_posicion(self.pos_file)
+            if pos and hasattr(self, "_actualizar_summary"):
+                try:
+                    self._actualizar_summary(pos)
+                except Exception as e:
+                    log(f"Futuros: Error actualizando summary: {e}")
+            eliminar_posicion(self.pos_file)
         except Exception as e:
             log(f"Futuros: Error al cerrar posición: {e}")
 
