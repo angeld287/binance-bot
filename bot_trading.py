@@ -173,27 +173,6 @@ class FuturesBot:
         except Exception as e:
             log(f"Futuros: Error actualizando summary: {e}")
 
-    def _actualizar_summary(self, pos):
-        summary = {"ganancia_total": 0.0}
-        if os.path.exists(self.summary_file):
-            with open(self.summary_file) as f:
-                summary = json.load(f)
-        # Simula 1% de ganancia/pérdida por ahora
-        profit = pos["entry_price"] * pos["amount"] * 0.01
-        summary["ganancia_total"] += profit
-        with open(self.summary_file, "w") as f:
-            json.dump(summary, f, indent=2)
-        log(f"Futuros: Ganancia acumulada: {summary['ganancia_total']}")
-
-
-        # Evaluar entrada usando estrategia técnica
-        decision = validar_entrada(self.exchange, self.symbol)
-        if not decision:
-            log("Futuros: No hay señal de entrada según estrategia.")
-            return
-
-        side = decision
-        log(f"Futuros: Estrategia activó entrada: {side}")
 
 def main():
     key = os.getenv("BINANCE_API_KEY")
