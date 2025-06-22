@@ -20,7 +20,7 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            cd /home/ubuntu/bot-trading
+            cd /home/ec2-user/binance-bot
             git pull origin main
             pkill -f bot_trading.py || true
             nohup python3 bot_trading.py > logs/bot.log 2>&1 &
