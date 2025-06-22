@@ -92,21 +92,12 @@ class FuturesBot:
         try:
             position_side = "LONG" if side == "buy" else "SHORT"
 
-            price = self.exchange.fetch_ticker(self.symbol)["last"]
-            notional = amount * price
-            precision = self.exchange.markets[self.symbol]["precision"]["amount"]
-            if notional < 100:
-                amount = 100 / price
-                step = 10 ** -precision
-                amount = math.ceil(amount / step) * step
-                log(
-                    f"Futuros: Ajustando cantidad a {amount} para cumplir el notional mínimo"
-                )
+            log(f"Futuros: Cantidad para operacion {amount}")
+            log(f"Futuros: symbol {self.symbol}")
+            log(f"Futuros: side {side}")
+            log(f"Futuros: amount {amount}")
 
-            amount = float(self.exchange.amount_to_precision(self.symbol, amount))
-            log(f"Futuros: Cantidad redondeada a {amount}")
-
-            order = self.exchange.create_market_order(self.symbol, side, amount)
+            order = self.exchange.create_market_order(self.symbol, side, 0.0100)
 
             entry_price = float(order['info'].get('avgFillPrice') or order['price'])
             log(f"Futuros: Posición {side} abierta a {entry_price}")
@@ -194,7 +185,7 @@ def main():
     secret = os.getenv("BINANCE_API_SECRET")
     testnet = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
     symbol = "BTC/USDT"
-    amount = 0.001
+    leverage=5
 
     exchange = ccxt.binance({
         'apiKey': key,
@@ -209,9 +200,21 @@ def main():
         exchange.set_sandbox_mode(True)
         log("Modo TESTNET activado")
 
-    bot = FuturesBot(exchange, symbol, leverage=5)
+    bot = FuturesBot(exchange, symbol, leverage=leverage)
 
     while True:
+        ticker = exchange.fetch_ticker('BTC/USDT')
+        markets = exchange.load_markets()
+        hedgeMode = exchange.fapiPrivateGetPositionSideDual()
+
+
+        price = ticker['last']
+        precision = markets[symbol]["precision"]["amount"]
+        decimales = abs(int(round(math.log10(precision))))  # → 5
+        amount = (110*leverage) / price
+        amount = round(amount, decimales)
+        log(f"Price {price} - Precision {precision} - Amount {amount} - Decimales {decimales} - hedgeMode {hedgeMode}")
+
         pos = cargar_posicion(bot.pos_file)
         log("Modo TESTNET activado")
         if pos:
