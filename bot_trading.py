@@ -3,6 +3,7 @@ import time
 import ccxt
 import json
 import logging
+import math
 from dotenv import load_dotenv
 
 import pandas as pd
@@ -93,9 +94,17 @@ class FuturesBot:
 
             price = self.exchange.fetch_ticker(self.symbol)["last"]
             notional = amount * price
+            precision = self.exchange.markets[self.symbol]["precision"]["amount"]
             if notional < 100:
                 amount = 100 / price
-                log(f"Futuros: Ajustando cantidad a {amount} para cumplir el notional mínimo")
+                step = 10 ** -precision
+                amount = math.ceil(amount / step) * step
+                log(
+                    f"Futuros: Ajustando cantidad a {amount} para cumplir el notional mínimo"
+                )
+
+            amount = float(self.exchange.amount_to_precision(self.symbol, amount))
+            log(f"Futuros: Cantidad redondeada a {amount}")
 
             order = self.exchange.create_market_order(self.symbol, side, amount)
 
