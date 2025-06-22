@@ -51,6 +51,7 @@ def validar_entrada(exchange, symbol):
 load_dotenv()
 
 # Configuración del logger
+os.makedirs("logs", exist_ok=True)
 logging.basicConfig(filename="logs/bot.log", level=logging.INFO, format="%(asctime)s - %(message)s")
 
 def log(msg):
