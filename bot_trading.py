@@ -6,7 +6,6 @@ import logging
 import math
 from dotenv import load_dotenv
 
-import pandas as pd
 
 def detectar_punto_resistencia(ohlcv, nivel_actual, margen=0.002):
     altos = [c[2] for c in ohlcv]
