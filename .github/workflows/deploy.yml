@@ -23,4 +23,4 @@ jobs:
             cd /home/ec2-user/binance-bot
             git pull origin main
             pkill -f bot_trading.py || true
-            nohup python3 bot_trading.py > logs/bot.log 2>&1 &
+            nohup python3 bot_trading.py > logs/bot.log 2>&1 & disown
