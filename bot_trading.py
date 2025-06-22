@@ -90,6 +90,13 @@ class FuturesBot:
     def abrir_posicion(self, side, amount):
         try:
             position_side = "LONG" if side == "buy" else "SHORT"
+
+            price = self.exchange.fetch_ticker(self.symbol)["last"]
+            notional = amount * price
+            if notional < 100:
+                amount = 100 / price
+                log(f"Futuros: Ajustando cantidad a {amount} para cumplir el notional mínimo")
+
             order = self.exchange.create_market_order(self.symbol, side, amount)
 
             entry_price = float(order['info'].get('avgFillPrice') or order['price'])
