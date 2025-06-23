@@ -113,9 +113,14 @@ class FuturesBot:
     def cerrar_posicion(self):
         try:
             pos = cargar_posicion(self.pos_file)
-            if pos and hasattr(self, "_actualizar_summary"):
+            if not pos:
+                log("Futuros: No hay posición para cerrar")
+                return
+
+            exit_price = self.exchange.fetch_ticker(self.symbol)["last"]
+            if hasattr(self, "_actualizar_summary"):
                 try:
-                    self._actualizar_summary(pos)
+                    self._actualizar_summary(pos, exit_price)
                 except Exception as e:
                     log(f"Futuros: Error actualizando summary: {e}")
             eliminar_posicion(self.pos_file)
@@ -155,7 +160,7 @@ class FuturesBot:
         except Exception as e:
             log(f"Futuros: Error al evaluar posición: {e}")
 
-    def _actualizar_summary(self, pos):
+    def _actualizar_summary(self, pos, exit_price):
         summary = {"ganancia_total": 0.0}
 
         if os.path.exists(self.summary_file):
@@ -163,12 +168,19 @@ class FuturesBot:
                 summary = json.load(f)
 
         try:
-            if not all(k in pos for k in ["entry_price", "amount"]):
+            if not all(k in pos for k in ["entry_price", "amount", "side"]):
                 log(f"Futuros: No se puede actualizar summary: claves faltantes en {pos}")
                 return
 
-            # Simula 1% de ganancia/pérdida
-            profit = pos["entry_price"] * pos["amount"] * 0.01
+            entry = pos["entry_price"]
+            amount = pos["amount"]
+            side = pos["side"]
+
+            if side == "buy":
+                profit = (exit_price - entry) * amount
+            else:  # sell/short
+                profit = (entry - exit_price) * amount
+
             summary["ganancia_total"] += profit
 
             with open(self.summary_file, "w") as f:
