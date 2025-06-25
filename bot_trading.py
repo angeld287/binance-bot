@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import time
 import ccxt
@@ -100,11 +101,13 @@ class FuturesBot:
             order = self.exchange.create_market_order(self.symbol, side, 0.0100)
 
             entry_price = float(order['info'].get('avgFillPrice') or order['price'])
-            log(f"Futuros: Posición {side} abierta a {entry_price}")
+            open_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            log(f"Futuros: Posición {side} abierta a {entry_price} a las {open_time}")
             guardar_posicion(self.pos_file, {
                 "side": side,
                 "amount": amount,
-                "entry_price": entry_price
+                "entry_price": entry_price,
+                "open_time": open_time
             })
         except Exception as e:
             log(f"Futuros: Error al abrir posición: {e}")
@@ -118,6 +121,22 @@ class FuturesBot:
                 return
 
             exit_price = self.exchange.fetch_ticker(self.symbol)["last"]
+            side = pos.get("side")
+            entry_price = pos.get("entry_price")
+            amount = pos.get("amount", 0)
+
+            profit = None
+            if side and entry_price is not None:
+                if side == "buy":
+                    profit = (exit_price - entry_price) * amount
+                else:
+                    profit = (entry_price - exit_price) * amount
+
+                resultado = "ganancia" if profit >= 0 else "pérdida"
+                log(
+                    f"Futuros: Posición {'LONG' if side == 'buy' else 'SHORT'} cerrada a {exit_price} con {resultado} {profit}"
+                )
+
             if hasattr(self, "_actualizar_summary"):
                 try:
                     self._actualizar_summary(pos, exit_price)
