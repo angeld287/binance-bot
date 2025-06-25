@@ -114,12 +114,13 @@ class FuturesBot:
 
     
     def cerrar_posicion(self):
-        try:
-            pos = cargar_posicion(self.pos_file)
-            if not pos:
-                log("Futuros: No hay posición para cerrar")
-                return
+        pos = cargar_posicion(self.pos_file)
+        if not pos:
+            log("Futuros: No hay posición para cerrar")
+            eliminar_posicion(self.pos_file)
+            return
 
+        try:
             exit_price = self.exchange.fetch_ticker(self.symbol)["last"]
             side = pos.get("side")
             entry_price = pos.get("entry_price")
@@ -142,9 +143,10 @@ class FuturesBot:
                     self._actualizar_summary(pos, exit_price)
                 except Exception as e:
                     log(f"Futuros: Error actualizando summary: {e}")
-            eliminar_posicion(self.pos_file)
         except Exception as e:
             log(f"Futuros: Error al cerrar posición: {e}")
+        finally:
+            eliminar_posicion(self.pos_file)
 
     def evaluar_posicion(self):
         pos = cargar_posicion(self.pos_file)
