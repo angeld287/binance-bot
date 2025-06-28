@@ -49,6 +49,37 @@ def validar_entrada(exchange, symbol):
         return None
 
 
+def detectar_movimiento_importante(exchange, symbol, umbral=0.01):
+    """Devuelve la dirección de entrada cuando la última vela de distintos
+    timeframes supera el umbral indicado."""
+    for tf in ["1m", "5m", "15m", "30m"]:
+        try:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=2)
+            if len(ohlcv) < 2:
+                continue
+            open_, close = ohlcv[-1][1], ohlcv[-1][4]
+            cambio = (close - open_) / open_
+            if abs(cambio) >= umbral:
+                return "buy" if cambio < 0 else "sell"
+        except Exception:
+            continue
+    return None
+
+
+def calcular_punto_rechazo(exchange, symbol, side):
+    """Obtiene un punto de soporte o resistencia simple según la dirección."""
+    try:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe="5m", limit=20)
+        if side == "buy":
+            lows = [c[3] for c in ohlcv]
+            return min(lows)
+        else:
+            highs = [c[2] for c in ohlcv]
+            return max(highs)
+    except Exception:
+        return None
+
+
 load_dotenv()
 
 # Configuración del logger
@@ -89,18 +120,22 @@ class FuturesBot:
         except Exception as e:
             log(f"Futuros: Error al establecer apalancamiento: {e}")
 
-    def abrir_posicion(self, side, amount):
+    def abrir_posicion(self, side, amount, price):
+        """Abre una posición con una orden límite en el punto de rechazo"""
         try:
-            position_side = "LONG" if side == "buy" else "SHORT"
+            log(f"Futuros: Orden límite {side} {amount} @ {price}")
+            order = self.exchange.create_limit_order(self.symbol, side, amount, price)
+            time.sleep(5)
+            info = self.exchange.fetch_order(order['id'], self.symbol)
+            if info.get('status') != 'closed':
+                log("Futuros: Orden límite no ejecutada")
+                try:
+                    self.exchange.cancel_order(order['id'], self.symbol)
+                except Exception:
+                    pass
+                return
 
-            log(f"Futuros: Cantidad para operacion {amount}")
-            log(f"Futuros: symbol {self.symbol}")
-            log(f"Futuros: side {side}")
-            log(f"Futuros: amount {amount}")
-
-            order = self.exchange.create_market_order(self.symbol, side, 0.0100)
-
-            entry_price = float(order['info'].get('avgFillPrice') or order['price'])
+            entry_price = float(info.get('average') or info.get('price'))
             open_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             log(f"Futuros: Posición {side} abierta a {entry_price} a las {open_time}")
             guardar_posicion(self.pos_file, {
@@ -253,8 +288,15 @@ def main():
         if pos:
             bot.evaluar_posicion()
         else:
-            nueva_direccion = "buy" if int(time.time()) % 2 == 0 else "sell"
-            bot.abrir_posicion(nueva_direccion, amount)
+            direccion = detectar_movimiento_importante(exchange, symbol)
+            if direccion:
+                punto = calcular_punto_rechazo(exchange, symbol, direccion)
+                if punto:
+                    bot.abrir_posicion(direccion, amount, punto)
+                else:
+                    log("No se pudo calcular punto de rechazo")
+            else:
+                log("Sin movimiento importante, no se abre posición")
         time.sleep(60)
 
 if __name__ == "__main__":
