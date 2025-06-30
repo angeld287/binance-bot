@@ -49,17 +49,31 @@ def validar_entrada(exchange, symbol):
         return None
 
 
-def detectar_movimiento_importante(exchange, symbol, umbral=0.01):
-    """Devuelve la dirección de entrada cuando la última vela de distintos
-    timeframes supera el umbral indicado."""
+def detectar_movimiento_importante(exchange, symbol, umbral=0.005, velas=3):
+    """Evalúa las últimas `velas` para identificar un movimiento relevante.
+
+    Se considera importante cuando la variación entre la apertura de la primera
+    vela y el cierre de la última supera ``umbral`` o cuando el rango máximo
+    entre los altos y bajos del periodo es al menos el doble de ``umbral``. De
+    esta forma se contemplan las mechas pronunciadas y no solo el cuerpo de la
+    vela más reciente.
+    """
     for tf in ["1m", "5m", "15m", "30m"]:
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=2)
-            if len(ohlcv) < 2:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=velas)
+            if len(ohlcv) < velas:
                 continue
-            open_, close = ohlcv[-1][1], ohlcv[-1][4]
+
+            candles = ohlcv[-velas:]
+            open_ = candles[0][1]
+            close = candles[-1][4]
+            highs = [c[2] for c in candles]
+            lows = [c[3] for c in candles]
+
             cambio = (close - open_) / open_
-            if abs(cambio) >= umbral:
+            rango = (max(highs) - min(lows)) / open_
+
+            if abs(cambio) >= umbral or rango >= umbral * 2:
                 return "buy" if cambio < 0 else "sell"
         except Exception:
             continue
@@ -288,7 +302,8 @@ def main():
         if pos:
             bot.evaluar_posicion()
         else:
-            direccion = detectar_movimiento_importante(exchange, symbol)
+            direccion = detectar_movimiento_importante(exchange, symbol,
+                                                      umbral=0.005, velas=3)
             if direccion:
                 punto = calcular_punto_rechazo(exchange, symbol, direccion)
                 if punto:
