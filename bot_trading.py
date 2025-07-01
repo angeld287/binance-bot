@@ -256,10 +256,8 @@ def main():
         decimales = abs(int(round(math.log10(precision))))  # → 5
         amount = (110*leverage) / price
         amount = round(amount, decimales)
-        log(f"Price {price} - Precision {precision} - Amount {amount} - Decimales {decimales} - hedgeMode {hedgeMode}")
 
         pos = cargar_posicion(bot.pos_file)
-        log("Modo TESTNET activado")
         if pos:
             bot.evaluar_posicion()
         else:
@@ -270,7 +268,10 @@ def main():
                     log(f"Patrones detectados: {', '.join(patterns)}")
                 bot.abrir_posicion(side, amount, order_price)
             else:
-                log("Sin breakout identificado")
+                if testnet:
+                    log(f"TESTNET activo - Sin breakout - Apalancamiento: {leverage}x")
+                else:
+                    log("Sin breakout identificado")
         time.sleep(60)
 
 if __name__ == "__main__":
