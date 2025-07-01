@@ -6,92 +6,46 @@ import json
 import logging
 import math
 from dotenv import load_dotenv
+from patterns import detect_patterns
 
 
-def detectar_punto_resistencia(ohlcv, nivel_actual, margen=0.002):
-    altos = [c[2] for c in ohlcv]
-    for alto in altos[-20:]:
-        if abs(alto - nivel_actual) / nivel_actual < margen:
-            return True
-    return False
-
-def detectar_patron_vela(ohlcv):
-    open_, high, low, close = ohlcv[-1][1:5]
-    cuerpo = abs(close - open_)
-    mecha_superior = high - max(open_, close)
-    mecha_inferior = min(open_, close) - low
-
-    if cuerpo < mecha_superior and cuerpo < mecha_inferior:
-        return "doji"
-    elif mecha_inferior > cuerpo * 2:
-        return "martillo"
-    elif mecha_superior > cuerpo * 2:
-        return "estrella_fugaz"
-    else:
-        return None
-
-def validar_entrada(exchange, symbol):
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=30)
-        price = ohlcv[-1][4]
-
-        resistencia = detectar_punto_resistencia(ohlcv, price)
-        patron = detectar_patron_vela(ohlcv)
-
-        if resistencia and patron == "estrella_fugaz":
-            return "sell"
-        elif not resistencia and patron == "martillo":
-            return "buy"
-        else:
-            return None
-    except Exception as e:
-        print(f"Error en validar_entrada: {e}")
-        return None
-
-
-def detectar_movimiento_importante(exchange, symbol, umbral=0.005, velas=3):
-    """Evalúa las últimas `velas` para identificar un movimiento relevante.
-
-    Se considera importante cuando la variación entre la apertura de la primera
-    vela y el cierre de la última supera ``umbral`` o cuando el rango máximo
-    entre los altos y bajos del periodo es al menos el doble de ``umbral``. De
-    esta forma se contemplan las mechas pronunciadas y no solo el cuerpo de la
-    vela más reciente.
-    """
-    for tf in ["1m", "5m", "15m", "30m"]:
-        try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=velas)
-            if len(ohlcv) < velas:
-                continue
-
-            candles = ohlcv[-velas:]
-            open_ = candles[0][1]
-            close = candles[-1][4]
-            highs = [c[2] for c in candles]
-            lows = [c[3] for c in candles]
-
-            cambio = (close - open_) / open_
-            rango = (max(highs) - min(lows)) / open_
-
-            if abs(cambio) >= umbral or rango >= umbral * 2:
-                return "buy" if cambio < 0 else "sell"
-        except Exception:
-            continue
+def _last_swing_high(ohlcv, window=3):
+    highs = [c[2] for c in ohlcv]
+    for i in range(len(highs) - window - 1, window, -1):
+        local = highs[i - window : i + window + 1]
+        if highs[i] == max(local):
+            return highs[i]
     return None
 
 
-def calcular_punto_rechazo(exchange, symbol, side):
-    """Obtiene un punto de soporte o resistencia simple según la dirección."""
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe="5m", limit=20)
-        if side == "buy":
-            lows = [c[3] for c in ohlcv]
-            return min(lows)
-        else:
-            highs = [c[2] for c in ohlcv]
-            return max(highs)
-    except Exception:
-        return None
+def _last_swing_low(ohlcv, window=3):
+    lows = [c[3] for c in ohlcv]
+    for i in range(len(lows) - window - 1, window, -1):
+        local = lows[i - window : i + window + 1]
+        if lows[i] == min(local):
+            return lows[i]
+    return None
+
+
+def detectar_breakout(exchange, symbol):
+    """Busca rupturas de los últimos máximos o mínimos en 15m y 30m."""
+    for tf in ["15m", "30m"]:
+        try:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=50)
+            if len(ohlcv) < 20:
+                continue
+            price = ohlcv[-1][4]
+            last_high = _last_swing_high(ohlcv[:-1])
+            last_low = _last_swing_low(ohlcv[:-1])
+            if last_high and price > last_high:
+                patterns = detect_patterns(ohlcv)
+                return "buy", last_high, patterns
+            if last_low and price < last_low:
+                patterns = detect_patterns(ohlcv)
+                return "sell", last_low, patterns
+        except Exception:
+            continue
+    return None, None, []
 
 
 load_dotenv()
@@ -135,7 +89,7 @@ class FuturesBot:
             log(f"Futuros: Error al establecer apalancamiento: {e}")
 
     def abrir_posicion(self, side, amount, price):
-        """Abre una posición con una orden límite en el punto de rechazo"""
+        """Abre una posición con una orden límite y define stop loss."""
         try:
             log(f"Futuros: Orden límite {side} {amount} @ {price}")
             order = self.exchange.create_limit_order(self.symbol, side, amount, price)
@@ -151,13 +105,20 @@ class FuturesBot:
 
             entry_price = float(info.get('average') or info.get('price'))
             open_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            log(f"Futuros: Posición {side} abierta a {entry_price} a las {open_time}")
-            guardar_posicion(self.pos_file, {
-                "side": side,
-                "amount": amount,
-                "entry_price": entry_price,
-                "open_time": open_time
-            })
+            stop_loss = entry_price * 0.98 if side == "buy" else entry_price * 1.02
+            log(
+                f"Futuros: Posición {side} abierta a {entry_price} a las {open_time}"
+            )
+            guardar_posicion(
+                self.pos_file,
+                {
+                    "side": side,
+                    "amount": amount,
+                    "entry_price": entry_price,
+                    "open_time": open_time,
+                    "stop_loss": stop_loss,
+                },
+            )
         except Exception as e:
             log(f"Futuros: Error al abrir posición: {e}")
 
@@ -214,7 +175,7 @@ class FuturesBot:
 
             entry = pos["entry_price"]
             tp = entry * 1.01
-            sl = entry * 0.99
+            sl = pos.get("stop_loss", entry * 0.99)
 
             if pos["side"] == "buy" and (price >= tp or price <= sl):
                 log(f"Futuros: Precio actual: {price} — TP: {tp}, SL: {sl}")
@@ -302,16 +263,14 @@ def main():
         if pos:
             bot.evaluar_posicion()
         else:
-            direccion = detectar_movimiento_importante(exchange, symbol,
-                                                      umbral=0.005, velas=3)
-            if direccion:
-                punto = calcular_punto_rechazo(exchange, symbol, direccion)
-                if punto:
-                    bot.abrir_posicion(direccion, amount, punto)
-                else:
-                    log("No se pudo calcular punto de rechazo")
+            side, level, patterns = detectar_breakout(exchange, symbol)
+            if side:
+                order_price = level * 0.999 if side == "buy" else level * 1.001
+                if patterns:
+                    log(f"Patrones detectados: {', '.join(patterns)}")
+                bot.abrir_posicion(side, amount, order_price)
             else:
-                log("Sin movimiento importante, no se abre posición")
+                log("Sin breakout identificado")
         time.sleep(60)
 
 if __name__ == "__main__":
