@@ -131,10 +131,19 @@ class FuturesBot:
             return
 
         try:
-            exit_price = self.exchange.fetch_ticker(self.symbol)["last"]
             side = pos.get("side")
-            entry_price = pos.get("entry_price")
             amount = pos.get("amount", 0)
+            entry_price = pos.get("entry_price")
+
+            close_side = "sell" if side == "buy" else "buy"
+            try:
+                self.exchange.create_market_order(
+                    self.symbol, close_side, amount, {"reduceOnly": True}
+                )
+            except Exception:
+                self.exchange.create_market_order(self.symbol, close_side, amount)
+
+            exit_price = self.exchange.fetch_ticker(self.symbol)["last"]
 
             profit = None
             if side and entry_price is not None:
@@ -165,8 +174,13 @@ class FuturesBot:
             return
 
         try:
-            ticker = self.exchange.fetch_ticker(self.symbol)
-            price = ticker["last"]
+            try:
+                market_id = self.exchange.market_id(self.symbol)
+                info = self.exchange.fapiPublic_get_premiumIndex({"symbol": market_id})
+                price = float(info["markPrice"])
+            except Exception:
+                ticker = self.exchange.fetch_ticker(self.symbol)
+                price = ticker["last"]
 
             # Validación de claves esperadas
             if not all(k in pos for k in ["entry_price", "side"]):
@@ -174,19 +188,33 @@ class FuturesBot:
                 return
 
             entry = pos["entry_price"]
-            tp = entry * 1.01
-            sl = pos.get("stop_loss", entry * 0.99)
+            side = pos["side"]
+            amount = pos.get("amount", 0)
+            tp = entry * 1.01 if side == "buy" else entry * 0.99
+            sl = pos.get("stop_loss", entry * 0.99 if side == "buy" else entry * 1.01)
 
-            if pos["side"] == "buy" and (price >= tp or price <= sl):
-                log(f"Futuros: Precio actual: {price} — TP: {tp}, SL: {sl}")
-                self.cerrar_posicion()
-
-            elif pos["side"] == "sell" and (price <= tp or price >= sl):
-                log(f"Futuros: Precio actual: {price} — TP: {tp}, SL: {sl}")
-                self.cerrar_posicion()
-
+            if side == "buy":
+                if price >= tp:
+                    pnl = (price - entry) * amount
+                    log(f"TP alcanzado. Cerrando posición en {price} con PNL {pnl}")
+                    self.cerrar_posicion()
+                elif price <= sl:
+                    pnl = (price - entry) * amount
+                    log(f"Stop Loss alcanzado. Cerrando posición en {price} con PNL {pnl}")
+                    self.cerrar_posicion()
+                else:
+                    log(f"Futuros: Precio actual: {price} — TP: {tp}, SL: {sl} -->")
             else:
-                log(f"Futuros: Precio actual: {price} — TP: {tp}, SL: {sl} -->")
+                if price <= tp:
+                    pnl = (entry - price) * amount
+                    log(f"TP alcanzado. Cerrando posición en {price} con PNL {pnl}")
+                    self.cerrar_posicion()
+                elif price >= sl:
+                    pnl = (entry - price) * amount
+                    log(f"Stop Loss alcanzado. Cerrando posición en {price} con PNL {pnl}")
+                    self.cerrar_posicion()
+                else:
+                    log(f"Futuros: Precio actual: {price} — TP: {tp}, SL: {sl} -->")
 
         except Exception as e:
             log(f"Futuros: Error al evaluar posición: {e}")
