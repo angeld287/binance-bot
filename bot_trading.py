@@ -40,13 +40,15 @@ def detectar_breakout(exchange, symbol):
             last_low = _last_swing_low(ohlcv[:-1])
             if last_high and price > last_high:
                 patterns = detect_patterns(ohlcv)
-                return "buy", last_high, patterns
+                price_range = (last_low if last_low else price * 0.99, last_high)
+                return "buy", last_high, patterns, price_range
             if last_low and price < last_low:
                 patterns = detect_patterns(ohlcv)
-                return "sell", last_low, patterns
+                price_range = (last_low, last_high if last_high else price * 1.01)
+                return "sell", last_low, patterns, price_range
         except Exception:
             continue
-    return None, None, []
+    return None, None, [], (None, None)
 
 
 load_dotenv()
@@ -109,37 +111,58 @@ class FuturesBot:
         except Exception as e:
             log(f"Futuros: Error al establecer apalancamiento: {e}")
 
-    def abrir_posicion(self, side, amount, price):
-        """Abre una posición con una orden límite y define stop loss."""
+    def abrir_posicion(self, side, amount, price, price_range):
+        """Abre una posición con una orden límite que permanece activa mientras el precio
+        esté dentro del rango especificado."""
         try:
             log(f"Futuros: Orden límite {side} {amount} @ {price}")
             order = self.exchange.create_limit_order(self.symbol, side, amount, price)
-            time.sleep(5)
-            info = self.exchange.fetch_order(order['id'], self.symbol)
-            if info.get('status') != 'closed':
-                log("Futuros: Orden límite no ejecutada")
-                try:
-                    self.exchange.cancel_order(order['id'], self.symbol)
-                except Exception:
-                    pass
-                return
+            log("Futuros: Orden límite creada y permanece activa")
 
-            entry_price = float(info.get('average') or info.get('price'))
-            open_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            stop_loss = entry_price * 0.98 if side == "buy" else entry_price * 1.02
-            log(
-                f"Futuros: Posición {side} abierta a {entry_price} a las {open_time}"
-            )
-            guardar_posicion(
-                self.pos_file,
-                {
-                    "side": side,
-                    "amount": amount,
-                    "entry_price": entry_price,
-                    "open_time": open_time,
-                    "stop_loss": stop_loss,
-                },
-            )
+            rango_inf, rango_sup = price_range
+
+            while True:
+                time.sleep(5)
+                info = self.exchange.fetch_order(order['id'], self.symbol)
+                if info.get('status') == 'closed':
+                    entry_price = float(info.get('average') or info.get('price'))
+                    open_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                    stop_loss = entry_price * 0.98 if side == "buy" else entry_price * 1.02
+                    log(
+                        f"Futuros: Posición {side} abierta a {entry_price} a las {open_time}"
+                    )
+                    guardar_posicion(
+                        self.pos_file,
+                        {
+                            "side": side,
+                            "amount": amount,
+                            "entry_price": entry_price,
+                            "open_time": open_time,
+                            "stop_loss": stop_loss,
+                        },
+                    )
+                    break
+
+                ticker = self.exchange.fetch_ticker(self.symbol)
+                price_now = ticker['last']
+
+                if side == 'buy' and rango_inf is not None and price_now < rango_inf:
+                    log(
+                        f"Futuros: Precio {price_now} fuera del rango de análisis. Cancelando orden límite"
+                    )
+                    try:
+                        self.exchange.cancel_order(order['id'], self.symbol)
+                    finally:
+                        break
+                if side == 'sell' and rango_sup is not None and price_now > rango_sup:
+                    log(
+                        f"Futuros: Precio {price_now} fuera del rango de análisis. Cancelando orden límite"
+                    )
+                    try:
+                        self.exchange.cancel_order(order['id'], self.symbol)
+                    finally:
+                        break
+
         except Exception as e:
             log(f"Futuros: Error al abrir posición: {e}")
 
@@ -310,12 +333,12 @@ def main():
         if pos:
             bot.evaluar_posicion()
         else:
-            side, level, patterns = detectar_breakout(exchange, symbol)
+            side, level, patterns, rango = detectar_breakout(exchange, symbol)
             if side:
                 order_price = level * 0.999 if side == "buy" else level * 1.001
                 if patterns:
                     log(f"Patrones detectados: {', '.join(patterns)}")
-                bot.abrir_posicion(side, amount, order_price)
+                bot.abrir_posicion(side, amount, order_price, rango)
             else:
                 if testnet:
                     log(f"TESTNET activo - Sin breakout - Apalancamiento: {leverage}x")
