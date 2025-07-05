@@ -64,6 +64,7 @@ handler = logging.handlers.TimedRotatingFileHandler(
     when="midnight",
     backupCount=7,
     encoding="utf-8",
+    utc=True,
 )
 handler.suffix = "%Y-%m-%d"
 handler.namer = lambda name: name.replace(".log.", "_") + ".log"
@@ -317,6 +318,8 @@ def main():
 
     bot = FuturesBot(exchange, symbol, leverage=leverage)
 
+    last_heartbeat = time.time()
+
     while True:
         ticker = exchange.fetch_ticker('BTC/USDT')
         markets = exchange.load_markets()
@@ -344,6 +347,11 @@ def main():
                     log(f"TESTNET activo - Sin breakout - Apalancamiento: {leverage}x")
                 else:
                     log("Sin breakout identificado")
+
+        if time.time() - last_heartbeat >= 300:
+            log("Heartbeat: bot activo")
+            last_heartbeat = time.time()
+
         time.sleep(60)
 
 if __name__ == "__main__":
