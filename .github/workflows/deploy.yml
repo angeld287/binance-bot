@@ -24,13 +24,7 @@ jobs:
               python3 -m pip install --upgrade pip &&
               mkdir -p package &&
               python3 -m pip install -r requirements.txt -t package &&
-              python3 - <<'EOF'
-import importlib.util, sys
-spec = importlib.util.find_spec('_cffi_backend')
-print('_cffi_backend found at:', spec.origin if spec else 'not found')
-if not spec:
-    sys.exit(1)
-EOF
+              python3 -c 'import importlib.util, sys; spec = importlib.util.find_spec("_cffi_backend"); print("_cffi_backend found at:", spec.origin if spec else "not found"); sys.exit(1 if not spec else 0)' &&
               cp bot_trading.py package/ &&
               cd package &&
               zip -r ../deployment.zip .
