@@ -1,4 +1,4 @@
-name: Deploy bot to AWS EC2
+name: Deploy bot to AWS Lambda
 
 on:
   push:
@@ -13,15 +13,32 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v2
 
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@master
+      - name: Set up Python
+        uses: actions/setup-python@v2
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            cd /home/ec2-user/binance-bot
-            git pull origin main
-            pkill -f bot_trading.py || true
-            source venv/bin/activate
-            nohup python3 bot_trading.py > logs/bot.log 2>&1 & disown
+          python-version: '3.11' # o la versión que uses
+
+      - name: Install dependencies into package folder
+        run: |
+          mkdir package
+          pip install -r requirements.txt -t package
+          cp -r bot_trading.py package/
+
+      - name: Zip package
+        run: |
+          cd package
+          zip -r ../deployment.zip .
+          cd ..
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1 # tu región
+
+      - name: Update Lambda function code
+        run: |
+          aws lambda update-function-code \
+            --function-name trading-bot-binance \
+            --zip-file fileb://deployment.zip
