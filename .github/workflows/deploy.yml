@@ -15,7 +15,7 @@ jobs:
 
       - name: Build deployment package on Amazon Linux
         run: |
-          docker run --rm --platform linux/arm64 -v "$PWD":/var/task -w /var/task amazonlinux:2 bash -c "
+          docker run --rm --platform linux/x86_64 -v "$PWD":/var/task -w /var/task amazonlinux:2 bash -c "
             yum -y install python3 python3-pip zip &&
             python3 -m pip install --upgrade pip &&
             mkdir -p package &&
@@ -35,5 +35,5 @@ jobs:
       - name: Update Lambda function code
         run: |
           aws lambda update-function-code \
-            --function-name trading-bot-binance \
+            --function-name trading-bot-binance-64 \
             --zip-file fileb://deployment.zip
