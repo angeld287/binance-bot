@@ -15,16 +15,26 @@ jobs:
 
       - name: Build deployment package on Amazon Linux
         run: |
-          docker run --rm --platform linux/x86_64 -v "$PWD":/var/task -w /var/task amazonlinux:2023 bash -c "
-            yum -y groupinstall 'Development Tools' &&
-            yum -y install python3 python3-pip zip &&
-            pip3 install --upgrade pip --ignore-installed &&
-            mkdir -p package &&
-            pip3 install -r requirements.txt -t package &&
-            cp bot_trading.py package/ &&
-            cd package &&
-            zip -r ../deployment.zip .
-          "
+          docker run --rm --platform linux/x86_64 \
+            -v "$PWD":/var/task -w /var/task \
+            public.ecr.aws/sam/build-python3.13:latest bash -c "
+              set -e
+              yum -y groupinstall 'Development Tools' &&
+              yum -y install python3 python3-pip python3-devel gcc libffi-devel openssl-devel make zip &&
+              python3 -m pip install --upgrade pip &&
+              mkdir -p package &&
+              python3 -m pip install -r requirements.txt -t package &&
+              python3 - <<'EOF'
+import importlib.util, sys
+spec = importlib.util.find_spec('_cffi_backend')
+print('_cffi_backend found at:', spec.origin if spec else 'not found')
+if not spec:
+    sys.exit(1)
+EOF
+              cp bot_trading.py package/ &&
+              cd package &&
+              zip -r ../deployment.zip .
+            "
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
