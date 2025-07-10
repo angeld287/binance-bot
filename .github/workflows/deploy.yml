@@ -17,6 +17,7 @@ jobs:
         run: |
           docker run --rm --platform linux/x86_64 -v "$PWD":/var/task -w /var/task amazonlinux:2 bash -c "
             yum -y install python3 python3-pip zip &&
+            yum groupinstall -y \"Development Tools\" &&
             python3 -m pip install --upgrade pip &&
             mkdir -p package &&
             pip3 install -r requirements.txt -t package &&
