@@ -296,63 +296,68 @@ class FuturesBot:
             log(f"Futuros: Error actualizando summary: {e}")
 
 
-def main():
+def _run_iteration(exchange, bot, testnet, symbol, leverage):
+    ticker = exchange.fetch_ticker(symbol)
+    markets = exchange.load_markets()
+
+    price = ticker["last"]
+    precision = markets[symbol]["precision"]["amount"]
+    decimals = abs(int(round(math.log10(precision))))
+    amount = (110 * leverage) / price
+    amount = round(amount, decimals)
+
+    print(f"Precio actual de {symbol}: {price}")
+
+    pos = cargar_posicion(bot.pos_file)
+    if pos:
+        bot.evaluar_posicion()
+    else:
+        side, level, patterns, rango = detectar_breakout(exchange, symbol)
+        if side:
+            order_price = level * 0.999 if side == "buy" else level * 1.001
+            if patterns:
+                print(f"Patrones detectados: {', '.join(patterns)}")
+            bot.abrir_posicion(side, amount, order_price, rango)
+        else:
+            if testnet:
+                print(f"TESTNET activo - Sin breakout - Apalancamiento: {leverage}x")
+            else:
+                print("Sin breakout identificado")
+
+    return price
+
+
+def handler(event, context):
+    """AWS Lambda handler que ejecuta una iteración de trading."""
+    load_dotenv()
+
     key = os.getenv("BINANCE_API_KEY")
     secret = os.getenv("BINANCE_API_SECRET")
     testnet = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
-    symbol = "BTC/USDT"
-    leverage=5
 
-    exchange = ccxt.binance({
-        'apiKey': key,
-        'secret': secret,
-        'enableRateLimit': True,
-        'options': {
-            'defaultType': 'future'
+    symbol = "BTC/USDT"
+    leverage = 5
+
+    exchange = ccxt.binance(
+        {
+            "apiKey": key,
+            "secret": secret,
+            "enableRateLimit": True,
+            "options": {"defaultType": "future"},
         }
-    })
+    )
 
     if testnet:
         exchange.set_sandbox_mode(True)
-        log("Modo TESTNET activado")
+        print("Modo TESTNET activado")
 
     bot = FuturesBot(exchange, symbol, leverage=leverage)
 
-    last_heartbeat = time.time()
+    price = _run_iteration(exchange, bot, testnet, symbol, leverage)
 
-    while True:
-        ticker = exchange.fetch_ticker('BTC/USDT')
-        markets = exchange.load_markets()
-        hedgeMode = exchange.fapiPrivateGetPositionSideDual()
+    return {
+        "statusCode": 200,
+        "body": json.dumps({"price": price}),
+    }
 
 
-        price = ticker['last']
-        precision = markets[symbol]["precision"]["amount"]
-        decimales = abs(int(round(math.log10(precision))))  # → 5
-        amount = (110*leverage) / price
-        amount = round(amount, decimales)
-
-        pos = cargar_posicion(bot.pos_file)
-        if pos:
-            bot.evaluar_posicion()
-        else:
-            side, level, patterns, rango = detectar_breakout(exchange, symbol)
-            if side:
-                order_price = level * 0.999 if side == "buy" else level * 1.001
-                if patterns:
-                    log(f"Patrones detectados: {', '.join(patterns)}")
-                bot.abrir_posicion(side, amount, order_price, rango)
-            else:
-                if testnet:
-                    log(f"TESTNET activo - Sin breakout - Apalancamiento: {leverage}x")
-                else:
-                    log("Sin breakout identificado")
-
-        if time.time() - last_heartbeat >= 300:
-            log("Heartbeat: bot activo")
-            last_heartbeat = time.time()
-
-        time.sleep(60)
-
-if __name__ == "__main__":
-    main()
