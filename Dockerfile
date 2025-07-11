@@ -1,8 +1,36 @@
-FROM public.ecr.aws/sam/build-python3.13 AS builder
-COPY requirements.txt .
-RUN pip install --no-binary=cffi -r requirements.txt -t /package
+FROM amazonlinux:2023
 
-FROM public.ecr.aws/sam/build-python3.13 AS final
-WORKDIR /var/task
-COPY --from=builder /package /var/task
-COPY bot_trading.py /var/task
+# Instala herramientas de build y dependencias
+RUN yum update -y && \
+    yum groupinstall -y "Development Tools" && \
+    yum install -y openssl-devel libffi-devel bzip2-devel wget make
+
+# Descarga y compila Python 3.13
+RUN wget https://www.python.org/ftp/python/3.13.0/Python-3.13.0.tgz && \
+    tar xzf Python-3.13.0.tgz && \
+    cd Python-3.13.0 && \
+    ./configure --enable-optimizations && \
+    make -j$(nproc) && \
+    make altinstall
+
+# Confirma versión de Python instalada
+RUN python3.13 --version
+
+# Instala pip para Python 3.13
+RUN python3.13 -m ensurepip && \
+    python3.13 -m pip install --upgrade pip
+
+# Copia tu requirements.txt
+COPY requirements.txt .
+
+# Instala requirements en /package, forzando compilación de cffi
+RUN python3.13 -m pip install --no-binary=cffi -r requirements.txt -t /package
+
+# Confirma existencia de _cffi_backend.so
+RUN find /package -name "_cffi_backend*.so"
+
+# Copia tu script (si lo deseas probar en container)
+COPY bot_trading.py /package/
+
+# Setea el directorio de trabajo
+WORKDIR /package
