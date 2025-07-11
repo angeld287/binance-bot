@@ -4,7 +4,7 @@ RUN yum groupinstall -y "Development Tools" && \
 
 COPY requirements.txt .
 
-RUN pip install -r requirements.txt -t /package
+RUN pip install --no-binary=cffi -r requirements.txt -t /package
     
 RUN python3 -c "import sys; import _cffi_backend; print('_cffi_backend found at:', _cffi_backend.__file__)"
 
