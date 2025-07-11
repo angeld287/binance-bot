@@ -11,13 +11,7 @@ RUN pip install -r requirements.txt -t /package && \
     echo "===== LISTING cffi folder =====" && \
     ls -la /package/cffi && \
     echo "===== END OF LIST =====" && \
-    RUN python3 -c "import sys; import _cffi_backend; print('_cffi_backend found at:', _cffi_backend.__file__)" && \
-    python3 - <<'EOF'
-import pkgutil, sys
-m = pkgutil.find_loader('_cffi_backend')
-print(m.get_filename() if m else 'not found')
-sys.exit(0 if m else 1)
-EOF
+    RUN python3 -c "import sys; import _cffi_backend; print('_cffi_backend found at:', _cffi_backend.__file__)"
 
 FROM public.ecr.aws/sam/build-python3.13 AS final
 WORKDIR /var/task
