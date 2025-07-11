@@ -20,7 +20,7 @@ jobs:
           docker cp $id:/var/task ./package
           docker rm $id
           cd package
-          zip -r ../deployment.zip .
+          zip -r ../deployment.zip ./*
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
