@@ -13,21 +13,14 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v2
 
-      - name: Build deployment package on Amazon Linux
+      - name: Build Docker image and package code
         run: |
-          docker run --rm --platform linux/x86_64 \
-            -v "$PWD":/var/task -w /var/task \
-            public.ecr.aws/sam/build-python3.13:latest \
-            bash -c 'set -e &&
-              apt-get update -y &&
-              apt-get install -y build-essential python3 python3-pip python3-dev gcc libffi-dev libssl-dev make zip &&
-              python3 -m pip install --upgrade pip &&
-              mkdir -p package &&
-              python3 -m pip install -r requirements.txt -t package &&
-              python3 -c '\''import importlib.util, sys; spec = importlib.util.find_spec("_cffi_backend"); print("_cffi_backend found at:", spec.origin if spec else "not found"); sys.exit(1 if not spec else 0)'\'' &&
-              cp bot_trading.py package/ &&
-              cd package &&
-              zip -r ../deployment.zip .'
+          docker build -t lambda-bot .
+          id=$(docker create lambda-bot)
+          docker cp $id:/var/task ./package
+          docker rm $id
+          cd package
+          zip -r ../deployment.zip .
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
