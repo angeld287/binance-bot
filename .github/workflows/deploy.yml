@@ -19,8 +19,8 @@ jobs:
             -v "$PWD":/var/task -w /var/task \
             public.ecr.aws/sam/build-python3.13:latest \
             bash -c 'set -e &&
-              yum -y groupinstall "Development Tools" &&
-              yum -y install python3 python3-pip python3-devel gcc libffi-devel openssl-devel make zip &&
+              apt-get update -y &&
+              apt-get install -y build-essential python3 python3-pip python3-dev gcc libffi-dev libssl-dev make zip &&
               python3 -m pip install --upgrade pip &&
               mkdir -p package &&
               python3 -m pip install -r requirements.txt -t package &&
