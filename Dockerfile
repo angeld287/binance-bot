@@ -5,6 +5,9 @@ RUN yum groupinstall -y "Development Tools" && \
 COPY requirements.txt .
 RUN pip install -r requirements.txt -t /package && \
     pip freeze && \
+    pip show cffi && \
+    pip show _cffi_backend && \
+    find / -name "*_cffi_backend*.so" && \
     echo "===== LISTING cffi folder =====" && \
     ls -la /package/cffi && \
     echo "===== END OF LIST =====" && \
