@@ -1,6 +1,6 @@
 FROM amazonlinux:2023 AS builder
 RUN yum groupinstall -y "Development Tools" && \
-    yum install -y gcc libffi-devel openssl-devel python3 python3-pip make zip
+    yum install -y gcc libffi-devel openssl-devel python3 python3-pip make zip python3-devel
 
 COPY requirements.txt .
 
