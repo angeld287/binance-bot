@@ -1,4 +1,4 @@
-FROM amazonlinux:2023 AS builder
+FROM public.ecr.aws/sam/build-python3.13 AS builder
 RUN yum groupinstall -y "Development Tools" && \
     yum install -y gcc libffi-devel openssl-devel python3 python3-pip make zip
 
