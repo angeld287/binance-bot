@@ -11,6 +11,7 @@ RUN pip install -r requirements.txt -t /package && \
     echo "===== LISTING cffi folder =====" && \
     ls -la /package/cffi && \
     echo "===== END OF LIST =====" && \
+    RUN python3 -c "import sys; import _cffi_backend; print('_cffi_backend found at:', _cffi_backend.__file__)" && \
     python3 - <<'EOF'
 import pkgutil, sys
 m = pkgutil.find_loader('_cffi_backend')
