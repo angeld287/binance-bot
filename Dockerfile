@@ -1,16 +1,6 @@
-FROM amazonlinux:2023 AS builder
-RUN yum groupinstall -y "Development Tools" && \
-    yum install -y gcc libffi-devel openssl-devel python3 python3-pip make zip python3-devel
-
+FROM public.ecr.aws/sam/build-python3.13 AS builder
 COPY requirements.txt .
-
 RUN pip install --no-binary=cffi -r requirements.txt -t /package
-    
-RUN python3 -c "import sys; sys.path.insert(0, '/package'); import _cffi_backend; print('_cffi_backend found at:', _cffi_backend.__file__)"
-RUN echo "=================== BUSCANDO _cffi_backend .so ===================" && \
-    find / -type f -name "_cffi_backend*.so" 2>/dev/null -exec ls -l {} \; && \
-    echo "=================== FIN DE BUSQUEDA _cffi_backend .so ==================="
-RUN find / -type f -name "_cffi_backend*.so" 2>/dev/null
 
 FROM public.ecr.aws/sam/build-python3.13 AS final
 WORKDIR /var/task
