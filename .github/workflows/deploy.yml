@@ -17,7 +17,7 @@ jobs:
         run: |
           docker build -t lambda-bot .
           id=$(docker create lambda-bot)
-          docker cp $id:/var/task ./package
+          docker cp $id:/package ./package
           docker rm $id
           cd package
           zip -r ../deployment.zip ./*
