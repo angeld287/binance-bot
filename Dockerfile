@@ -4,6 +4,7 @@ RUN yum groupinstall -y "Development Tools" && \
 
 COPY requirements.txt .
 RUN pip install -r requirements.txt -t /package && \
+    pip freeze && \
     python3 - <<'EOF'
 import pkgutil, sys
 m = pkgutil.find_loader('_cffi_backend')
