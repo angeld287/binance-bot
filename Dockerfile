@@ -7,5 +7,6 @@ RUN python3 -m pip install --upgrade pip && \
     pip install -r requirements.txt -t /package
 
 FROM public.ecr.aws/sam/build-python3.13 AS final
+WORKDIR /var/task
 COPY --from=builder /package /var/task
 COPY bot_trading.py /var/task
