@@ -5,6 +5,9 @@ RUN yum groupinstall -y "Development Tools" && \
 COPY requirements.txt .
 RUN pip install -r requirements.txt -t /package && \
     pip freeze && \
+    echo "===== LISTING cffi folder =====" && \
+    ls -la /package/cffi && \
+    echo "===== END OF LIST =====" && \
     python3 - <<'EOF'
 import pkgutil, sys
 m = pkgutil.find_loader('_cffi_backend')
