@@ -7,7 +7,7 @@ import logging
 import logging.handlers
 import math
 from dotenv import load_dotenv
-from patterns import detect_patterns
+from pattern_detection import detect_patterns
 
 
 def _last_swing_high(ohlcv, window=3):
