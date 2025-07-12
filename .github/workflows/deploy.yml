@@ -1,42 +1,49 @@
-name: Deploy bot to AWS Lambda
+name: One-time Docker Build & Push to ECR
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
-  deploy:
+  ecr-deploy:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v2
 
-      - name: Build Docker image and package code
-        run: |
-          docker build -t lambda-bot .
-          id=$(docker create lambda-bot)
-          docker cp $id:/package ./package
-          docker rm $id
-          cd package
-          zip -r ../deployment.zip ./*
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1 # tu región
+          aws-region: us-east-1
 
-      - name: Upload ZIP to S3
+      - name: Get AWS Account ID
+        id: aws-account
         run: |
-          aws s3 cp deployment.zip s3://lambda-functions-dev-serverlessdeploymentbucket-99mw0zqcfjsg/trading-bot.zip
-    
-      - name: Update Lambda function code from S3
-        run: |
-          aws lambda update-function-code \
-            --function-name trading-bot-binance-64 \
-            --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-99mw0zqcfjsg \
-            --s3-key trading-bot.zip
+          ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
+          echo "account_id=$ACCOUNT_ID" >> $GITHUB_OUTPUT
 
+      - name: Create ECR repository (if not exists)
+        run: |
+          aws ecr describe-repositories --repository-names lambda-bot-trading || \
+          aws ecr create-repository --repository-name lambda-bot-trading
+
+      - name: Authenticate Docker to ECR
+        run: |
+          aws ecr get-login-password | docker login \
+            --username AWS \
+            --password-stdin ${{ steps.aws-account.outputs.account_id }}.dkr.ecr.us-east-1.amazonaws.com
+
+      - name: Build Docker image
+        run: |
+          docker build -t lambda-bot-trading .
+
+      - name: Tag Docker image
+        run: |
+          docker tag lambda-bot-trading:latest \
+            ${{ steps.aws-account.outputs.account_id }}.dkr.ecr.us-east-1.amazonaws.com/lambda-bot-trading:latest
+
+      - name: Push Docker image to ECR
+        run: |
+          docker push ${{ steps.aws-account.outputs.account_id }}.dkr.ecr.us-east-1.amazonaws.com/lambda-bot-trading:latest
