@@ -24,7 +24,8 @@ RUN python3.13 -m ensurepip && \
 COPY requirements.txt .
 
 # Instala requirements en /package, forzando compilación de cffi
-RUN python3.13 -m pip install --no-binary=cffi -r requirements.txt -t /package
+RUN pip install --no-binary=cffi -r requirements.txt -t /package && \
+    pip install patterns -t /package
 
 # Confirma existencia de _cffi_backend.so
 RUN find /package -name "_cffi_backend*.so"
