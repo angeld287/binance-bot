@@ -2,3 +2,4 @@ ccxt
 numpy
 python-dotenv
 cffi
+patterns
