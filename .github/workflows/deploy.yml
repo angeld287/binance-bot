@@ -29,9 +29,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1 # tu región
 
-      - name: Update Lambda function code
+      - name: Upload ZIP to S3
+        run: |
+          aws s3 cp deployment.zip s3://lambda-functions-dev-serverlessdeploymentbucket-99mw0zqcfjsg/trading-bot.zip
+    
+      - name: Update Lambda function code from S3
         run: |
           aws lambda update-function-code \
             --function-name trading-bot-binance-64 \
-            --zip-file fileb://deployment.zip
+            --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-99mw0zqcfjsg \
+            --s3-key trading-bot.zip
 
