@@ -93,7 +93,7 @@ class FuturesBot:
     def _set_leverage(self):
         try:
             self.exchange.set_leverage(self.leverage, self.symbol)
-            log(f"Futuros: Apalancamiento establecido a {self.leverage}x")
+            log(f"🚀 FUTUROS - APALANCAMIENTO ESTABLECIDO EN {self.leverage}X 🚀")
         except Exception as e:
             log(f"Futuros: Error al establecer apalancamiento: {e}")
 
