@@ -4,7 +4,6 @@ import time
 import ccxt
 import json
 import logging
-import logging.handlers
 import math
 from dotenv import load_dotenv
 from pattern_detection import detect_patterns
@@ -53,29 +52,15 @@ def detectar_breakout(exchange, symbol):
 
 load_dotenv()
 
-# Configuración del logger con rotación diaria
-os.makedirs("logs", exist_ok=True)
-
+# Configuración del logger para AWS Lambda
 logger = logging.getLogger("bot")
 logger.setLevel(logging.INFO)
 
-handler = logging.handlers.TimedRotatingFileHandler(
-    "logs/bot.log",
-    when="midnight",
-    backupCount=7,
-    encoding="utf-8",
-    utc=True,
-)
-handler.suffix = "%Y-%m-%d"
-handler.namer = lambda name: name.replace(".log.", "_") + ".log"
-
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-handler.setFormatter(formatter)
 
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 
-logger.addHandler(handler)
 logger.addHandler(console_handler)
 
 
