@@ -1,7 +1,9 @@
 name: One-time Docker Build & Push to ECR
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   ecr-deploy:
