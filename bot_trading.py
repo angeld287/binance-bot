@@ -114,6 +114,63 @@ class FuturesBot:
     def tiene_orden_abierta(self):
         return bool(self.obtener_orden_abierta())
 
+    def verificar_y_configurar_tp_sl(self, tp_pct=0.02, sl_pct=0.01):
+        """Verifica y coloca las órdenes de TP y SL si no existen."""
+        pos = self.obtener_posicion_abierta()
+        if not pos:
+            return
+
+        try:
+            amt = float(pos.get("positionAmt", 0))
+            entry_price = float(pos.get("entryPrice", 0))
+        except Exception:
+            log("Futuros: Datos de posición no disponibles para configurar TP/SL")
+            return
+
+        side = "buy" if amt > 0 else "sell"
+        amount = abs(amt)
+        close_side = "sell" if side == "buy" else "buy"
+
+        tp_price = entry_price * (1 + tp_pct) if side == "buy" else entry_price * (1 - tp_pct)
+        sl_price = entry_price * (1 - sl_pct) if side == "buy" else entry_price * (1 + sl_pct)
+
+        try:
+            market_id = self.exchange.market_id(self.symbol)
+            open_orders = self.exchange.fapiPrivate_get_openOrders({"symbol": market_id})
+        except Exception:
+            try:
+                open_orders = self.exchange.fetch_open_orders(self.symbol)
+            except Exception as e:
+                log(f"Futuros: Error obteniendo órdenes abiertas: {e}")
+                open_orders = []
+
+        has_tp = False
+        has_sl = False
+        for o in open_orders:
+            o_type = (o.get("type") or o.get("info", {}).get("type", "")).upper()
+            o_side = o.get("side") or o.get("info", {}).get("side")
+            if o_side and o_side.lower() == close_side.lower():
+                if o_type == "LIMIT":
+                    has_tp = True
+                if "STOP" in o_type:
+                    has_sl = True
+
+        if not has_tp:
+            try:
+                params = {"reduceOnly": True, "timeInForce": "GTC"}
+                self.exchange.create_order(self.symbol, "LIMIT", close_side, amount, tp_price, params)
+                log(f"Futuros: Take Profit colocado en {tp_price}")
+            except Exception as e:
+                log(f"Futuros: Error al colocar TP: {e}")
+
+        if not has_sl:
+            try:
+                params = {"stopPrice": sl_price, "reduceOnly": True}
+                self.exchange.create_order(self.symbol, "STOP_MARKET", close_side, amount, None, params)
+                log(f"Futuros: Stop Loss colocado en {sl_price}")
+            except Exception as e:
+                log(f"Futuros: Error al colocar SL: {e}")
+
     def abrir_posicion(self, side, amount, price, price_range):
         """Abre una posición con una orden límite que permanece activa mientras el precio
         esté dentro del rango especificado."""
@@ -304,6 +361,7 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage):
     print(f"Precio actual de {symbol}: {price}")
 
     if bot.tiene_posicion_abierta():
+        bot.verificar_y_configurar_tp_sl()
         bot.evaluar_posicion()
     elif bot.tiene_orden_abierta():
         log("Orden pendiente detectada, esperando ejecución o cancelación.")
