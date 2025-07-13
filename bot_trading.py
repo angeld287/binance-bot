@@ -87,19 +87,30 @@ class FuturesBot:
     def obtener_posicion_abierta(self):
         """Devuelve la posición abierta actual o None si no hay."""
         try:
+            log(f"Tipo de cliente detectado: {type(self.exchange)}")
+
             pos = None
+
             # Soporte para ccxt
             if hasattr(self.exchange, "fapiPrivate_get_positionrisk"):
                 market_id = self.exchange.market_id(self.symbol)
                 info = self.exchange.fapiPrivate_get_positionrisk({"symbol": market_id})
                 pos = info[0] if isinstance(info, list) else info
+
             # Soporte para python-binance
             elif hasattr(self.exchange, "futures_position_information"):
                 symbol = self.symbol.replace("/", "")
                 info = self.exchange.futures_position_information(symbol=symbol)
                 pos = info[0] if isinstance(info, list) else info
+
+            # Algunos wrappers pueden exponer el cliente de python-binance en self.exchange.client
+            elif hasattr(self.exchange, "client") and hasattr(self.exchange.client, "futures_position_information"):
+                symbol = self.symbol.replace("/", "")
+                info = self.exchange.client.futures_position_information(symbol=symbol)
+                pos = info[0] if isinstance(info, list) else info
+
             else:
-                raise AttributeError("Método de posición no soportado")
+                raise AttributeError(f"Método de posición no soportado para el cliente: {type(self.exchange)}")
 
             if pos is None:
                 return None
