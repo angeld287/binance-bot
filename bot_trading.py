@@ -67,26 +67,13 @@ logger.addHandler(console_handler)
 def log(msg):
     logger.info(msg)
 
-def cargar_posicion(path):
-    if os.path.exists(path):
-        with open(path) as f:
-            return json.load(f)
-    return None
 
-def guardar_posicion(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-
-def eliminar_posicion(path):
-    if os.path.exists(path):
-        os.remove(path)
 
 class FuturesBot:
     def __init__(self, exchange, symbol, leverage=5):
         self.exchange = exchange
         self.symbol = symbol
         self.leverage = leverage
-        self.pos_file = "open_positions_futures.json"
         self.summary_file = "summary_futures.json"
         self._set_leverage()
 
@@ -96,6 +83,23 @@ class FuturesBot:
             log(f"🚀 FUTUROS - APALANCAMIENTO ESTABLECIDO EN {self.leverage}X 🚀")
         except Exception as e:
             log(f"Futuros: Error al establecer apalancamiento: {e}")
+
+    def obtener_posicion_abierta(self):
+        """Devuelve la posición abierta actual o None si no hay."""
+        try:
+            market_id = self.exchange.market_id(self.symbol)
+            info = self.exchange.fapiPrivate_get_positionrisk({"symbol": market_id})
+            # El endpoint puede devolver lista o dict
+            pos = info[0] if isinstance(info, list) else info
+            amt = float(pos.get("positionAmt", 0))
+            if amt != 0:
+                return pos
+        except Exception as e:
+            log(f"Futuros: Error consultando posición: {e}")
+        return None
+
+    def tiene_posicion_abierta(self):
+        return self.obtener_posicion_abierta() is not None
 
     def abrir_posicion(self, side, amount, price, price_range):
         """Abre una posición con una orden límite que permanece activa mientras el precio
@@ -116,16 +120,6 @@ class FuturesBot:
                     stop_loss = entry_price * 0.98 if side == "buy" else entry_price * 1.02
                     log(
                         f"Futuros: Posición {side} abierta a {entry_price} a las {open_time}"
-                    )
-                    guardar_posicion(
-                        self.pos_file,
-                        {
-                            "side": side,
-                            "amount": amount,
-                            "entry_price": entry_price,
-                            "open_time": open_time,
-                            "stop_loss": stop_loss,
-                        },
                     )
                     break
 
@@ -154,16 +148,16 @@ class FuturesBot:
 
     
     def cerrar_posicion(self):
-        pos = cargar_posicion(self.pos_file)
+        pos = self.obtener_posicion_abierta()
         if not pos:
             log("Futuros: No hay posición para cerrar")
-            eliminar_posicion(self.pos_file)
             return
 
         try:
-            side = pos.get("side")
-            amount = pos.get("amount", 0)
-            entry_price = pos.get("entry_price")
+            amt = float(pos.get("positionAmt", 0))
+            side = "buy" if amt > 0 else "sell"
+            amount = abs(amt)
+            entry_price = float(pos.get("entryPrice", 0))
 
             close_side = "sell" if side == "buy" else "buy"
             try:
@@ -189,18 +183,21 @@ class FuturesBot:
 
             if hasattr(self, "_actualizar_summary"):
                 try:
-                    self._actualizar_summary(pos, exit_price)
+                    data = {
+                        "entry_price": entry_price,
+                        "amount": amount,
+                        "side": side,
+                    }
+                    self._actualizar_summary(data, exit_price)
                 except Exception as e:
                     log(f"Futuros: Error actualizando summary: {e}")
         except Exception as e:
             log(f"Futuros: Error al cerrar posición: {e}")
-        finally:
-            eliminar_posicion(self.pos_file)
 
     def evaluar_posicion(self):
-        pos = cargar_posicion(self.pos_file)
+        pos = self.obtener_posicion_abierta()
         if not pos:
-            log(f"Futuros: Error al evaluar posición: no se pudo cargar la posicion")
+            log("Futuros: No hay posición abierta para evaluar")
             return
 
         try:
@@ -212,16 +209,12 @@ class FuturesBot:
                 ticker = self.exchange.fetch_ticker(self.symbol)
                 price = ticker["last"]
 
-            # Validación de claves esperadas
-            if not all(k in pos for k in ["entry_price", "side"]):
-                log(f"Futuros: Error al evaluar posición: claves faltantes en {pos}")
-                return
-
-            entry = pos["entry_price"]
-            side = pos["side"]
-            amount = pos.get("amount", 0)
+            entry = float(pos.get("entryPrice", 0))
+            amt = float(pos.get("positionAmt", 0))
+            side = "buy" if amt > 0 else "sell"
+            amount = abs(amt)
             tp = entry * 1.01 if side == "buy" else entry * 0.99
-            sl = pos.get("stop_loss", entry * 0.99 if side == "buy" else entry * 1.01)
+            sl = entry * 0.99 if side == "buy" else entry * 1.01
 
             if side == "buy":
                 if price >= tp:
@@ -293,8 +286,7 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage):
 
     print(f"Precio actual de {symbol}: {price}")
 
-    pos = cargar_posicion(bot.pos_file)
-    if pos:
+    if bot.tiene_posicion_abierta():
         bot.evaluar_posicion()
     else:
         side, level, patterns, rango = detectar_breakout(exchange, symbol)
