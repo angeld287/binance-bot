@@ -87,10 +87,22 @@ class FuturesBot:
     def obtener_posicion_abierta(self):
         """Devuelve la posición abierta actual o None si no hay."""
         try:
-            market_id = self.exchange.market_id(self.symbol)
-            info = self.exchange.fapiPrivate_get_positionrisk({"symbol": market_id})
-            # El endpoint puede devolver lista o dict
-            pos = info[0] if isinstance(info, list) else info
+            pos = None
+            # Soporte para ccxt
+            if hasattr(self.exchange, "fapiPrivate_get_positionrisk"):
+                market_id = self.exchange.market_id(self.symbol)
+                info = self.exchange.fapiPrivate_get_positionrisk({"symbol": market_id})
+                pos = info[0] if isinstance(info, list) else info
+            # Soporte para python-binance
+            elif hasattr(self.exchange, "futures_position_information"):
+                symbol = self.symbol.replace("/", "")
+                info = self.exchange.futures_position_information(symbol=symbol)
+                pos = info[0] if isinstance(info, list) else info
+            else:
+                raise AttributeError("Método de posición no soportado")
+
+            if pos is None:
+                return None
             amt = float(pos.get("positionAmt", 0))
             if amt != 0:
                 return pos
@@ -135,8 +147,17 @@ class FuturesBot:
         sl_price = entry_price * (1 - sl_pct) if side == "buy" else entry_price * (1 + sl_pct)
 
         try:
-            market_id = self.exchange.market_id(self.symbol)
-            open_orders = self.exchange.fapiPrivate_get_openOrders({"symbol": market_id})
+            if hasattr(self.exchange, "fapiPrivate_get_openOrders"):
+                market_id = self.exchange.market_id(self.symbol)
+                open_orders = self.exchange.fapiPrivate_get_openOrders({"symbol": market_id})
+            elif hasattr(self.exchange, "futures_get_open_orders"):
+                symbol = self.symbol.replace("/", "")
+                open_orders = self.exchange.futures_get_open_orders(symbol=symbol)
+            elif hasattr(self.exchange, "futures_open_orders"):
+                symbol = self.symbol.replace("/", "")
+                open_orders = self.exchange.futures_open_orders(symbol=symbol)
+            else:
+                open_orders = self.exchange.fetch_open_orders(self.symbol)
         except Exception:
             try:
                 open_orders = self.exchange.fetch_open_orders(self.symbol)
