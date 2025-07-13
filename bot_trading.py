@@ -101,6 +101,19 @@ class FuturesBot:
     def tiene_posicion_abierta(self):
         return self.obtener_posicion_abierta() is not None
 
+    def obtener_orden_abierta(self):
+        """Devuelve la primera orden abierta o None si no hay."""
+        try:
+            orders = self.exchange.fetch_open_orders(self.symbol)
+            if orders:
+                return orders[0]
+        except Exception as e:
+            log(f"Futuros: Error consultando orden abierta: {e}")
+        return None
+
+    def tiene_orden_abierta(self):
+        return bool(self.obtener_orden_abierta())
+
     def abrir_posicion(self, side, amount, price, price_range):
         """Abre una posición con una orden límite que permanece activa mientras el precio
         esté dentro del rango especificado."""
@@ -114,13 +127,17 @@ class FuturesBot:
             while True:
                 time.sleep(5)
                 info = self.exchange.fetch_order(order['id'], self.symbol)
-                if info.get('status') == 'closed':
+                status = info.get('status')
+                if status == 'closed':
                     entry_price = float(info.get('average') or info.get('price'))
                     open_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
                     stop_loss = entry_price * 0.98 if side == "buy" else entry_price * 1.02
                     log(
                         f"Futuros: Posición {side} abierta a {entry_price} a las {open_time}"
                     )
+                    break
+                if status == 'canceled':
+                    log("Futuros: Orden cancelada externamente")
                     break
 
                 ticker = self.exchange.fetch_ticker(self.symbol)
@@ -288,6 +305,8 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage):
 
     if bot.tiene_posicion_abierta():
         bot.evaluar_posicion()
+    elif bot.tiene_orden_abierta():
+        log("Orden pendiente detectada, esperando ejecución o cancelación.")
     else:
         side, level, patterns, rango = detectar_breakout(exchange, symbol)
         if side:
