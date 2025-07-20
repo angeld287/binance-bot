@@ -82,6 +82,7 @@ class FuturesBot:
         self.leverage = leverage
         self.summary_file = "summary_futures.json"
         self._set_leverage()
+        self._init_precisions()
 
     def _set_leverage(self):
         try:
@@ -91,12 +92,34 @@ class FuturesBot:
         except Exception as e:
             log(f"Futuros: Error al establecer apalancamiento: {e}")
 
+    def _init_precisions(self):
+        """Obtiene la precisión de cantidad y precio para el par"""
+        try:
+            info = self.exchange.futures_exchange_info()
+            sym = self.symbol.replace("/", "")
+            s_info = next((s for s in info.get("symbols", []) if s.get("symbol") == sym), {})
+            self.quantity_precision = s_info.get("quantityPrecision", 3)
+            self.price_precision = s_info.get("pricePrecision", 2)
+        except Exception as e:
+            log(f"Futuros: Error obteniendo precision: {e}")
+            self.quantity_precision = 3
+            self.price_precision = 2
+
+    def _fmt_qty(self, qty):
+        return float(f"{qty:.{self.quantity_precision}f}")
+
+    def _fmt_price(self, price):
+        return float(f"{price:.{self.price_precision}f}")
+
     def obtener_posicion_abierta(self):
         """Devuelve la posición abierta actual o None si no hay."""
         try:
             symbol = self.symbol.replace("/", "")
             info = self.exchange.futures_position_information(symbol=symbol)
-            pos = info[0] if isinstance(info, list) else info
+            if isinstance(info, list):
+                pos = info[0] if len(info) > 0 else None
+            else:
+                pos = info
 
             if pos is None:
                 return None
@@ -142,6 +165,9 @@ class FuturesBot:
 
         tp_price = entry_price * (1 + tp_pct) if side == "buy" else entry_price * (1 - tp_pct)
         sl_price = entry_price * (1 - sl_pct) if side == "buy" else entry_price * (1 + sl_pct)
+        amount_f = self._fmt_qty(amount)
+        tp_price_f = self._fmt_price(tp_price)
+        sl_price_f = self._fmt_price(sl_price)
 
         try:
             symbol = self.symbol.replace("/", "")
@@ -167,12 +193,12 @@ class FuturesBot:
                     symbol=self.symbol.replace("/", ""),
                     side=close_side.upper(),
                     type="LIMIT",
-                    quantity=amount,
-                    price=tp_price,
+                    quantity=amount_f,
+                    price=tp_price_f,
                     timeInForce="GTC",
                     reduceOnly="true",
                 )
-                log(f"Futuros: Take Profit colocado en {tp_price}")
+                log(f"Futuros: Take Profit colocado en {tp_price_f}")
             except Exception as e:
                 log(f"Futuros: Error al colocar TP: {e}")
 
@@ -182,11 +208,11 @@ class FuturesBot:
                     symbol=self.symbol.replace("/", ""),
                     side=close_side.upper(),
                     type="STOP_MARKET",
-                    quantity=amount,
-                    stopPrice=sl_price,
+                    quantity=amount_f,
+                    stopPrice=sl_price_f,
                     reduceOnly="true",
                 )
-                log(f"Futuros: Stop Loss colocado en {sl_price}")
+                log(f"Futuros: Stop Loss colocado en {sl_price_f}")
             except Exception as e:
                 log(f"Futuros: Error al colocar SL: {e}")
 
@@ -194,13 +220,15 @@ class FuturesBot:
         """Abre una posición con una orden límite que permanece activa mientras el precio
         esté dentro del rango especificado."""
         try:
-            log(f"Futuros: Orden límite {side} {amount} @ {price}")
+            qty = self._fmt_qty(amount)
+            price_f = self._fmt_price(price)
+            log(f"Futuros: Orden límite {side} {qty} @ {price_f}")
             order = self.exchange.futures_create_order(
                 symbol=self.symbol.replace("/", ""),
                 side=side.upper(),
                 type="LIMIT",
-                quantity=amount,
-                price=price,
+                quantity=qty,
+                price=price_f,
                 timeInForce="GTC",
             )
             log("Futuros: Orden límite creada y permanece activa")
@@ -266,12 +294,13 @@ class FuturesBot:
             entry_price = float(pos.get("entryPrice", 0))
 
             close_side = "sell" if side == "buy" else "buy"
+            qty = self._fmt_qty(amount)
             try:
                 self.exchange.futures_create_order(
                     symbol=self.symbol.replace("/", ""),
                     side=close_side.upper(),
                     type="MARKET",
-                    quantity=amount,
+                    quantity=qty,
                     reduceOnly="true",
                 )
             except Exception:
@@ -279,7 +308,7 @@ class FuturesBot:
                     symbol=self.symbol.replace("/", ""),
                     side=close_side.upper(),
                     type="MARKET",
-                    quantity=amount,
+                    quantity=qty,
                 )
 
             exit_price = float(
@@ -399,9 +428,11 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage):
     )
 
     price = float(ticker["price"])
-    decimals = symbol_info.get("quantityPrecision", 3)
+    decimals = symbol_info.get("quantityPrecision", bot.quantity_precision)
+    bot.quantity_precision = decimals
+    bot.price_precision = symbol_info.get("pricePrecision", bot.price_precision)
     amount = (110 * leverage) / price
-    amount = round(amount, decimals)
+    amount = bot._fmt_qty(amount)
 
     print(f"Precio actual de {symbol}: {price}")
 
@@ -414,6 +445,7 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage):
         side, level, patterns, rango = detectar_breakout(exchange, symbol)
         if side:
             order_price = level * 0.999 if side == "buy" else level * 1.001
+            order_price = bot._fmt_price(order_price)
             if patterns:
                 print(f"Patrones detectados: {', '.join(patterns)}")
             bot.abrir_posicion(side, amount, order_price, rango)
