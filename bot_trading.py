@@ -225,7 +225,7 @@ class FuturesBot:
                     log("Futuros: Orden cancelada externamente")
                     break
 
-                ticker = self.exchange.futures_ticker_price(symbol=self.symbol.replace("/", ""))
+                ticker = self.exchange.futures_symbol_ticker(symbol=self.symbol.replace("/", ""))
                 price_now = float(ticker['price'])
 
                 if side == 'buy' and rango_inf is not None and price_now < rango_inf:
@@ -283,7 +283,7 @@ class FuturesBot:
                 )
 
             exit_price = float(
-                self.exchange.futures_ticker_price(symbol=self.symbol.replace("/", ""))["price"]
+                self.exchange.futures_symbol_ticker(symbol=self.symbol.replace("/", ""))["price"]
             )
 
             profit = None
@@ -322,7 +322,7 @@ class FuturesBot:
                 info = self.exchange.futures_premium_index(symbol=self.symbol.replace("/", ""))
                 price = float(info["markPrice"])
             except Exception:
-                ticker = self.exchange.futures_ticker_price(symbol=self.symbol.replace("/", ""))
+                ticker = self.exchange.futures_symbol_ticker(symbol=self.symbol.replace("/", ""))
                 price = float(ticker["price"])
 
             entry = float(pos.get("entryPrice", 0))
@@ -391,7 +391,7 @@ class FuturesBot:
 
 
 def _run_iteration(exchange, bot, testnet, symbol, leverage):
-    ticker = exchange.futures_ticker_price(symbol=symbol.replace("/", ""))
+    ticker = exchange.futures_symbol_ticker(symbol=symbol.replace("/", ""))
     info = exchange.futures_exchange_info()
     symbol_info = next(
         (s for s in info["symbols"] if s["symbol"] == symbol.replace("/", "")),
