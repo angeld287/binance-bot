@@ -1,0 +1,57 @@
+name: Package and Deploy to Lambda using base image
+
+on:
+  push:
+    branches:
+      - dockerImage
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Get AWS Account ID
+        id: aws
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
+          echo "account_id=$ACCOUNT_ID" >> $GITHUB_OUTPUT
+
+      - name: Pull Docker image from ECR
+        run: |
+          aws ecr get-login-password | docker login --username AWS --password-stdin ${{ steps.aws.outputs.account_id }}.dkr.ecr.us-east-1.amazonaws.com
+          docker pull ${{ steps.aws.outputs.account_id }}.dkr.ecr.us-east-1.amazonaws.com/lambda-bot-trading:latest
+
+      - name: Create container and copy base package
+        run: |
+          docker create --name lambda-temp ${{ steps.aws.outputs.account_id }}.dkr.ecr.us-east-1.amazonaws.com/lambda-bot-trading:latest
+          docker cp lambda-temp:/package ./package
+          docker rm lambda-temp
+
+      - name: Inject latest source files into package
+        run: |
+          cp bot_trading.py ./package/
+          cp pattern_detection.py ./package/
+          # Si tienes más archivos, agrégalos aquí
+          cd package
+          zip -r ../deployment.zip .
+
+      - name: Upload ZIP to S3
+        run: |
+          aws s3 cp deployment.zip s3://lambda-functions-dev-serverlessdeploymentbucket-99mw0zqcfjsg/trading-bot.zip
+
+      - name: Update Lambda function from S3
+        run: |
+          aws lambda update-function-code \
+            --function-name trading-bot-binance-64 \
+            --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-99mw0zqcfjsg \
+            --s3-key trading-bot.zip
