@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import time
-import ccxt
+from binance.client import Client
 import json
 import logging
 import math
@@ -31,7 +31,13 @@ def detectar_breakout(exchange, symbol):
     """Busca rupturas de los últimos máximos o mínimos en 15m y 30m."""
     for tf in ["15m", "30m"]:
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=50)
+            klines = exchange.futures_klines(
+                symbol=symbol.replace("/", ""), interval=tf, limit=50
+            )
+            ohlcv = [
+                [k[0], float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])]
+                for k in klines
+            ]
             if len(ohlcv) < 20:
                 continue
             price = ohlcv[-1][4]
@@ -79,7 +85,8 @@ class FuturesBot:
 
     def _set_leverage(self):
         try:
-            self.exchange.set_leverage(self.leverage, self.symbol)
+            symbol = self.symbol.replace("/", "")
+            self.exchange.futures_change_leverage(symbol=symbol, leverage=self.leverage)
             log(f"🚀 FUTUROS - APALANCAMIENTO ESTABLECIDO EN {self.leverage}X 🚀")
         except Exception as e:
             log(f"Futuros: Error al establecer apalancamiento: {e}")
@@ -87,30 +94,9 @@ class FuturesBot:
     def obtener_posicion_abierta(self):
         """Devuelve la posición abierta actual o None si no hay."""
         try:
-            log(f"Tipo de cliente detectado: {type(self.exchange)}")
-
-            pos = None
-
-            # Soporte para ccxt
-            if hasattr(self.exchange, "fapiPrivate_get_positionrisk"):
-                market_id = self.exchange.market_id(self.symbol)
-                info = self.exchange.fapiPrivate_get_positionrisk({"symbol": market_id})
-                pos = info[0] if isinstance(info, list) else info
-
-            # Soporte para python-binance
-            elif hasattr(self.exchange, "futures_position_information"):
-                symbol = self.symbol.replace("/", "")
-                info = self.exchange.futures_position_information(symbol=symbol)
-                pos = info[0] if isinstance(info, list) else info
-
-            # Algunos wrappers pueden exponer el cliente de python-binance en self.exchange.client
-            elif hasattr(self.exchange, "client") and hasattr(self.exchange.client, "futures_position_information"):
-                symbol = self.symbol.replace("/", "")
-                info = self.exchange.client.futures_position_information(symbol=symbol)
-                pos = info[0] if isinstance(info, list) else info
-
-            else:
-                raise AttributeError(f"Método de posición no soportado para el cliente: {type(self.exchange)}")
+            symbol = self.symbol.replace("/", "")
+            info = self.exchange.futures_position_information(symbol=symbol)
+            pos = info[0] if isinstance(info, list) else info
 
             if pos is None:
                 return None
@@ -127,7 +113,7 @@ class FuturesBot:
     def obtener_orden_abierta(self):
         """Devuelve la primera orden abierta o None si no hay."""
         try:
-            orders = self.exchange.fetch_open_orders(self.symbol)
+            orders = self.exchange.futures_get_open_orders(symbol=self.symbol.replace("/", ""))
             if orders:
                 return orders[0]
         except Exception as e:
@@ -158,23 +144,11 @@ class FuturesBot:
         sl_price = entry_price * (1 - sl_pct) if side == "buy" else entry_price * (1 + sl_pct)
 
         try:
-            if hasattr(self.exchange, "fapiPrivate_get_openOrders"):
-                market_id = self.exchange.market_id(self.symbol)
-                open_orders = self.exchange.fapiPrivate_get_openOrders({"symbol": market_id})
-            elif hasattr(self.exchange, "futures_get_open_orders"):
-                symbol = self.symbol.replace("/", "")
-                open_orders = self.exchange.futures_get_open_orders(symbol=symbol)
-            elif hasattr(self.exchange, "futures_open_orders"):
-                symbol = self.symbol.replace("/", "")
-                open_orders = self.exchange.futures_open_orders(symbol=symbol)
-            else:
-                open_orders = self.exchange.fetch_open_orders(self.symbol)
-        except Exception:
-            try:
-                open_orders = self.exchange.fetch_open_orders(self.symbol)
-            except Exception as e:
-                log(f"Futuros: Error obteniendo órdenes abiertas: {e}")
-                open_orders = []
+            symbol = self.symbol.replace("/", "")
+            open_orders = self.exchange.futures_get_open_orders(symbol=symbol)
+        except Exception as e:
+            log(f"Futuros: Error obteniendo órdenes abiertas: {e}")
+            open_orders = []
 
         has_tp = False
         has_sl = False
@@ -189,16 +163,29 @@ class FuturesBot:
 
         if not has_tp:
             try:
-                params = {"reduceOnly": True, "timeInForce": "GTC"}
-                self.exchange.create_order(self.symbol, "LIMIT", close_side, amount, tp_price, params)
+                self.exchange.futures_create_order(
+                    symbol=self.symbol.replace("/", ""),
+                    side=close_side.upper(),
+                    type="LIMIT",
+                    quantity=amount,
+                    price=tp_price,
+                    timeInForce="GTC",
+                    reduceOnly="true",
+                )
                 log(f"Futuros: Take Profit colocado en {tp_price}")
             except Exception as e:
                 log(f"Futuros: Error al colocar TP: {e}")
 
         if not has_sl:
             try:
-                params = {"stopPrice": sl_price, "reduceOnly": True}
-                self.exchange.create_order(self.symbol, "STOP_MARKET", close_side, amount, None, params)
+                self.exchange.futures_create_order(
+                    symbol=self.symbol.replace("/", ""),
+                    side=close_side.upper(),
+                    type="STOP_MARKET",
+                    quantity=amount,
+                    stopPrice=sl_price,
+                    reduceOnly="true",
+                )
                 log(f"Futuros: Stop Loss colocado en {sl_price}")
             except Exception as e:
                 log(f"Futuros: Error al colocar SL: {e}")
@@ -208,17 +195,26 @@ class FuturesBot:
         esté dentro del rango especificado."""
         try:
             log(f"Futuros: Orden límite {side} {amount} @ {price}")
-            order = self.exchange.create_limit_order(self.symbol, side, amount, price)
+            order = self.exchange.futures_create_order(
+                symbol=self.symbol.replace("/", ""),
+                side=side.upper(),
+                type="LIMIT",
+                quantity=amount,
+                price=price,
+                timeInForce="GTC",
+            )
             log("Futuros: Orden límite creada y permanece activa")
 
             rango_inf, rango_sup = price_range
 
             while True:
                 time.sleep(5)
-                info = self.exchange.fetch_order(order['id'], self.symbol)
-                status = info.get('status')
+                info = self.exchange.futures_get_order(
+                    symbol=self.symbol.replace("/", ""), orderId=order["orderId"]
+                )
+                status = info.get("status", "").lower()
                 if status == 'closed':
-                    entry_price = float(info.get('average') or info.get('price'))
+                    entry_price = float(info.get('avgPrice') or info.get('price', 0))
                     open_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
                     stop_loss = entry_price * 0.98 if side == "buy" else entry_price * 1.02
                     log(
@@ -229,15 +225,19 @@ class FuturesBot:
                     log("Futuros: Orden cancelada externamente")
                     break
 
-                ticker = self.exchange.fetch_ticker(self.symbol)
-                price_now = ticker['last']
+                ticker = self.exchange.futures_symbol_ticker(
+                    symbol=self.symbol.replace("/", "")
+                )
+                price_now = float(ticker['price'])
 
                 if side == 'buy' and rango_inf is not None and price_now < rango_inf:
                     log(
                         f"Futuros: Precio {price_now} fuera del rango de análisis. Cancelando orden límite"
                     )
                     try:
-                        self.exchange.cancel_order(order['id'], self.symbol)
+                        self.exchange.futures_cancel_order(
+                            symbol=self.symbol.replace("/", ""), orderId=order["orderId"]
+                        )
                     finally:
                         break
                 if side == 'sell' and rango_sup is not None and price_now > rango_sup:
@@ -245,7 +245,9 @@ class FuturesBot:
                         f"Futuros: Precio {price_now} fuera del rango de análisis. Cancelando orden límite"
                     )
                     try:
-                        self.exchange.cancel_order(order['id'], self.symbol)
+                        self.exchange.futures_cancel_order(
+                            symbol=self.symbol.replace("/", ""), orderId=order["orderId"]
+                        )
                     finally:
                         break
 
@@ -267,13 +269,26 @@ class FuturesBot:
 
             close_side = "sell" if side == "buy" else "buy"
             try:
-                self.exchange.create_market_order(
-                    self.symbol, close_side, amount, {"reduceOnly": True}
+                self.exchange.futures_create_order(
+                    symbol=self.symbol.replace("/", ""),
+                    side=close_side.upper(),
+                    type="MARKET",
+                    quantity=amount,
+                    reduceOnly="true",
                 )
             except Exception:
-                self.exchange.create_market_order(self.symbol, close_side, amount)
+                self.exchange.futures_create_order(
+                    symbol=self.symbol.replace("/", ""),
+                    side=close_side.upper(),
+                    type="MARKET",
+                    quantity=amount,
+                )
 
-            exit_price = self.exchange.fetch_ticker(self.symbol)["last"]
+            exit_price = float(
+                self.exchange.futures_symbol_ticker(
+                    symbol=self.symbol.replace("/", "")
+                )["price"]
+            )
 
             profit = None
             if side and entry_price is not None:
@@ -308,12 +323,13 @@ class FuturesBot:
 
         try:
             try:
-                market_id = self.exchange.market_id(self.symbol)
-                info = self.exchange.fapiPublic_get_premiumIndex({"symbol": market_id})
+                info = self.exchange.futures_premium_index(symbol=self.symbol.replace("/", ""))
                 price = float(info["markPrice"])
             except Exception:
-                ticker = self.exchange.fetch_ticker(self.symbol)
-                price = ticker["last"]
+                ticker = self.exchange.futures_symbol_ticker(
+                    symbol=self.symbol.replace("/", "")
+                )
+                price = float(ticker["price"])
 
             entry = float(pos.get("entryPrice", 0))
             amt = float(pos.get("positionAmt", 0))
@@ -381,12 +397,15 @@ class FuturesBot:
 
 
 def _run_iteration(exchange, bot, testnet, symbol, leverage):
-    ticker = exchange.fetch_ticker(symbol)
-    markets = exchange.load_markets()
+    ticker = exchange.futures_symbol_ticker(symbol=symbol.replace("/", ""))
+    info = exchange.futures_exchange_info()
+    symbol_info = next(
+        (s for s in info["symbols"] if s["symbol"] == symbol.replace("/", "")),
+        {},
+    )
 
-    price = ticker["last"]
-    precision = markets[symbol]["precision"]["amount"]
-    decimals = abs(int(round(math.log10(precision))))
+    price = float(ticker["price"])
+    decimals = symbol_info.get("quantityPrecision", 3)
     amount = (110 * leverage) / price
     amount = round(amount, decimals)
 
@@ -424,17 +443,8 @@ def handler(event, context):
     symbol = "BTC/USDT"
     leverage = 5
 
-    exchange = ccxt.binance(
-        {
-            "apiKey": key,
-            "secret": secret,
-            "enableRateLimit": True,
-            "options": {"defaultType": "future"},
-        }
-    )
-
+    exchange = Client(key, secret, testnet=testnet)
     if testnet:
-        exchange.set_sandbox_mode(True)
         print("Modo TESTNET activado")
 
     bot = FuturesBot(exchange, symbol, leverage=leverage)
