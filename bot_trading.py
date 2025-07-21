@@ -81,6 +81,8 @@ class FuturesBot:
         self.symbol = symbol
         self.leverage = leverage
         self.summary_file = "summary_futures.json"
+        self.sl_order_id = None
+        self.tp_order_id = None
         self._set_leverage()
         self._init_precisions()
 
@@ -184,12 +186,14 @@ class FuturesBot:
             if o_side and o_side.lower() == close_side.lower():
                 if o_type == "LIMIT":
                     has_tp = True
+                    self.tp_order_id = o.get("orderId")
                 if "STOP" in o_type:
                     has_sl = True
+                    self.sl_order_id = o.get("orderId")
 
         if not has_tp:
             try:
-                self.exchange.futures_create_order(
+                order = self.exchange.futures_create_order(
                     symbol=self.symbol.replace("/", ""),
                     side=close_side.upper(),
                     type="LIMIT",
@@ -198,13 +202,14 @@ class FuturesBot:
                     timeInForce="GTC",
                     reduceOnly="true",
                 )
+                self.tp_order_id = order.get("orderId")
                 log(f"Futuros: Take Profit colocado en {tp_price_f}")
             except Exception as e:
                 log(f"Futuros: Error al colocar TP: {e}")
 
         if not has_sl:
             try:
-                self.exchange.futures_create_order(
+                order = self.exchange.futures_create_order(
                     symbol=self.symbol.replace("/", ""),
                     side=close_side.upper(),
                     type="STOP_MARKET",
@@ -212,6 +217,7 @@ class FuturesBot:
                     stopPrice=sl_price_f,
                     reduceOnly="true",
                 )
+                self.sl_order_id = order.get("orderId")
                 log(f"Futuros: Stop Loss colocado en {sl_price_f}")
             except Exception as e:
                 log(f"Futuros: Error al colocar SL: {e}")
@@ -280,6 +286,33 @@ class FuturesBot:
         except Exception as e:
             log(f"Futuros: Error al abrir posición: {e}")
 
+    def cancelar_ordenes_tp_sl(self):
+        """Cancela las órdenes de TP y SL registradas y cualquier orden reduceOnly restante."""
+        symbol = self.symbol.replace("/", "")
+
+        for attr in ["tp_order_id", "sl_order_id"]:
+            oid = getattr(self, attr)
+            if oid:
+                try:
+                    self.exchange.futures_cancel_order(symbol=symbol, orderId=oid)
+                    log(f"Futuros: Orden {oid} cancelada")
+                except Exception as e:
+                    log(f"Futuros: Error cancelando orden {oid}: {e}")
+                finally:
+                    setattr(self, attr, None)
+
+        try:
+            open_orders = self.exchange.futures_get_open_orders(symbol=symbol)
+            for o in open_orders:
+                if str(o.get("reduceOnly", "")).lower() == "true":
+                    try:
+                        self.exchange.futures_cancel_order(symbol=symbol, orderId=o["orderId"])
+                        log(f"Futuros: Orden pendiente {o['orderId']} cancelada")
+                    except Exception:
+                        pass
+        except Exception as e:
+            log(f"Futuros: Error cancelando órdenes pendientes: {e}")
+
     
     def cerrar_posicion(self):
         pos = self.obtener_posicion_abierta()
@@ -337,6 +370,8 @@ class FuturesBot:
                     self._actualizar_summary(data, exit_price)
                 except Exception as e:
                     log(f"Futuros: Error actualizando summary: {e}")
+
+            self.cancelar_ordenes_tp_sl()
         except Exception as e:
             log(f"Futuros: Error al cerrar posición: {e}")
 
