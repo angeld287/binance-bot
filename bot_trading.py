@@ -74,6 +74,21 @@ def log(msg):
     logger.info(msg)
 
 
+# Configuraciones personalizadas por par de trading
+config_por_moneda = {
+    "BTC/USDT": {
+        "apalancamiento": 5,
+        "atr_factor": 1.2,
+    },
+    "DOGE/USDT": {
+        "apalancamiento": 2,
+        "atr_factor": 2.0,
+        "stop_loss_pct": 0.03,
+        "take_profit_pct": 0.05,
+    },
+}
+
+
 
 class FuturesBot:
     def __init__(self, exchange, symbol, leverage=5):
@@ -86,8 +101,19 @@ class FuturesBot:
         self._set_leverage()
         self._init_precisions()
 
+    def _symbol_config(self):
+        cfg = config_por_moneda.get(self.symbol, {})
+        return {
+            "apalancamiento": int(cfg.get("apalancamiento", 3)),
+            "atr_factor": float(cfg.get("atr_factor", 1.5)),
+            "stop_loss_pct": float(cfg.get("stop_loss_pct", 0.015)),
+            "take_profit_pct": float(cfg.get("take_profit_pct", 0.02)),
+        }
+
     def _set_leverage(self):
         try:
+            cfg = self._symbol_config()
+            self.leverage = cfg["apalancamiento"]
             symbol = self.symbol.replace("/", "")
             self.exchange.futures_change_leverage(symbol=symbol, leverage=self.leverage)
             log(f"🚀 FUTUROS - APALANCAMIENTO ESTABLECIDO EN {self.leverage}X 🚀")
@@ -148,8 +174,16 @@ class FuturesBot:
     def tiene_orden_abierta(self):
         return bool(self.obtener_orden_abierta())
 
-    def verificar_y_configurar_tp_sl(self, tp_pct=0.02, sl_pct=0.01):
+    def verificar_y_configurar_tp_sl(self, tp_pct=None, sl_pct=None):
         """Verifica y coloca las órdenes de TP y SL si no existen."""
+        cfg = self._symbol_config()
+        atr_factor = cfg["atr_factor"]
+        if tp_pct is None:
+            tp_pct = cfg["take_profit_pct"]
+        if sl_pct is None:
+            sl_pct = cfg["stop_loss_pct"]
+        tp_pct *= atr_factor
+        sl_pct *= atr_factor
         pos = self.obtener_posicion_abierta()
         if not pos:
             return
@@ -454,7 +488,7 @@ class FuturesBot:
             log(f"Futuros: Error actualizando summary: {e}")
 
 
-def _run_iteration(exchange, bot, testnet, symbol, leverage):
+def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
     ticker = exchange.futures_symbol_ticker(symbol=symbol.replace("/", ""))
     info = exchange.futures_exchange_info()
     symbol_info = next(
@@ -466,7 +500,8 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage):
     decimals = symbol_info.get("quantityPrecision", bot.quantity_precision)
     bot.quantity_precision = decimals
     bot.price_precision = symbol_info.get("pricePrecision", bot.price_precision)
-    amount = (110 * leverage) / price
+    lev = leverage if leverage is not None else bot.leverage
+    amount = (110 * lev) / price
     amount = bot._fmt_qty(amount)
 
     print(f"Precio actual de {symbol}: {price}")
@@ -486,7 +521,7 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage):
             bot.abrir_posicion(side, amount, order_price, rango)
         else:
             if testnet:
-                print(f"TESTNET activo - Sin breakout - Apalancamiento: {leverage}x")
+                print(f"TESTNET activo - Sin breakout - Apalancamiento: {lev}x")
             else:
                 print("Sin breakout identificado")
 
@@ -510,7 +545,7 @@ def handler(event, context):
 
     bot = FuturesBot(exchange, symbol, leverage=leverage)
 
-    price = _run_iteration(exchange, bot, testnet, symbol, leverage)
+    price = _run_iteration(exchange, bot, testnet, symbol)
 
     return {
         "statusCode": 200,
