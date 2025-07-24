@@ -536,7 +536,7 @@ def handler(event, context):
     secret = os.getenv("BINANCE_API_SECRET")
     testnet = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
 
-    symbol = "BTC/USDT"
+    symbol = os.getenv("SYMBOL", "BTC/USDT")
     leverage = 5
 
     exchange = Client(key, secret, testnet=testnet)
