@@ -504,7 +504,8 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
     amount = (110 * lev) / price
     amount = bot._fmt_qty(amount)
 
-    print(f"Precio actual de {symbol}: {price}")
+    env_name = os.getenv("ENVIRONMENT") or ("TESTNET" if testnet else "PROD")
+    log(f"Entorno: {env_name} | Par: {symbol} | Precio actual: {price}")
 
     if bot.tiene_posicion_abierta():
         bot.verificar_y_configurar_tp_sl()
