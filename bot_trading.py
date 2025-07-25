@@ -9,6 +9,36 @@ from dotenv import load_dotenv
 from pattern_detection import detect_patterns
 
 
+def get_proxies():
+    """Devuelve diccionario de proxies o None si no se usa proxy."""
+    testnet = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
+    proxy = os.getenv("PROXY_URL")
+    if not testnet and proxy:
+        return {"http": proxy, "https": proxy}
+    return None
+
+
+class LoggingClient:
+    """Envuelve un Client para registrar cada request."""
+
+    def __init__(self, client, testnet):
+        self._client = client
+        self.testnet = testnet
+
+    def __getattr__(self, name):
+        attr = getattr(self._client, name)
+        if callable(attr):
+            def wrapper(*args, **kwargs):
+                proxies = get_proxies()
+                env = "testnet" if self.testnet else "producción"
+                proxy_msg = "sí" if proxies else "no"
+                log(f"Llamada {name} | entorno: {env} | usando proxy: {proxy_msg}")
+                return attr(*args, **kwargs)
+
+            return wrapper
+        return attr
+
+
 def _last_swing_high(ohlcv, window=3):
     highs = [c[2] for c in ohlcv]
     for i in range(len(highs) - window - 1, window, -1):
@@ -540,7 +570,10 @@ def handler(event, context):
     symbol = os.getenv("SYMBOL", "BTC/USDT")
     leverage = 5
 
-    exchange = Client(key, secret, testnet=testnet)
+    proxies = get_proxies()
+    req_params = {"proxies": proxies} if proxies else None
+    client = Client(key, secret, testnet=testnet, requests_params=req_params)
+    exchange = LoggingClient(client, testnet)
     if testnet:
         print("Modo TESTNET activado")
 
