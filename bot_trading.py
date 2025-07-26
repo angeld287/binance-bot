@@ -18,6 +18,22 @@ def get_proxies():
     return None
 
 
+def ajustar_precio(precio, tick_size):
+    """Redondea el precio hacia abajo respetando el tick size."""
+    try:
+        decimales = 0
+        if isinstance(tick_size, float) or isinstance(tick_size, int):
+            tick_str = f"{tick_size}"
+        else:
+            tick_str = str(tick_size)
+        if "." in tick_str:
+            decimales = len(tick_str.rstrip("0").split(".")[1])
+        base = math.floor(float(precio) / float(tick_size)) * float(tick_size)
+        return float(f"{base:.{decimales}f}")
+    except Exception:
+        return precio
+
+
 class LoggingClient:
     """Envuelve un Client para registrar cada request."""
 
@@ -128,6 +144,7 @@ class FuturesBot:
         self.summary_file = "summary_futures.json"
         self.sl_order_id = None
         self.tp_order_id = None
+        self.tick_size = None
         self._set_leverage()
         self._init_precisions()
 
@@ -158,15 +175,28 @@ class FuturesBot:
             s_info = next((s for s in info.get("symbols", []) if s.get("symbol") == sym), {})
             self.quantity_precision = s_info.get("quantityPrecision", 3)
             self.price_precision = s_info.get("pricePrecision", 2)
+
+            if sym == "DOGEUSDT":
+                filters = s_info.get("filters", [])
+                price_filter = next((f for f in filters if f.get("filterType") == "PRICE_FILTER"), {})
+                tick = price_filter.get("tickSize")
+                if tick is not None:
+                    try:
+                        self.tick_size = float(tick)
+                    except Exception:
+                        self.tick_size = None
         except Exception as e:
             log(f"Futuros: Error obteniendo precision: {e}")
             self.quantity_precision = 3
             self.price_precision = 2
+            self.tick_size = None
 
     def _fmt_qty(self, qty):
         return float(f"{qty:.{self.quantity_precision}f}")
 
     def _fmt_price(self, price):
+        if self.symbol.replace("/", "") == "DOGEUSDT" and self.tick_size:
+            price = ajustar_precio(price, self.tick_size)
         return float(f"{price:.{self.price_precision}f}")
 
     def obtener_posicion_abierta(self):
