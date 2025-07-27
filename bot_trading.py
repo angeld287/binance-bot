@@ -191,13 +191,6 @@ class FuturesBot:
                 tick_size = float(price_filter.get("tickSize", 0))
             expected_tick = 1 / (10 ** s_info.get("pricePrecision", 6))
 
-            # Debug logs
-            log(f"Expected tick: {expected_tick}")
-            log(f"Actual tick_size: {tick_size}")
-            log(f"tick_size is None: {tick_size is None}")
-            log(f"tick_size <= 0: {tick_size <= 0}")
-            log(f"tick_size mismatch: {not math.isclose(tick_size, expected_tick, rel_tol=0.001)}")
-
             # Validación
             if not tick_size or tick_size <= 0 or not math.isclose(
                 tick_size, expected_tick, rel_tol=0.001
