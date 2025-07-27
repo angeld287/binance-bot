@@ -172,19 +172,34 @@ class FuturesBot:
         try:
             info = self.exchange.futures_exchange_info()
             sym = self.symbol.replace("/", "")
-            s_info = next((s for s in info.get("symbols", []) if s.get("symbol") == sym), {})
+            s_info = next(
+                (s for s in info.get("symbols", []) if s.get("symbol") == sym),
+                {},
+            )
             self.quantity_precision = s_info.get("quantityPrecision", 3)
             self.price_precision = s_info.get("pricePrecision", 2)
 
-            if sym == "DOGEUSDT":
-                filters = s_info.get("filters", [])
-                price_filter = next((f for f in filters if f.get("filterType") == "PRICE_FILTER"), {})
-                tick = price_filter.get("tickSize")
-                if tick is not None:
-                    try:
-                        self.tick_size = float(tick)
-                    except Exception:
-                        self.tick_size = None
+            filters = s_info.get("filters", [])
+            price_filter = next(
+                (f for f in filters if f.get("filterType") == "PRICE_FILTER"),
+                {},
+            )
+            tick = price_filter.get("tickSize")
+            if tick is not None:
+                try:
+                    self.tick_size = float(tick)
+                except Exception:
+                    self.tick_size = None
+
+            expected_tick = 10 ** (-self.price_precision)
+            if not self.tick_size or self.tick_size <= 0 or not math.isclose(
+                self.tick_size, expected_tick, rel_tol=0.001
+            ):
+                log(
+                    f"Advertencia: tick_size {self.tick_size} inválido para {self.symbol}. "
+                    f"Se ajusta a {expected_tick}"
+                )
+                self.tick_size = expected_tick
         except Exception as e:
             log(f"Futuros: Error obteniendo precision: {e}")
             self.quantity_precision = 3
@@ -198,7 +213,15 @@ class FuturesBot:
         try:
             if price is None or float(price) <= 0:
                 return price
-            if self.symbol.replace("/", "") == "DOGEUSDT" and self.tick_size:
+            if self.tick_size:
+                if float(price) < self.tick_size:
+                    log(
+                        f"Advertencia: precio {price} menor que tick_size {self.tick_size}"
+                    )
+                    log(
+                        f"Diagnóstico: tick_size {self.tick_size} es mayor que el precio {price} antes de ajustar"
+                    )
+                    return None
                 price = ajustar_precio(price, self.tick_size)
             return float(f"{float(price):.{self.price_precision}f}")
         except Exception:
