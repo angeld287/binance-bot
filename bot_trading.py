@@ -195,9 +195,14 @@ class FuturesBot:
         return float(f"{qty:.{self.quantity_precision}f}")
 
     def _fmt_price(self, price):
-        if self.symbol.replace("/", "") == "DOGEUSDT" and self.tick_size:
-            price = ajustar_precio(price, self.tick_size)
-        return float(f"{price:.{self.price_precision}f}")
+        try:
+            if price is None or float(price) <= 0:
+                return price
+            if self.symbol.replace("/", "") == "DOGEUSDT" and self.tick_size:
+                price = ajustar_precio(price, self.tick_size)
+            return float(f"{float(price):.{self.price_precision}f}")
+        except Exception:
+            return price
 
     def obtener_posicion_abierta(self):
         """Devuelve la posición abierta actual o None si no hay."""
@@ -286,42 +291,54 @@ class FuturesBot:
                     self.sl_order_id = o.get("orderId")
 
         if not has_tp:
-            try:
-                order = self.exchange.futures_create_order(
-                    symbol=self.symbol.replace("/", ""),
-                    side=close_side.upper(),
-                    type="LIMIT",
-                    quantity=amount_f,
-                    price=tp_price_f,
-                    timeInForce="GTC",
-                    reduceOnly="true",
-                )
-                self.tp_order_id = order.get("orderId")
-                log(f"Futuros: Take Profit colocado en {tp_price_f}")
-            except Exception as e:
-                log(f"Futuros: Error al colocar TP: {e}")
+            if tp_price_f is None or tp_price_f <= 0:
+                log(f"Futuros: Precio de TP inválido {tp_price_f}. Orden no enviada")
+            else:
+                try:
+                    order = self.exchange.futures_create_order(
+                        symbol=self.symbol.replace("/", ""),
+                        side=close_side.upper(),
+                        type="LIMIT",
+                        quantity=amount_f,
+                        price=tp_price_f,
+                        timeInForce="GTC",
+                        reduceOnly="true",
+                    )
+                    self.tp_order_id = order.get("orderId")
+                    log(f"Futuros: Take Profit colocado en {tp_price_f}")
+                except Exception as e:
+                    log(f"Futuros: Error al colocar TP: {e}")
 
         if not has_sl:
-            try:
-                order = self.exchange.futures_create_order(
-                    symbol=self.symbol.replace("/", ""),
-                    side=close_side.upper(),
-                    type="STOP_MARKET",
-                    quantity=amount_f,
-                    stopPrice=sl_price_f,
-                    reduceOnly="true",
-                )
-                self.sl_order_id = order.get("orderId")
-                log(f"Futuros: Stop Loss colocado en {sl_price_f}")
-            except Exception as e:
-                log(f"Futuros: Error al colocar SL: {e}")
+            if sl_price_f is None or sl_price_f <= 0:
+                log(f"Futuros: Precio de SL inválido {sl_price_f}. Orden no enviada")
+            else:
+                try:
+                    order = self.exchange.futures_create_order(
+                        symbol=self.symbol.replace("/", ""),
+                        side=close_side.upper(),
+                        type="STOP_MARKET",
+                        quantity=amount_f,
+                        stopPrice=sl_price_f,
+                        reduceOnly="true",
+                    )
+                    self.sl_order_id = order.get("orderId")
+                    log(f"Futuros: Stop Loss colocado en {sl_price_f}")
+                except Exception as e:
+                    log(f"Futuros: Error al colocar SL: {e}")
 
     def abrir_posicion(self, side, amount, price, price_range):
         """Abre una posición con una orden límite que permanece activa mientras el precio
         esté dentro del rango especificado."""
         try:
+            if price is None or price <= 0:
+                log(f"Futuros: Precio inválido {price}. Orden no enviada")
+                return
             qty = self._fmt_qty(amount)
             price_f = self._fmt_price(price)
+            if price_f is None or price_f <= 0:
+                log(f"Futuros: Precio inválido {price_f}. Orden no enviada")
+                return
             log(f"Futuros: Orden límite {side} {qty} @ {price_f}")
             order = self.exchange.futures_create_order(
                 symbol=self.symbol.replace("/", ""),
@@ -576,10 +593,13 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
         side, level, patterns, rango = detectar_breakout(exchange, symbol)
         if side:
             order_price = level * 0.999 if side == "buy" else level * 1.001
-            order_price = bot._fmt_price(order_price)
-            if patterns:
-                print(f"Patrones detectados: {', '.join(patterns)}")
-            bot.abrir_posicion(side, amount, order_price, rango)
+            if order_price is None or order_price <= 0:
+                log(f"Futuros: Precio calculado inválido {order_price}. Orden no enviada")
+            else:
+                order_price = bot._fmt_price(order_price)
+                if patterns:
+                    print(f"Patrones detectados: {', '.join(patterns)}")
+                bot.abrir_posicion(side, amount, order_price, rango)
         else:
             if testnet:
                 print(f"TESTNET activo - Sin breakout - Apalancamiento: {lev}x")
