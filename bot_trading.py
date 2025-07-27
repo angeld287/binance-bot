@@ -184,7 +184,11 @@ class FuturesBot:
                 (f for f in filters if f.get("filterType") == "PRICE_FILTER"),
                 {},
             )
-            tick_size = float(price_filter.get("tickSize", 0))
+            symbol = sym
+            if symbol.upper() == "DOGEUSDT":
+                tick_size = 1e-06
+            else:
+                tick_size = float(price_filter.get("tickSize", 0))
             expected_tick = 1 / (10 ** s_info.get("pricePrecision", 6))
 
             # Debug logs
@@ -614,7 +618,10 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
     for f in symbol_info.get("filters", []):
         if f.get("filterType") == "PRICE_FILTER":
             try:
-                bot.tick_size = float(f.get("tickSize"))
+                if symbol.upper() == "DOGEUSDT":
+                    bot.tick_size = 1e-06
+                else:
+                    bot.tick_size = float(f.get("tickSize"))
             except Exception:
                 bot.tick_size = None
             break
