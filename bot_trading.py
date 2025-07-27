@@ -21,6 +21,9 @@ def get_proxies():
 def ajustar_precio(precio, tick_size):
     """Redondea el precio hacia abajo respetando el tick size."""
     try:
+        log(f"[DEBUG] Precio recibido para formatear: {precio}")
+        log(f"[DEBUG] Tick size usado: {tick_size}")
+
         decimales = 0
         if isinstance(tick_size, float) or isinstance(tick_size, int):
             tick_str = f"{tick_size}"
@@ -28,8 +31,15 @@ def ajustar_precio(precio, tick_size):
             tick_str = str(tick_size)
         if "." in tick_str:
             decimales = len(tick_str.rstrip("0").split(".")[1])
-        base = math.floor(float(precio) / float(tick_size)) * float(tick_size)
-        return float(f"{base:.{decimales}f}")
+
+        resultado = float(precio) / float(tick_size)
+        log(f"[DEBUG] Resultado de precio / tick_size: {resultado}")
+
+        base = math.floor(resultado) * float(tick_size)
+        precio_formateado = float(f"{base:.{decimales}f}")
+        log(f"[DEBUG] Precio ajustado: {precio_formateado}")
+
+        return precio_formateado
     except Exception:
         return precio
 
