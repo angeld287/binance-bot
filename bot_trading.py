@@ -18,28 +18,19 @@ def get_proxies():
     return None
 
 
-def ajustar_precio(precio, tick_size):
+def ajustar_precio(precio, tick_size, price_precision=6):
     """Redondea el precio hacia abajo respetando el tick size."""
     try:
         log(f"[DEBUG] Precio recibido para formatear: {precio}")
         log(f"[DEBUG] Tick size usado: {tick_size}")
 
-        decimales = 0
-        if isinstance(tick_size, float) or isinstance(tick_size, int):
-            tick_str = f"{tick_size}"
-        else:
-            tick_str = str(tick_size)
-        if "." in tick_str:
-            decimales = len(tick_str.rstrip("0").split(".")[1])
+        if not price_precision or price_precision < 1:
+            price_precision = 6
+        log(f"[DEBUG] Precisión final a usar: {price_precision}")
 
-        resultado = float(precio) / float(tick_size)
-        log(f"[DEBUG] Resultado de precio / tick_size: {resultado}")
-
-        base = math.floor(resultado) * float(tick_size)
-        precio_formateado = float(f"{base:.{decimales}f}")
-        log(f"[DEBUG] Precio ajustado: {precio_formateado}")
-
-        return precio_formateado
+        precio = float(precio)
+        tick_size = float(tick_size)
+        return round(math.floor(precio / tick_size) * tick_size, price_precision)
     except Exception:
         return precio
 
@@ -187,7 +178,12 @@ class FuturesBot:
                 {},
             )
             self.quantity_precision = s_info.get("quantityPrecision", 3)
-            self.price_precision = s_info.get("pricePrecision", 2)
+            self.price_precision = int(s_info.get("pricePrecision", 6))
+            if self.price_precision < 1:
+                log(
+                    f"[DEBUG] pricePrecision inválido {self.price_precision}. Se ajusta a 6"
+                )
+                self.price_precision = 6
 
             filters = s_info.get("filters", [])
             price_filter = next(
@@ -214,7 +210,7 @@ class FuturesBot:
         except Exception as e:
             log(f"Futuros: Error obteniendo precision: {e}")
             self.quantity_precision = 3
-            self.price_precision = 2
+            self.price_precision = 6
             self.tick_size = None
 
     def _fmt_qty(self, qty):
@@ -224,6 +220,7 @@ class FuturesBot:
         try:
             if price is None or float(price) <= 0:
                 return price
+            price_precision = self.price_precision if self.price_precision and self.price_precision > 0 else 6
             if self.tick_size:
                 if float(price) < self.tick_size:
                     log(
@@ -233,8 +230,9 @@ class FuturesBot:
                         f"Diagnóstico: tick_size {self.tick_size} es mayor que el precio {price} antes de ajustar"
                     )
                     return None
-                price = ajustar_precio(price, self.tick_size)
-            return float(f"{float(price):.{self.price_precision}f}")
+                return ajustar_precio(price, self.tick_size, price_precision)
+            log(f"[DEBUG] Precisión final a usar: {price_precision}")
+            return round(float(price), price_precision)
         except Exception:
             return price
 
