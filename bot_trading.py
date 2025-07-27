@@ -339,7 +339,18 @@ class FuturesBot:
             if price_f is None or price_f <= 0:
                 log(f"Futuros: Precio inválido {price_f}. Orden no enviada")
                 return
-            log(f"Futuros: Orden límite {side} {qty} @ {price_f}")
+
+            monto = None
+            try:
+                if qty and price_f and qty > 0 and price_f > 0:
+                    monto = float(f"{qty * price_f:.4f}")
+            except Exception:
+                monto = None
+
+            mensaje = f"Futuros: Orden límite {side} {qty} @ {price_f}"
+            if monto is not None:
+                mensaje += f" | Monto: {monto} USDT"
+            log(mensaje)
             order = self.exchange.futures_create_order(
                 symbol=self.symbol.replace("/", ""),
                 side=side.upper(),
