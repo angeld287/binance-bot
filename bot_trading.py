@@ -180,16 +180,13 @@ class FuturesBot:
             self.price_precision = s_info.get("pricePrecision", 2)
 
             filters = s_info.get("filters", [])
-            price_filter = next(
-                (f for f in filters if f.get("filterType") == "PRICE_FILTER"),
-                {},
-            )
-            tick = price_filter.get("tickSize")
-            if tick is not None:
-                try:
-                    self.tick_size = float(tick)
-                except Exception:
-                    self.tick_size = None
+            for f in filters:
+                if f.get("filterType") == "PRICE_FILTER":
+                    try:
+                        self.tick_size = float(f.get("tickSize"))
+                    except Exception:
+                        self.tick_size = None
+                    break
 
             expected_tick = 10 ** (-self.price_precision)
             log(f"Expected tick: {expected_tick}")
@@ -205,7 +202,6 @@ class FuturesBot:
                     f"Advertencia: tick_size {self.tick_size} inválido para {self.symbol}. "
                     f"Se ajusta a {expected_tick}"
                 )
-                self.tick_size = expected_tick
         except Exception as e:
             log(f"Futuros: Error obteniendo precision: {e}")
             self.quantity_precision = 3
@@ -612,6 +608,14 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
         (s for s in info["symbols"] if s["symbol"] == symbol.replace("/", "")),
         {},
     )
+
+    for f in symbol_info.get("filters", []):
+        if f.get("filterType") == "PRICE_FILTER":
+            try:
+                bot.tick_size = float(f.get("tickSize"))
+            except Exception:
+                bot.tick_size = None
+            break
 
     price = float(ticker["price"])
     decimals = symbol_info.get("quantityPrecision", bot.quantity_precision)
