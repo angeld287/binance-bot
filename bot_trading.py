@@ -180,28 +180,30 @@ class FuturesBot:
             self.price_precision = s_info.get("pricePrecision", 2)
 
             filters = s_info.get("filters", [])
-            for f in filters:
-                if f.get("filterType") == "PRICE_FILTER":
-                    try:
-                        self.tick_size = float(f.get("tickSize"))
-                    except Exception:
-                        self.tick_size = None
-                    break
+            price_filter = next(
+                (f for f in filters if f.get("filterType") == "PRICE_FILTER"),
+                {},
+            )
+            tick_size = float(price_filter.get("tickSize", 0))
+            expected_tick = 1 / (10 ** s_info.get("pricePrecision", 6))
 
-            expected_tick = 10 ** (-self.price_precision)
+            # Debug logs
             log(f"Expected tick: {expected_tick}")
-            log(f"Actual tick_size: {self.tick_size}")
-            log(f"tick_size is None: {self.tick_size is None}")
-            log(f"tick_size <= 0: {self.tick_size <= 0}")
-            log(f"tick_size mismatch: {not math.isclose(self.tick_size, expected_tick, rel_tol=0.001)}")
+            log(f"Actual tick_size: {tick_size}")
+            log(f"tick_size is None: {tick_size is None}")
+            log(f"tick_size <= 0: {tick_size <= 0}")
+            log(f"tick_size mismatch: {not math.isclose(tick_size, expected_tick, rel_tol=0.001)}")
 
-            if not self.tick_size or self.tick_size <= 0 or not math.isclose(
-                self.tick_size, expected_tick, rel_tol=0.001
+            # Validación
+            if not tick_size or tick_size <= 0 or not math.isclose(
+                tick_size, expected_tick, rel_tol=0.001
             ):
                 log(
-                    f"Advertencia: tick_size {self.tick_size} inválido para {self.symbol}. "
-                    f"Se ajusta a {expected_tick}"
+                    f"Advertencia: tick_size {tick_size} inválido para {self.symbol}. Se ajusta a {expected_tick}"
                 )
+                tick_size = expected_tick
+
+            self.tick_size = tick_size
         except Exception as e:
             log(f"Futuros: Error obteniendo precision: {e}")
             self.quantity_precision = 3
