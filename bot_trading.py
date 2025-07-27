@@ -192,6 +192,12 @@ class FuturesBot:
                     self.tick_size = None
 
             expected_tick = 10 ** (-self.price_precision)
+            log(f"Expected tick: {expected_tick}")
+            log(f"Actual tick_size: {self.tick_size}")
+            log(f"tick_size is None: {self.tick_size is None}")
+            log(f"tick_size <= 0: {self.tick_size <= 0}")
+            log(f"tick_size mismatch: {not math.isclose(self.tick_size, expected_tick, rel_tol=0.001)}")
+
             if not self.tick_size or self.tick_size <= 0 or not math.isclose(
                 self.tick_size, expected_tick, rel_tol=0.001
             ):
