@@ -612,8 +612,17 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
     bot.quantity_precision = decimals
     bot.price_precision = symbol_info.get("pricePrecision", bot.price_precision)
     lev = leverage if leverage is not None else bot.leverage
-    amount = (110 * lev) / price
-    amount = bot._fmt_qty(amount)
+
+    symbol_key = symbol.replace("/", "")
+    if symbol_key == "BTCUSDT":
+        base_amount = 110
+    elif symbol_key == "DOGEUSDT":
+        base_amount = 10
+    else:
+        base_amount = 110
+
+    amount_raw = (base_amount * lev) / price
+    amount = bot._fmt_qty(amount_raw)
 
     env_name = os.getenv("ENVIRONMENT") or ("TESTNET" if testnet else "PROD")
     log(f"Entorno: {env_name} | Par: {symbol} | Precio actual: {price}")
