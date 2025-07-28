@@ -146,6 +146,7 @@ class FuturesBot:
         self.sl_order_id = None
         self.tp_order_id = None
         self.tick_size = None
+        self.min_profit_sl_moved = False
         self._set_leverage()
         self._init_precisions()
 
@@ -408,6 +409,7 @@ class FuturesBot:
                     log(
                         f"Futuros: Posición {side} abierta a {entry_price} a las {open_time}"
                     )
+                    self.min_profit_sl_moved = False
                     break
                 if status == 'canceled':
                     log("Futuros: Orden cancelada externamente")
@@ -466,6 +468,33 @@ class FuturesBot:
                         pass
         except Exception as e:
             log(f"Futuros: Error cancelando órdenes pendientes: {e}")
+
+    def cancelar_stop_loss(self):
+        """Cancela únicamente la orden de Stop Loss activa, si existe."""
+        symbol = self.symbol.replace("/", "")
+
+        oid = getattr(self, "sl_order_id", None)
+        if oid:
+            try:
+                self.exchange.futures_cancel_order(symbol=symbol, orderId=oid)
+                log(f"Futuros: Stop Loss {oid} cancelado")
+            except Exception as e:
+                log(f"Futuros: Error cancelando Stop Loss {oid}: {e}")
+            finally:
+                self.sl_order_id = None
+
+        try:
+            open_orders = self.exchange.futures_get_open_orders(symbol=symbol)
+            for o in open_orders:
+                o_type = (o.get("type") or o.get("info", {}).get("type", "")).upper()
+                if "STOP" in o_type:
+                    try:
+                        self.exchange.futures_cancel_order(symbol=symbol, orderId=o["orderId"])
+                        log(f"Futuros: Stop Loss pendiente {o['orderId']} cancelado")
+                    except Exception:
+                        pass
+        except Exception as e:
+            log(f"Futuros: Error cancelando SL pendientes: {e}")
 
     
     def cerrar_posicion(self):
@@ -526,6 +555,7 @@ class FuturesBot:
                     log(f"Futuros: Error actualizando summary: {e}")
 
             self.cancelar_ordenes_tp_sl()
+            self.min_profit_sl_moved = False
         except Exception as e:
             log(f"Futuros: Error al cerrar posición: {e}")
 
@@ -552,10 +582,27 @@ class FuturesBot:
 
             if side == "buy":
                 if price >= tp:
-                    pnl = (price - entry) * amount
-                    log(f"TP alcanzado. Cerrando posición en {price} con PNL {pnl}")
-                    self.cerrar_posicion()
-                elif price <= sl:
+                    if not self.min_profit_sl_moved:
+                        log("Futuros: Objetivo mínimo alcanzado. Moviendo Stop Loss")
+                        self.cancelar_stop_loss()
+                        new_stop = entry * 1.01 * 0.998
+                        new_stop_f = self._fmt_price(new_stop)
+                        qty = self._fmt_qty(amount)
+                        try:
+                            order = self.exchange.futures_create_order(
+                                symbol=self.symbol.replace("/", ""),
+                                side="SELL",
+                                type="STOP_MARKET",
+                                quantity=qty,
+                                stopPrice=new_stop_f,
+                                reduceOnly="true",
+                            )
+                            self.sl_order_id = order.get("orderId")
+                            self.min_profit_sl_moved = True
+                            log(f"Futuros: Stop Loss movido a {new_stop_f}")
+                        except Exception as e:
+                            log(f"Futuros: Error ajustando SL: {e}")
+                elif price <= sl and not self.min_profit_sl_moved:
                     pnl = (price - entry) * amount
                     log(f"Stop Loss alcanzado. Cerrando posición en {price} con PNL {pnl}")
                     self.cerrar_posicion()
@@ -563,10 +610,27 @@ class FuturesBot:
                     log(f"Futuros: Precio actual: {price} — TP: {tp}, SL: {sl} -->")
             else:
                 if price <= tp:
-                    pnl = (entry - price) * amount
-                    log(f"TP alcanzado. Cerrando posición en {price} con PNL {pnl}")
-                    self.cerrar_posicion()
-                elif price >= sl:
+                    if not self.min_profit_sl_moved:
+                        log("Futuros: Objetivo mínimo alcanzado. Moviendo Stop Loss")
+                        self.cancelar_stop_loss()
+                        new_stop = entry * 0.99 * 1.002
+                        new_stop_f = self._fmt_price(new_stop)
+                        qty = self._fmt_qty(amount)
+                        try:
+                            order = self.exchange.futures_create_order(
+                                symbol=self.symbol.replace("/", ""),
+                                side="BUY",
+                                type="STOP_MARKET",
+                                quantity=qty,
+                                stopPrice=new_stop_f,
+                                reduceOnly="true",
+                            )
+                            self.sl_order_id = order.get("orderId")
+                            self.min_profit_sl_moved = True
+                            log(f"Futuros: Stop Loss movido a {new_stop_f}")
+                        except Exception as e:
+                            log(f"Futuros: Error ajustando SL: {e}")
+                elif price >= sl and not self.min_profit_sl_moved:
                     pnl = (entry - price) * amount
                     log(f"Stop Loss alcanzado. Cerrando posición en {price} con PNL {pnl}")
                     self.cerrar_posicion()
