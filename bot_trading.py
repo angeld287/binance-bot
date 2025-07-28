@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import os
-import time
 from binance.client import Client
 import json
 import logging
@@ -147,6 +146,7 @@ class FuturesBot:
         self.tp_order_id = None
         self.tick_size = None
         self.min_profit_sl_moved = False
+        self.limit_order_info = None
         self._set_leverage()
         self._init_precisions()
 
@@ -272,6 +272,76 @@ class FuturesBot:
     def tiene_orden_abierta(self):
         return bool(self.obtener_orden_abierta())
 
+    def verificar_orden_limit(self):
+        """Valida la orden límite activa y la cancela si sale del rango."""
+        info = self.limit_order_info
+        if not info:
+            try:
+                orders = self.exchange.futures_get_open_orders(symbol=self.symbol.replace("/", ""))
+                if not orders:
+                    return
+                order = orders[0]
+                order_id = order.get("orderId")
+                side = order.get("side", "").lower()
+                rango_inf = None
+                rango_sup = None
+                # Guardar información básica para siguientes iteraciones
+                self.limit_order_info = {
+                    "orderId": order_id,
+                    "side": side,
+                    "rango_inf": rango_inf,
+                    "rango_sup": rango_sup,
+                }
+            except Exception:
+                return
+        else:
+            order_id = info.get("orderId")
+            side = info.get("side")
+            rango_inf = info.get("rango_inf")
+            rango_sup = info.get("rango_sup")
+
+        try:
+            order = self.exchange.futures_get_order(
+                symbol=self.symbol.replace("/", ""), orderId=order_id
+            )
+            status = (order.get("status") or "").lower()
+
+            if status in ("filled", "closed"):
+                self.limit_order_info = None
+                self.min_profit_sl_moved = False
+                return
+
+            if status == "canceled":
+                log("Futuros: Orden cancelada externamente")
+                self.limit_order_info = None
+                return
+
+            ticker = self.exchange.futures_symbol_ticker(
+                symbol=self.symbol.replace("/", "")
+            )
+            price_now = float(ticker["price"])
+
+            if side == "buy" and rango_inf is not None and price_now < rango_inf:
+                log(
+                    f"Futuros: Precio {price_now} fuera del rango de análisis. Cancelando orden límite"
+                )
+                self.exchange.futures_cancel_order(
+                    symbol=self.symbol.replace("/", ""), orderId=order_id
+                )
+                self.limit_order_info = None
+
+            if side == "sell" and rango_sup is not None and price_now > rango_sup:
+                log(
+                    f"Futuros: Precio {price_now} fuera del rango de análisis. Cancelando orden límite"
+                )
+                self.exchange.futures_cancel_order(
+                    symbol=self.symbol.replace("/", ""), orderId=order_id
+                )
+                self.limit_order_info = None
+
+        except Exception as e:
+            log(f"Futuros: Error validando orden límite: {e}")
+
     def verificar_y_configurar_tp_sl(self, tp_pct=None, sl_pct=None):
         """Verifica y coloca las órdenes de TP y SL si no existen."""
         cfg = self._symbol_config()
@@ -394,50 +464,14 @@ class FuturesBot:
             )
             log("Futuros: Orden límite creada y permanece activa")
 
+            # Guardar información de la orden para validaciones posteriores
             rango_inf, rango_sup = price_range
-
-            while True:
-                time.sleep(5)
-                info = self.exchange.futures_get_order(
-                    symbol=self.symbol.replace("/", ""), orderId=order["orderId"]
-                )
-                status = info.get("status", "").lower()
-                if status == 'closed':
-                    entry_price = float(info.get('avgPrice') or info.get('price', 0))
-                    open_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                    stop_loss = entry_price * 0.98 if side == "buy" else entry_price * 1.02
-                    log(
-                        f"Futuros: Posición {side} abierta a {entry_price} a las {open_time}"
-                    )
-                    self.min_profit_sl_moved = False
-                    break
-                if status == 'canceled':
-                    log("Futuros: Orden cancelada externamente")
-                    break
-
-                ticker = self.exchange.futures_symbol_ticker(symbol=self.symbol.replace("/", ""))
-                price_now = float(ticker['price'])
-
-                if side == 'buy' and rango_inf is not None and price_now < rango_inf:
-                    log(
-                        f"Futuros: Precio {price_now} fuera del rango de análisis. Cancelando orden límite"
-                    )
-                    try:
-                        self.exchange.futures_cancel_order(
-                            symbol=self.symbol.replace("/", ""), orderId=order["orderId"]
-                        )
-                    finally:
-                        break
-                if side == 'sell' and rango_sup is not None and price_now > rango_sup:
-                    log(
-                        f"Futuros: Precio {price_now} fuera del rango de análisis. Cancelando orden límite"
-                    )
-                    try:
-                        self.exchange.futures_cancel_order(
-                            symbol=self.symbol.replace("/", ""), orderId=order["orderId"]
-                        )
-                    finally:
-                        break
+            self.limit_order_info = {
+                "orderId": order.get("orderId"),
+                "side": side,
+                "rango_inf": rango_inf,
+                "rango_sup": rango_sup,
+            }
 
         except Exception as e:
             log(f"Futuros: Error al abrir posición: {e}")
@@ -715,6 +749,7 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
         bot.verificar_y_configurar_tp_sl()
         bot.evaluar_posicion()
     elif bot.tiene_orden_abierta():
+        bot.verificar_orden_limit()
         log("Orden pendiente detectada, esperando ejecución o cancelación.")
     else:
         side, level, patterns, rango = detectar_breakout(exchange, symbol)
