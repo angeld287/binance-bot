@@ -768,7 +768,7 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
                 if symbol_key == "BTCUSDT":
                     base_amount = 110
                 elif symbol_key == "DOGEUSDT":
-                    base_amount = 10
+                    base_amount = 6
                 else:
                     base_amount = 110
 
