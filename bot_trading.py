@@ -140,10 +140,11 @@ config_por_moneda = {
 
 
 class FuturesBot:
-    def __init__(self, exchange, symbol, leverage=5):
+    def __init__(self, exchange, symbol, leverage=5, use_breakout_dynamic_stops=False):
         self.exchange = exchange
         self.symbol = symbol
         self.leverage = leverage
+        self.use_breakout_dynamic_stops = use_breakout_dynamic_stops
         self.summary_file = "summary_futures.json"
         self.sl_order_id = None
         self.tp_order_id = None
@@ -597,6 +598,10 @@ class FuturesBot:
             log(f"Futuros: Error al cerrar posición: {e}")
 
     def evaluar_posicion(self):
+        if not self.use_breakout_dynamic_stops:
+            log("Breakout/mini-SL/BE desactivados por configuración")
+            return
+
         pos = self.obtener_posicion_abierta()
         if not pos:
             log("Futuros: No hay posición abierta para evaluar")
@@ -734,17 +739,6 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
     bot.price_precision = symbol_info.get("pricePrecision", bot.price_precision)
     lev = leverage if leverage is not None else bot.leverage
 
-    symbol_key = symbol.replace("/", "")
-    if symbol_key == "BTCUSDT":
-        base_amount = 110
-    elif symbol_key == "DOGEUSDT":
-        base_amount = 10
-    else:
-        base_amount = 110
-
-    amount_raw = (base_amount * lev) / price
-    amount = bot._fmt_qty(amount_raw)
-
     env_name = os.getenv("ENVIRONMENT") or ("TESTNET" if testnet else "PROD")
     log(f"Entorno: {env_name} | Par: {symbol} | Precio actual: {price}")
 
@@ -762,9 +756,27 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
                 log(f"Futuros: Precio calculado inválido {order_price}. Orden no enviada")
             else:
                 order_price = bot._fmt_price(order_price)
+                cfg = bot._symbol_config()
+                atr_factor = cfg["atr_factor"]
+                sl_pct = cfg["stop_loss_pct"] * atr_factor
+                sl_price = (
+                    order_price * (1 - sl_pct)
+                    if side == "buy"
+                    else order_price * (1 + sl_pct)
+                )
+                symbol_key = symbol.replace("/", "")
+                if symbol_key == "BTCUSDT":
+                    base_amount = 110
+                elif symbol_key == "DOGEUSDT":
+                    base_amount = 6
+                else:
+                    base_amount = 110
+
+                amount_raw = (base_amount * lev) / price
+                qty = bot._fmt_qty(amount_raw)
                 if patterns:
                     print(f"Patrones detectados: {', '.join(patterns)}")
-                bot.abrir_posicion(side, amount, order_price, rango)
+                bot.abrir_posicion(side, qty, order_price, rango)
         else:
             if testnet:
                 print(f"TESTNET activo - Sin breakout - Apalancamiento: {lev}x")
@@ -784,6 +796,13 @@ def handler(event, context):
 
     symbol = os.getenv("SYMBOL", "BTC/USDT")
     leverage = 5
+    use_breakout_dynamic_stops = (
+        os.getenv("USE_BREAKOUT_DYNAMIC_STOPS", "false").lower() == "true"
+    )
+
+    log(
+        f"Config efectiva -> SYMBOL={symbol} | USE_BREAKOUT_DYNAMIC_STOPS={use_breakout_dynamic_stops}"
+    )
 
     proxies = get_proxies()
     req_params = {"proxies": proxies} if proxies else None
@@ -792,7 +811,12 @@ def handler(event, context):
     if testnet:
         print("Modo TESTNET activado")
 
-    bot = FuturesBot(exchange, symbol, leverage=leverage)
+    bot = FuturesBot(
+        exchange,
+        symbol,
+        leverage=leverage,
+        use_breakout_dynamic_stops=use_breakout_dynamic_stops,
+    )
 
     price = _run_iteration(exchange, bot, testnet, symbol)
 
