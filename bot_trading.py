@@ -17,8 +17,8 @@ def get_proxies():
     return None
 
 
-def ajustar_precio(precio, tick_size, price_precision=6):
-    """Redondea el precio hacia abajo respetando el tick size."""
+def ajustar_precio(precio, tick_size, price_precision=6, direction="floor"):
+    """Redondea el precio respetando el tick size."""
     try:
         log(f"[DEBUG] Precio recibido para formatear: {precio}")
         log(f"[DEBUG] Tick size usado: {tick_size}")
@@ -29,7 +29,12 @@ def ajustar_precio(precio, tick_size, price_precision=6):
 
         precio = float(precio)
         tick_size = float(tick_size)
-        return round(math.floor(precio / tick_size) * tick_size, price_precision)
+        pasos = precio / tick_size
+        if direction == "ceil":
+            pasos = math.ceil(pasos)
+        else:
+            pasos = math.floor(pasos)
+        return round(pasos * tick_size, price_precision)
     except Exception:
         return precio
 
@@ -123,6 +128,22 @@ def log(msg):
     logger.info(msg)
 
 
+# Utilidades para leer porcentajes desde el entorno
+def _get_pct_env(var, alt_var, default_decimal):
+    """Devuelve el porcentaje en formato decimal (0.01=1%)."""
+    val = os.getenv(var)
+    if val is None and alt_var:
+        val = os.getenv(alt_var)
+    if val is None:
+        return default_decimal
+    try:
+        pct = float(val)
+    except ValueError:
+        raise ValueError(f"Valor inválido para {var}: {val}")
+    if pct <= 0:
+        raise ValueError(f"{var} debe ser mayor que 0")
+    return pct / 100.0
+
 # Configuraciones personalizadas por par de trading
 config_por_moneda = {
     "BTC/USDT": {
@@ -156,11 +177,15 @@ class FuturesBot:
 
     def _symbol_config(self):
         cfg = config_por_moneda.get(self.symbol, {})
+        tp_default = float(cfg.get("take_profit_pct", 0.02))
+        sl_default = float(cfg.get("stop_loss_pct", 0.01))
+        tp_pct = _get_pct_env("TAKE_PROFIT_PCT", "TAKE_PROFIT_PERCENT", tp_default)
+        sl_pct = _get_pct_env("STOP_LOSS_PCT", "STOP_LOSS_PERCENT", sl_default)
         return {
             "apalancamiento": int(cfg.get("apalancamiento", 3)),
             "atr_factor": float(cfg.get("atr_factor", 1.5)),
-            "stop_loss_pct": float(cfg.get("stop_loss_pct", 0.015)),
-            "take_profit_pct": float(cfg.get("take_profit_pct", 0.02)),
+            "stop_loss_pct": sl_pct,
+            "take_profit_pct": tp_pct,
         }
 
     def _set_leverage(self):
@@ -221,11 +246,13 @@ class FuturesBot:
     def _fmt_qty(self, qty):
         return float(f"{qty:.{self.quantity_precision}f}")
 
-    def _fmt_price(self, price):
+    def _fmt_price(self, price, rounding="floor"):
         try:
             if price is None or float(price) <= 0:
                 return price
-            price_precision = self.price_precision if self.price_precision and self.price_precision > 0 else 6
+            price_precision = (
+                self.price_precision if self.price_precision and self.price_precision > 0 else 6
+            )
             if self.tick_size:
                 if float(price) < self.tick_size:
                     log(
@@ -235,7 +262,7 @@ class FuturesBot:
                         f"Diagnóstico: tick_size {self.tick_size} es mayor que el precio {price} antes de ajustar"
                     )
                     return None
-                return ajustar_precio(price, self.tick_size, price_precision)
+                return ajustar_precio(price, self.tick_size, price_precision, rounding)
             log(f"[DEBUG] Precisión final a usar: {price_precision}")
             return round(float(price), price_precision)
         except Exception:
@@ -374,8 +401,20 @@ class FuturesBot:
         tp_price = entry_price * (1 + tp_pct) if side == "buy" else entry_price * (1 - tp_pct)
         sl_price = entry_price * (1 - sl_pct) if side == "buy" else entry_price * (1 + sl_pct)
         amount_f = self._fmt_qty(amount)
-        tp_price_f = self._fmt_price(tp_price)
-        sl_price_f = self._fmt_price(sl_price)
+
+        notional = amount_f * entry_price
+        if notional < 5:
+            log(f"Futuros: Notional {notional} menor al mínimo requerido")
+            return
+
+        tp_price_f = self._fmt_price(tp_price, rounding="ceil")
+        sl_price_f = self._fmt_price(sl_price, rounding="floor")
+
+        log(
+            "Futuros: TP%={:.3f}, SL%={:.3f} -> TP={}, SL={}, side={}, reduceOnly=true".format(
+                tp_pct * 100, sl_pct * 100, tp_price_f, sl_price_f, side
+            )
+        )
 
         try:
             symbol = self.symbol.replace("/", "")
