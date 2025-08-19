@@ -116,7 +116,7 @@ load_dotenv()
 logger = logging.getLogger("bot")
 logger.setLevel(logging.INFO)
 
-formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+formatter = logging.Formatter("%(levelname)s - %(message)s")
 
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
