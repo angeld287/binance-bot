@@ -406,11 +406,33 @@ class FuturesBot:
         tp_price_f = self._fmt_price(tp_price, rounding="ceil")
         sl_price_f = self._fmt_price(sl_price, rounding="floor")
 
-        log(
-            "Futuros: TP%={:.3f}, SL%={:.3f} -> TP={}, SL={}, side={}, reduceOnly=true".format(
-                tp_pct * 100, sl_pct * 100, tp_price_f, sl_price_f, side
+        reduce_only = True
+
+        try:
+            current_price = float(
+                self.exchange.futures_symbol_ticker(
+                    symbol=self.symbol.replace("/", "")
+                )["price"]
             )
-        )
+        except Exception:
+            current_price = None
+
+        if entry_price > 0 and current_price is not None:
+            pnl_pct = (
+                (current_price - entry_price) / entry_price * 100
+                if side == "buy"
+                else (entry_price - current_price) / entry_price * 100
+            )
+            log(
+                f"Futuros: TP%={tp_pct * 100:.3f}, SL%={sl_pct * 100:.3f} -> TP={tp_price_f}, SL={sl_price_f}, "
+                f"side={side}, reduceOnly={reduce_only} | PnL%={pnl_pct:+.2f}% @ precio={current_price:.6f} (entry={entry_price:.6f})"
+            )
+        else:
+            log(
+                "Futuros: TP%={:.3f}, SL%={:.3f} -> TP={}, SL={}, side={}, reduceOnly=true".format(
+                    tp_pct * 100, sl_pct * 100, tp_price_f, sl_price_f, side
+                )
+            )
 
         try:
             symbol = self.symbol.replace("/", "")
