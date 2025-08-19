@@ -634,7 +634,6 @@ class FuturesBot:
 
     def evaluar_posicion(self):
         if not self.use_breakout_dynamic_stops:
-            log("Breakout/mini-SL/BE desactivados por configuración")
             return
 
         pos = self.obtener_posicion_abierta()
@@ -775,7 +774,7 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
     lev = leverage if leverage is not None else bot.leverage
 
     env_name = os.getenv("ENVIRONMENT") or ("TESTNET" if testnet else "PROD")
-    log(f"Entorno: {env_name} | Par: {symbol} | Precio actual: {price}")
+    log(f"Par: {symbol} | Precio actual: {price}")
 
     if bot.tiene_posicion_abierta():
         bot.verificar_y_configurar_tp_sl()
