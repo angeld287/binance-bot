@@ -781,7 +781,39 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
         bot.evaluar_posicion()
     elif bot.tiene_orden_abierta():
         bot.verificar_orden_limit()
-        log("Orden pendiente detectada, esperando ejecución o cancelación.")
+        order = bot.obtener_orden_abierta()
+        if order:
+            side = order.get("side")
+            o_type = order.get("type")
+            try:
+                orig_qty = float(order.get("origQty") or 0)
+            except Exception:
+                orig_qty = 0.0
+            price_order = (
+                order.get("price")
+                or order.get("stopPrice")
+                or price
+            )
+            try:
+                price_order = float(price_order)
+            except Exception:
+                price_order = price
+
+            precio_apertura_val = bot._fmt_price(price_order)
+            if precio_apertura_val is None:
+                precio_apertura_val = price_order
+            precio_apertura = f"{precio_apertura_val:.{bot.price_precision if bot.price_precision else 6}f}"
+
+            qty_val = bot._fmt_qty(orig_qty)
+            cantidad = f"{qty_val:.{bot.quantity_precision if bot.quantity_precision else 4}f}"
+
+            monto_usdt = f"{precio_apertura_val * qty_val:.2f}"
+            order_id = order.get("orderId")
+            log(
+                f"📌 Orden pendiente: {side} {cantidad} {symbol} @ {precio_apertura} | Monto nominal ≈ {monto_usdt} USDT | tipo={o_type}{f' | id={order_id}' if order_id else ''}. Esperando ejecución o cancelación."
+            )
+        else:
+            log("Orden pendiente detectada, esperando ejecución o cancelación.")
     else:
         side, level, patterns, rango = detectar_breakout(exchange, symbol)
         if side:
