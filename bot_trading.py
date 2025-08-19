@@ -108,19 +108,20 @@ def detectar_breakout(exchange, symbol, window=ANALYSIS_WINDOW):
 
 load_dotenv()
 
-# Configuración del logger para AWS Lambda
+# Configuración de logging (AWS Lambda)
 logger = logging.getLogger("bot")
 logger.setLevel(logging.INFO)
 
-formatter = logging.Formatter("%(levelname)s - %(message)s")
+if not logger.handlers:
+    formatter = logging.Formatter("%(levelname)s - %(message)s")
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
 
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(formatter)
-
-logger.addHandler(console_handler)
+logger.propagate = False
 
 
-def log(msg):
+def log(msg: str):
     logger.info(msg)
 
 
