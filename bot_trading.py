@@ -821,6 +821,7 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
 
 def handler(event, context):
     """AWS Lambda handler que ejecuta una iteración de trading."""
+    log("🚀🚀🚀 INICIO EJECUCIÓN LAMBDA 🚀🚀🚀")
     load_dotenv()
 
     key = os.getenv("BINANCE_API_KEY")
@@ -848,7 +849,10 @@ def handler(event, context):
     )
 
     price = _run_iteration(exchange, bot, testnet, symbol)
-
+    log("🛑🛑🛑 FIN EJECUCIÓN LAMBDA 🛑🛑🛑")
+    log(
+        "════════════════════════════════════════════════════════════════════════════════════════"
+    )
     return {
         "statusCode": 200,
         "body": json.dumps({"price": price}),
