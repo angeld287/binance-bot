@@ -20,12 +20,8 @@ def get_proxies():
 def ajustar_precio(precio, tick_size, price_precision=6, direction="floor"):
     """Redondea el precio respetando el tick size."""
     try:
-        log(f"[DEBUG] Precio recibido para formatear: {precio}")
-        log(f"[DEBUG] Tick size usado: {tick_size}")
-
         if not price_precision or price_precision < 1:
             price_precision = 6
-        log(f"[DEBUG] Precisión final a usar: {price_precision}")
 
         precio = float(precio)
         tick_size = float(tick_size)
