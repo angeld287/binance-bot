@@ -135,9 +135,9 @@ def _get_pct_env(var, alt_var, default_decimal):
     try:
         pct = float(val)
     except ValueError:
-        raise ValueError(f"Valor inválido para {var}: {val}")
+        raise ValueError(f"❌❌❌❌❌ Valor inválido para {var}: {val}")
     if pct <= 0:
-        raise ValueError(f"{var} debe ser mayor que 0")
+        raise ValueError(f"❌❌❌❌❌ {var} debe ser mayor que 0")
     return pct / 100.0
 
 # Configuraciones personalizadas por par de trading
@@ -190,9 +190,8 @@ class FuturesBot:
             self.leverage = cfg["apalancamiento"]
             symbol = self.symbol.replace("/", "")
             self.exchange.futures_change_leverage(symbol=symbol, leverage=self.leverage)
-            log(f"🚀 FUTUROS - APALANCAMIENTO ESTABLECIDO EN {self.leverage}X 🚀")
         except Exception as e:
-            log(f"Futuros: Error al establecer apalancamiento: {e}")
+            log(f"❌❌❌❌❌❌❌ Error al establecer apalancamiento: {e}")
 
     def _init_precisions(self):
         """Obtiene la precisión de cantidad y precio para el par"""
@@ -234,7 +233,7 @@ class FuturesBot:
 
             self.tick_size = tick_size
         except Exception as e:
-            log(f"Futuros: Error obteniendo precision: {e}")
+            log(f"❌❌❌❌❌ Error obteniendo precision: {e}")
             self.quantity_precision = 3
             self.price_precision = 6
             self.tick_size = None
@@ -280,7 +279,7 @@ class FuturesBot:
             if amt != 0:
                 return pos
         except Exception as e:
-            log(f"Futuros: Error consultando posición: {e}")
+            log(f"❌❌❌❌❌ Error consultando posición: {e}")
         return None
 
     def tiene_posicion_abierta(self):
@@ -293,7 +292,7 @@ class FuturesBot:
             if orders:
                 return orders[0]
         except Exception as e:
-            log(f"Futuros: Error consultando orden abierta: {e}")
+            log(f"❌❌❌❌❌ Error consultando orden abierta: {e}")
         return None
 
     def tiene_orden_abierta(self):
@@ -367,7 +366,7 @@ class FuturesBot:
                 self.limit_order_info = None
 
         except Exception as e:
-            log(f"Futuros: Error validando orden límite: {e}")
+            log(f"❌❌❌❌❌ Error validando orden límite: {e}")
 
     def verificar_y_configurar_tp_sl(self, tp_pct=None, sl_pct=None):
         """Verifica y coloca las órdenes de TP y SL si no existen."""
@@ -387,7 +386,7 @@ class FuturesBot:
             amt = float(pos.get("positionAmt", 0))
             entry_price = float(pos.get("entryPrice", 0))
         except Exception:
-            log("Futuros: Datos de posición no disponibles para configurar TP/SL")
+            log("❌❌❌❌❌ Datos de posición no disponibles para configurar TP/SL")
             return
 
         side = "buy" if amt > 0 else "sell"
@@ -416,7 +415,7 @@ class FuturesBot:
             symbol = self.symbol.replace("/", "")
             open_orders = self.exchange.futures_get_open_orders(symbol=symbol)
         except Exception as e:
-            log(f"Futuros: Error obteniendo órdenes abiertas: {e}")
+            log(f"❌❌❌❌❌ Error obteniendo órdenes abiertas: {e}")
             open_orders = []
 
         has_tp = False
@@ -449,7 +448,7 @@ class FuturesBot:
                     self.tp_order_id = order.get("orderId")
                     log(f"Futuros: Take Profit colocado en {tp_price_f}")
                 except Exception as e:
-                    log(f"Futuros: Error al colocar TP: {e}")
+                    log(f"❌❌❌❌❌ Error al colocar TP: {e}")
 
         if not has_sl:
             if sl_price_f is None or sl_price_f <= 0:
@@ -467,7 +466,7 @@ class FuturesBot:
                     self.sl_order_id = order.get("orderId")
                     log(f"Futuros: Stop Loss colocado en {sl_price_f}")
                 except Exception as e:
-                    log(f"Futuros: Error al colocar SL: {e}")
+                    log(f"❌❌❌❌❌ Error al colocar SL: {e}")
 
     def abrir_posicion(self, side, amount, price, price_range):
         """Abre una posición con una orden límite que permanece activa mientras el precio
@@ -513,7 +512,7 @@ class FuturesBot:
             }
 
         except Exception as e:
-            log(f"Futuros: Error al abrir posición: {e}")
+            log(f"❌❌❌❌❌ Error al abrir posición: {e}")
 
     def cancelar_ordenes_tp_sl(self):
         """Cancela las órdenes de TP y SL registradas y cualquier orden reduceOnly restante."""
@@ -526,7 +525,7 @@ class FuturesBot:
                     self.exchange.futures_cancel_order(symbol=symbol, orderId=oid)
                     log(f"Futuros: Orden {oid} cancelada")
                 except Exception as e:
-                    log(f"Futuros: Error cancelando orden {oid}: {e}")
+                    log(f"❌❌❌❌❌ Error cancelando orden {oid}: {e}")
                 finally:
                     setattr(self, attr, None)
 
@@ -540,7 +539,7 @@ class FuturesBot:
                     except Exception:
                         pass
         except Exception as e:
-            log(f"Futuros: Error cancelando órdenes pendientes: {e}")
+            log(f"❌❌❌❌❌ Error cancelando órdenes pendientes: {e}")
 
     def cancelar_stop_loss(self):
         """Cancela únicamente la orden de Stop Loss activa, si existe."""
@@ -552,7 +551,7 @@ class FuturesBot:
                 self.exchange.futures_cancel_order(symbol=symbol, orderId=oid)
                 log(f"Futuros: Stop Loss {oid} cancelado")
             except Exception as e:
-                log(f"Futuros: Error cancelando Stop Loss {oid}: {e}")
+                log(f"❌❌❌❌❌ Error cancelando Stop Loss {oid}: {e}")
             finally:
                 self.sl_order_id = None
 
@@ -567,7 +566,7 @@ class FuturesBot:
                     except Exception:
                         pass
         except Exception as e:
-            log(f"Futuros: Error cancelando SL pendientes: {e}")
+            log(f"❌❌❌❌❌ Error cancelando SL pendientes: {e}")
 
     
     def cerrar_posicion(self):
@@ -625,12 +624,12 @@ class FuturesBot:
                     }
                     self._actualizar_summary(data, exit_price)
                 except Exception as e:
-                    log(f"Futuros: Error actualizando summary: {e}")
+                    log(f"❌❌❌❌❌ Error actualizando summary: {e}")
 
             self.cancelar_ordenes_tp_sl()
             self.min_profit_sl_moved = False
         except Exception as e:
-            log(f"Futuros: Error al cerrar posición: {e}")
+            log(f"❌❌❌❌❌ Error al cerrar posición: {e}")
 
     def evaluar_posicion(self):
         if not self.use_breakout_dynamic_stops:
@@ -677,7 +676,7 @@ class FuturesBot:
                             self.min_profit_sl_moved = True
                             log(f"Futuros: Stop Loss movido a {new_stop_f}")
                         except Exception as e:
-                            log(f"Futuros: Error ajustando SL: {e}")
+                            log(f"❌❌❌❌❌ Error ajustando SL: {e}")
                 elif price <= sl and not self.min_profit_sl_moved:
                     pnl = (price - entry) * amount
                     log(f"Stop Loss alcanzado. Cerrando posición en {price} con PNL {pnl}")
@@ -705,7 +704,7 @@ class FuturesBot:
                             self.min_profit_sl_moved = True
                             log(f"Futuros: Stop Loss movido a {new_stop_f}")
                         except Exception as e:
-                            log(f"Futuros: Error ajustando SL: {e}")
+                            log(f"❌❌❌❌❌ Error ajustando SL: {e}")
                 elif price >= sl and not self.min_profit_sl_moved:
                     pnl = (entry - price) * amount
                     log(f"Stop Loss alcanzado. Cerrando posición en {price} con PNL {pnl}")
@@ -714,7 +713,7 @@ class FuturesBot:
                     log(f"Futuros: Precio actual: {price} — TP: {tp}, SL: {sl} -->")
 
         except Exception as e:
-            log(f"Futuros: Error al evaluar posición: {e}")
+            log(f"❌❌❌❌❌ Error al evaluar posición: {e}")
 
     def _actualizar_summary(self, pos, exit_price):
         summary = {"ganancia_total": 0.0}
@@ -745,7 +744,7 @@ class FuturesBot:
             log(f"Futuros: Ganancia acumulada: {summary['ganancia_total']}")
 
         except Exception as e:
-            log(f"Futuros: Error actualizando summary: {e}")
+            log(f"❌❌❌❌❌ Error actualizando summary: {e}")
 
 
 def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
