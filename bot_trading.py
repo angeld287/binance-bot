@@ -49,7 +49,7 @@ class LoggingClient:
                 proxies = get_proxies()
                 env = "testnet" if self.testnet else "producción"
                 proxy_msg = "sí" if proxies else "no"
-                log(f"Llamada {name} | entorno: {env} | usando proxy: {proxy_msg}")
+                #log(f"Llamada {name} | entorno: {env} | usando proxy: {proxy_msg}")
                 return attr(*args, **kwargs)
 
             return wrapper
@@ -832,10 +832,6 @@ def handler(event, context):
     leverage = 5
     use_breakout_dynamic_stops = (
         os.getenv("USE_BREAKOUT_DYNAMIC_STOPS", "false").lower() == "true"
-    )
-
-    log(
-        f"Config efectiva -> SYMBOL={symbol} | USE_BREAKOUT_DYNAMIC_STOPS={use_breakout_dynamic_stops}"
     )
 
     proxies = get_proxies()
