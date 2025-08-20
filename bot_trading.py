@@ -126,6 +126,8 @@ def log(msg: str):
 
 
 # Utilidades para leer porcentajes desde el entorno
+from resistance_levels import next_resistances
+
 def _get_pct_env(var, alt_var, default_decimal):
     """Devuelve el porcentaje en formato decimal (0.01=1%)."""
     val = os.getenv(var)
@@ -797,6 +799,35 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
 
     env_name = os.getenv("ENVIRONMENT") or ("TESTNET" if testnet else "PROD")
     log(f"Par: {symbol} | Precio actual: {price}")
+
+    try:
+        symbol_ref = (
+            self.symbol
+            if "self" in locals() and hasattr(self, "symbol")
+            else (symbol if "symbol" in locals() else os.getenv("SYMBOL", "DOGE/USDT"))
+        )
+        interval = os.getenv("RES_INTERVAL", "5m")
+        levels = next_resistances(symbol_ref, interval=interval, limit=500)
+
+        if levels:
+            top = levels[0]
+            razones = ", ".join(top.get("reasons", [])[:3])
+            log(
+                f"🧱 Próxima resistencia: {top['level']:.6f} "
+                f"(score {top['score']:.2f}, dist≈{top['distance_pct']:.2f}%)"
+                f"{f' | razones: {razones}' if razones else ''}"
+            )
+            resumen_top3 = ", ".join(
+                [
+                    f"{x['level']:.6f} (s{x['score']:.2f}, d{x['distance_pct']:.2f}%)"
+                    for x in levels[:3]
+                ]
+            )
+            log(f"🧱 Top3 resistencias: {resumen_top3}")
+        else:
+            log("🧱 Próxima resistencia: no encontrada (datos insuficientes)")
+    except Exception as e:
+        log(f"⚠️ Error calculando resistencias: {e}")
 
     if bot.tiene_posicion_abierta():
         bot.verificar_y_configurar_tp_sl()
