@@ -943,6 +943,7 @@ def handler(event, context):
     testnet = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
 
     symbol = os.getenv("SYMBOL", "BTC/USDT")
+    SUP_INTERVAL = os.getenv("SUP_INTERVAL", "5m")
     leverage = 5
     use_breakout_dynamic_stops = (
         os.getenv("USE_BREAKOUT_DYNAMIC_STOPS", "false").lower() == "true"
