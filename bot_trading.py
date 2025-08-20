@@ -37,7 +37,7 @@ def ajustar_precio(precio, tick_size, price_precision=6, direction="floor"):
 
 
 class LoggingClient:
-    """Envuelve un Client para registrar cada request.."""
+    """Envuelve un Client para registrar cada request."""
 
     def __init__(self, client, testnet):
         self._client = client
