@@ -7,7 +7,8 @@ try:
 except Exception:  # pragma: no cover - library may not be available in tests
     Client = None  # type: ignore
 
-from bot_trading import log
+def log(msg: str):
+    logger.info(msg)
 
 
 def _round_to_tick(price: float, tick_size: float, precision: int) -> float:
