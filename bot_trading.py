@@ -142,6 +142,109 @@ def _get_pct_env(var, alt_var, default_decimal):
         raise ValueError(f"❌❌❌❌❌ {var} debe ser mayor que 0")
     return pct / 100.0
 
+
+def evaluate_trailing_sl_observer(exchange, symbol, position, price, sup_levels, res_levels):
+    """Evalúa y registra un trailing stop sin colocar órdenes."""
+
+    try:
+        amt = float(position.get("positionAmt", 0)) if position else 0.0
+    except Exception:
+        amt = 0.0
+
+    if amt == 0:
+        log("⏭️ sin cambios | razón=sin_posicion")
+        return
+
+    side = "LONG" if amt > 0 else "SHORT"
+    try:
+        entry = float(position.get("entryPrice", 0))
+    except Exception:
+        entry = 0.0
+
+    # Obtención de precisiones
+    tick_size = None
+    price_precision = 6
+    try:
+        info = exchange.futures_exchange_info()
+        sym = symbol.replace("/", "")
+        s_info = next((s for s in info.get("symbols", []) if s.get("symbol") == sym), {})
+        price_precision = int(s_info.get("pricePrecision", 6)) or 6
+        for f in s_info.get("filters", []):
+            if f.get("filterType") == "PRICE_FILTER":
+                tick_size = float(f.get("tickSize", 0))
+                break
+        if not tick_size or tick_size <= 0:
+            tick_size = 1 / (10 ** price_precision)
+    except Exception:
+        tick_size = None
+
+    BE_BUFFER_TICKS = int(os.getenv("BE_BUFFER_TICKS", "3"))
+    MIN_MOVE_TICKS = int(os.getenv("MIN_MOVE_TICKS", "2"))
+
+    # Lectura simple de SL actual
+    sl_act = None
+    try:
+        orders = exchange.futures_get_open_orders(symbol=symbol.replace("/", ""))
+        for o in orders:
+            t = (o.get("type") or "").upper()
+            if t in ("STOP", "STOP_MARKET"):
+                sl_act = float(o.get("stopPrice") or o.get("price"))
+                break
+    except Exception:
+        sl_act = None
+
+    def round_to_tick(p):
+        if p is None or tick_size is None:
+            return p
+        return ajustar_precio(p, tick_size, price_precision)
+
+    sl_cand = None
+    anchor_level = None
+
+    if side == "LONG" and sup_levels:
+        for s in sup_levels:
+            lvl = s.get("level")
+            if lvl and lvl > entry:
+                anchor_level = float(lvl)
+                break
+        if anchor_level:
+            sl_cand = round_to_tick(anchor_level - BE_BUFFER_TICKS * tick_size)
+    elif side == "SHORT" and res_levels:
+        for r in res_levels:
+            lvl = r.get("level")
+            if lvl and lvl < entry:
+                anchor_level = float(lvl)
+                break
+        if anchor_level:
+            sl_cand = round_to_tick(anchor_level + BE_BUFFER_TICKS * tick_size)
+
+    if sl_cand is None:
+        log("⏭️ sin cambios | razón=sin_nivel_valido")
+        return
+
+    delta_ref = sl_act if sl_act is not None else entry
+    delta = abs(sl_cand - delta_ref)
+
+    if sl_act is not None:
+        monotonic = sl_cand > sl_act if side == "LONG" else sl_cand < sl_act
+        delta_ok = delta >= MIN_MOVE_TICKS * tick_size
+        if not monotonic or not delta_ok:
+            log("⏭️ sin cambios | razón=Δ<ticks o no_mejora")
+            return
+
+    if side == "LONG":
+        log(
+            f"🔎 OBS: LONG entry={entry:.6f} px={price:.6f} SL_act={sl_act if sl_act is not None else '—'} "
+            f"| S*={anchor_level:.6f} buf={BE_BUFFER_TICKS}t → SL_cand={sl_cand:.6f} "
+            f"| Δ={delta:.6f} (ok)"
+        )
+    else:
+        log(
+            f"🔎 OBS: SHORT entry={entry:.6f} px={price:.6f} SL_act={sl_act if sl_act is not None else '—'} "
+            f"| R*={anchor_level:.6f} buf={BE_BUFFER_TICKS}t → SL_cand={sl_cand:.6f} "
+            f"| Δ={delta:.6f} (ok)"
+        )
+
 # Configuraciones personalizadas por par de trading
 config_por_moneda = {
     "BTC/USDT": {
@@ -799,6 +902,9 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
     env_name = os.getenv("ENVIRONMENT") or ("TESTNET" if testnet else "PROD")
     log(f"Par: {symbol} | Precio actual: {price}")
 
+    sup_levels = None
+    levels = None
+
     try:
         symbol_ref = (
             self.symbol
@@ -853,8 +959,11 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
             log("🧱 Próxima resistencia: no encontrada (datos insuficientes)")
     except Exception as e:
         log(f"❌❌❌❌❌ Error calculando resistencias: {e}")
+    
+    position_info = bot.obtener_posicion_abierta()
+    evaluate_trailing_sl_observer(exchange, symbol_ref, position_info, price, sup_levels, levels)
 
-    if bot.tiene_posicion_abierta():
+    if position_info:
         bot.verificar_y_configurar_tp_sl()
         bot.evaluar_posicion()
     elif bot.tiene_orden_abierta():
