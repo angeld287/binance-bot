@@ -8,6 +8,13 @@ from dotenv import load_dotenv
 from pattern_detection import detect_patterns
 from resistance_levels import next_resistances
 
+try:
+    from support_levels import next_supports
+    _SUP_MODULE_OK = True
+except Exception as _e:
+    _SUP_MODULE_OK = False
+    next_supports = None
+
 
 def get_proxies():
     """Devuelve diccionario de proxies o None si no se usa proxy."""
@@ -797,6 +804,37 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
 
     env_name = os.getenv("ENVIRONMENT") or ("TESTNET" if testnet else "PROD")
     log(f"Par: {symbol} | Precio actual: {price}")
+
+    import os
+
+    try:
+        symbol_ref = (
+            self.symbol
+            if "self" in locals() and hasattr(self, "symbol")
+            else (symbol if "symbol" in locals() else os.getenv("SYMBOL", "DOGE/USDT"))
+        )
+        interval = os.getenv("SUP_INTERVAL", "5m")
+
+        if _SUP_MODULE_OK and next_supports:
+            sup_levels = next_supports(
+                symbol_ref, interval=interval, limit=500, log_fn=log
+            )
+            if sup_levels:
+                top_sup = sup_levels[0]
+                razones = ", ".join(top_sup.get("reasons", [])[:3])
+                log(
+                    f"🛡️ Próximo soporte: {top_sup['level']:.6f} (score {top_sup['score']:.2f}, dist≈{top_sup['distance_pct']:.2f}%)"
+                    + (f" | razones: {razones}" if razones else "")
+                )
+                # (Opcional) log de top 3:
+                # resumen = ", ".join([f"{x['level']:.6f} (s{x['score']:.2f}, d{x['distance_pct']:.2f}%)" for x in sup_levels[:3]])
+                # log(f"🛡️ Top3 soportes: {resumen}")
+            else:
+                log("🛡️ Próximo soporte: no encontrado (datos insuficientes)")
+        else:
+            log("🛡️ Soportes estimados: módulo no disponible")
+    except Exception as e:
+        log(f"⚠️ Error calculando soportes: {e}")
 
     try:
         symbol_ref = (
