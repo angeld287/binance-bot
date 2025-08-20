@@ -47,11 +47,12 @@ def next_supports(
     interval: str = "5m",
     limit: int = 500,
     log_fn: Optional[Callable[[str], None]] = None,
+    exchange: Optional[Client] = None,
 ) -> List[Dict[str, Any]]:
     """Estimate next support levels below current price."""
     log = log_fn or (lambda _msg: None)
 
-    client = _get_client()
+    client = exchange or _get_client()
     if client is None:
         log("🛡️ Soportes estimados: cliente/datos no disponibles")
         return []

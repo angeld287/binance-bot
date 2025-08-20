@@ -58,9 +58,14 @@ def _get_client() -> Optional[Client]:
         return None
 
 
-def next_resistances(symbol: str, interval: str = "5m", limit: int = 500) -> List[Dict]:
+def next_resistances(
+    symbol: str,
+    interval: str = "5m",
+    limit: int = 500,
+    exchange: Optional[Client] = None,
+) -> List[Dict]:
     """Estimate next resistance levels above current price."""
-    client = _get_client()
+    client = exchange or _get_client()
     if client is None:
         log("📚 Resistencias estimadas: cliente no disponible")
         return []

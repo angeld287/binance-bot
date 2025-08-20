@@ -808,7 +808,7 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
         interval = os.getenv("SUP_INTERVAL", "5m")
 
         sup_levels = next_supports(
-            symbol_ref, interval=interval, limit=500, log_fn=log
+            symbol_ref, interval=interval, limit=500, log_fn=log, exchange=exchange
         )
         if sup_levels:
             top_sup = sup_levels[0]
@@ -830,7 +830,9 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
             else (symbol if "symbol" in locals() else os.getenv("SYMBOL", "DOGE/USDT"))
         )
         interval = os.getenv("RES_INTERVAL", "5m")
-        levels = next_resistances(symbol_ref, interval=interval, limit=500)
+        levels = next_resistances(
+            symbol_ref, interval=interval, limit=500, exchange=exchange
+        )
 
         if levels:
             top = levels[0]
