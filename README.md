@@ -2,7 +2,7 @@
 
 Bot de trading de futuros en Binance con patrones en 15m. Permite desactivar stops dinámicos.
 
-## Variables de entorno
+## Variables de entorno.
 
 - `SYMBOL` (ej. `DOGEUSDT`): par a operar.
 - `USE_BREAKOUT_DYNAMIC_STOPS` (por defecto `false`): si es `true` habilita el movimiento automático de stop a break-even/verde y otras lógicas de micro stops.
