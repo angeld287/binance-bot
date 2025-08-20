@@ -825,7 +825,7 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
         else:
             log("🧱 Próxima resistencia: no encontrada (datos insuficientes)")
     except Exception as e:
-        log(f"⚠️ Error calculando resistencias: {e}")
+        log(f"❌❌❌❌❌ Error calculando resistencias: {e}")
 
     if bot.tiene_posicion_abierta():
         bot.verificar_y_configurar_tp_sl()
