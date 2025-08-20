@@ -7,13 +7,7 @@ import math
 from dotenv import load_dotenv
 from pattern_detection import detect_patterns
 from resistance_levels import next_resistances
-
-try:
-    from support_levels import next_supports
-    _SUP_MODULE_OK = True
-except Exception as _e:
-    _SUP_MODULE_OK = False
-    next_supports = None
+from support_levels import next_supports
 
 
 def get_proxies():
@@ -804,8 +798,6 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
 
     env_name = os.getenv("ENVIRONMENT") or ("TESTNET" if testnet else "PROD")
     log(f"Par: {symbol} | Precio actual: {price}")
-
-    import os
 
     try:
         symbol_ref = (
