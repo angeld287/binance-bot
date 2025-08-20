@@ -6,6 +6,7 @@ import logging
 import math
 from dotenv import load_dotenv
 from pattern_detection import detect_patterns
+from resistance_levels import next_resistances
 
 
 def get_proxies():
@@ -124,9 +125,6 @@ logger.propagate = False
 def log(msg: str):
     logger.info(msg)
 
-
-# Utilidades para leer porcentajes desde el entorno
-from resistance_levels import next_resistances
 
 def _get_pct_env(var, alt_var, default_decimal):
     """Devuelve el porcentaje en formato decimal (0.01=1%)."""
