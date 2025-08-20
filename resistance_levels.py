@@ -8,6 +8,18 @@ try:
 except Exception:  # pragma: no cover - library may not be available in tests
     Client = None  # type: ignore
 
+# Configuración de logging (AWS Lambda)
+logger = logging.getLogger("bot")
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    formatter = logging.Formatter("%(levelname)s - %(message)s")
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+logger.propagate = False
+
 def log(msg: str):
     logger.info(msg)
 
