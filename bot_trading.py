@@ -807,24 +807,19 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
         )
         interval = os.getenv("SUP_INTERVAL", "5m")
 
-        if _SUP_MODULE_OK and next_supports:
-            sup_levels = next_supports(
-                symbol_ref, interval=interval, limit=500, log_fn=log
+        sup_levels = next_supports(
+            symbol_ref, interval=interval, limit=500, log_fn=log
+        )
+        if sup_levels:
+            top_sup = sup_levels[0]
+            razones = ", ".join(top_sup.get("reasons", [])[:3])
+            log(
+                f"🛡️ Próximo soporte: {top_sup['level']:.6f} "
+                f"(score {top_sup['score']:.2f}, dist≈{top_sup['distance_pct']:.2f}%)"
+                + (f" | razones: {razones}" if razones else "")
             )
-            if sup_levels:
-                top_sup = sup_levels[0]
-                razones = ", ".join(top_sup.get("reasons", [])[:3])
-                log(
-                    f"🛡️ Próximo soporte: {top_sup['level']:.6f} (score {top_sup['score']:.2f}, dist≈{top_sup['distance_pct']:.2f}%)"
-                    + (f" | razones: {razones}" if razones else "")
-                )
-                # (Opcional) log de top 3:
-                # resumen = ", ".join([f"{x['level']:.6f} (s{x['score']:.2f}, d{x['distance_pct']:.2f}%)" for x in sup_levels[:3]])
-                # log(f"🛡️ Top3 soportes: {resumen}")
-            else:
-                log("🛡️ Próximo soporte: no encontrado (datos insuficientes)")
         else:
-            log("🛡️ Soportes estimados: módulo no disponible")
+            log("🛡️ Próximo soporte: no encontrado (datos insuficientes)")
     except Exception as e:
         log(f"⚠️ Error calculando soportes: {e}")
 
