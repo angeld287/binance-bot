@@ -33,6 +33,7 @@ RUN find /package -name "_cffi_backend*.so"
 # Copia tu script (si lo deseas probar en container)
 COPY bot_trading.py /package/
 COPY pattern_detection.py /package/
+COPY resistance_levels.py /package/
 
 # Setea el directorio de trabajo
 WORKDIR /package
