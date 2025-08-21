@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 import os
-from binance.client import Client
 import json
 import logging
 import math
+import time
+
+from binance.client import Client
 from dotenv import load_dotenv
+
 from pattern_detection import detect_patterns
 from resistance_levels import next_resistances
 from support_levels import next_supports
+from sr_levels import get_sr_levels
 
 
 def get_proxies():
@@ -110,6 +114,21 @@ def detectar_breakout(exchange, symbol, window=ANALYSIS_WINDOW):
 
 load_dotenv()
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    return os.getenv(name, str(default)).lower() in ("1", "true", "yes", "y")
+
+
+# Parámetros de monitoreo de órdenes pendientes
+PENDING_TTL_MIN = int(os.getenv("PENDING_TTL_MIN", "10"))
+PENDING_MAX_GAP_BPS = int(os.getenv("PENDING_MAX_GAP_BPS", "80"))
+PENDING_GAP_ATR_MULT = float(os.getenv("PENDING_GAP_ATR_MULT", "0.0"))
+PENDING_USE_SR3 = _env_bool("PENDING_USE_SR3", True)
+PENDING_SR_BUFFER_BPS = int(os.getenv("PENDING_SR_BUFFER_BPS", "15"))
+PENDING_CANCEL_CONFIRM_BARS = int(os.getenv("PENDING_CANCEL_CONFIRM_BARS", "2"))
+SR_TIMEFRAME = os.getenv("SR_TIMEFRAME", "15m")
+DRY_RUN = _env_bool("DRY_RUN", False)
+
 # Configuración de logging (AWS Lambda)
 logger = logging.getLogger("bot")
 logger.setLevel(logging.INFO)
@@ -125,6 +144,17 @@ logger.propagate = False
 
 def log(msg: str):
     logger.info(msg)
+
+
+def _parse_client_id(cid: str):
+    data = {}
+    if not cid:
+        return data
+    for part in cid.split("|"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            data[k] = v
+    return data
 
 
 def _get_pct_env(var, alt_var, default_decimal):
@@ -684,6 +714,18 @@ class FuturesBot:
             if monto is not None:
                 mensaje += f" | Monto: {monto} USDT"
             log(mensaje)
+
+            # Snapshot de SR3 para rastrear la orden
+            sr = get_sr_levels(self.symbol, SR_TIMEFRAME)
+            s3 = sr.get("S", [None, None, None])[2] if sr.get("S") else None
+            r3 = sr.get("R", [None, None, None])[2] if sr.get("R") else None
+            s3_i = int(s3) if s3 else 0
+            r3_i = int(r3) if r3 else 0
+            client_id = (
+                f"bot{int(time.time()*1000)}|sr3S={s3_i}|sr3R={r3_i}"
+                f"|srasof={sr.get('asof')}|ttl={PENDING_TTL_MIN}"
+            )
+
             order = self.exchange.futures_create_order(
                 symbol=self.symbol.replace("/", ""),
                 side=side.upper(),
@@ -691,6 +733,7 @@ class FuturesBot:
                 quantity=qty,
                 price=price_f,
                 timeInForce="GTC",
+                newClientOrderId=client_id,
             )
             log("Futuros: Orden límite creada y permanece activa")
 
@@ -759,6 +802,141 @@ class FuturesBot:
                         pass
         except Exception as e:
             log(f"❌❌❌❌❌ Error cancelando SL pendientes: {e}")
+
+
+    def revisar_ordenes_pendientes(self):
+        """Monitorea órdenes límite abiertas y las cancela si pierden validez."""
+        symbol = self.symbol.replace("/", "")
+        try:
+            orders = self.exchange.futures_get_open_orders(symbol=symbol)
+        except Exception as e:
+            log(f"❌❌❌❌❌ Error obteniendo órdenes pendientes: {e}")
+            return
+
+        now = int(time.time() * 1000)
+        for o in orders:
+            status = (o.get("status") or "").upper()
+            o_type = (o.get("type") or "").upper()
+            reduce_only = str(o.get("reduceOnly", "")).lower() == "true"
+            if status != "NEW" or o_type != "LIMIT" or reduce_only:
+                continue
+
+            side = (o.get("side") or "").upper()
+            try:
+                entry = float(o.get("price", 0))
+                executed = float(o.get("executedQty", 0))
+                orig = float(o.get("origQty", 0))
+                create_t = int(o.get("time"))
+            except Exception:
+                continue
+
+            age_min = (now - create_t) / 60000.0
+            try:
+                ticker = self.exchange.futures_symbol_ticker(symbol=symbol)
+                current_price = float(ticker.get("price"))
+            except Exception:
+                current_price = entry
+            dist_bps = abs(current_price - entry) / entry * 10000 if entry else 0
+
+            gap_atr_ok = False
+            if PENDING_GAP_ATR_MULT > 0:
+                try:
+                    kl = self.exchange.futures_klines(
+                        symbol=symbol, interval=SR_TIMEFRAME, limit=15
+                    )
+                    trs = []
+                    for i in range(1, len(kl)):
+                        high = float(kl[i][2])
+                        low = float(kl[i][3])
+                        prev_close = float(kl[i - 1][4])
+                        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+                        trs.append(tr)
+                    atr = sum(trs[-14:]) / min(14, len(trs)) if trs else None
+                    if atr is not None:
+                        gap_atr_ok = abs(current_price - entry) >= atr * PENDING_GAP_ATR_MULT
+                except Exception:
+                    gap_atr_ok = False
+
+            cid_data = _parse_client_id(o.get("clientOrderId", ""))
+            s3 = cid_data.get("sr3S")
+            r3 = cid_data.get("sr3R")
+            if (s3 is None or r3 is None) and PENDING_USE_SR3:
+                sr = get_sr_levels(self.symbol, SR_TIMEFRAME)
+                if s3 is None:
+                    s_vals = sr.get("S", [])
+                    s3 = s_vals[2] if len(s_vals) >= 3 else None
+                if r3 is None:
+                    r_vals = sr.get("R", [])
+                    r3 = r_vals[2] if len(r_vals) >= 3 else None
+            try:
+                s3 = float(s3) if s3 is not None else None
+            except Exception:
+                s3 = None
+            try:
+                r3 = float(r3) if r3 is not None else None
+            except Exception:
+                r3 = None
+
+            too_old = age_min >= PENDING_TTL_MIN
+            too_far = dist_bps >= PENDING_MAX_GAP_BPS or gap_atr_ok
+            sr_invalid = False
+            if PENDING_USE_SR3 and (s3 or r3):
+                if side == "SELL" and s3:
+                    sr_invalid = current_price <= s3 * (1 - PENDING_SR_BUFFER_BPS / 10000.0)
+                if side == "BUY" and r3:
+                    sr_invalid = current_price >= r3 * (1 + PENDING_SR_BUFFER_BPS / 10000.0)
+
+            reasons = []
+            if too_old:
+                reasons.append("ttl")
+            if too_far:
+                reasons.append("gap")
+            if sr_invalid:
+                reasons.append("sr3")
+            if not reasons:
+                continue
+
+            cfm = int(cid_data.get("cfm", 0))
+            if cfm + 1 < PENDING_CANCEL_CONFIRM_BARS:
+                new_id = o.get("clientOrderId", "") + f"|cfm={cfm + 1}"
+                if not DRY_RUN:
+                    try:
+                        if hasattr(self.exchange, "futures_cancel_replace_order"):
+                            self.exchange.futures_cancel_replace_order(
+                                symbol=symbol,
+                                side=side,
+                                type="LIMIT",
+                                timeInForce="GTC",
+                                price=entry,
+                                quantity=orig,
+                                cancelReplaceMode="MODIFY",
+                                cancelOrigClientOrderId=o.get("clientOrderId"),
+                                newClientOrderId=new_id,
+                            )
+                    except Exception:
+                        pass
+                continue
+
+            motivo = ",".join(reasons)
+            if DRY_RUN:
+                log(
+                    f"🚫 ORDEN PENDIENTE CANCELADA | {self.symbol} | side={side} | age={age_min:.1f}m | dist={dist_bps:.1f}bps | R3={r3} | S3={s3} | motivo={motivo}"
+                )
+                continue
+
+            try:
+                self.exchange.futures_cancel_order(symbol=symbol, orderId=o.get("orderId"))
+            except Exception as e:
+                log(f"❌ Error cancelando orden {o.get('orderId')}: {e}")
+            else:
+                log(
+                    f"🚫 ORDEN PENDIENTE CANCELADA | {self.symbol} | side={side} | age={age_min:.1f}m | dist={dist_bps:.1f}bps | R3={r3} | S3={s3} | motivo={motivo}"
+                )
+                if executed > 0:
+                    try:
+                        self.verificar_y_configurar_tp_sl()
+                    except Exception as e:
+                        log(f"❌ Error ajustando TP/SL: {e}")
 
     
     def cerrar_posicion(self):
