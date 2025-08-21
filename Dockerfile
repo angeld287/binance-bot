@@ -35,6 +35,7 @@ COPY bot_trading.py /package/
 COPY pattern_detection.py /package/
 COPY resistance_levels.py /package/
 COPY support_levels.py /package/
+COPY sr_levels.py /package/
 
 # Setea el directorio de trabajo
 WORKDIR /package
