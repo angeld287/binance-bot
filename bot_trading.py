@@ -143,107 +143,172 @@ def _get_pct_env(var, alt_var, default_decimal):
     return pct / 100.0
 
 
-def evaluate_trailing_sl_observer(exchange, symbol, position, price, sup_levels, res_levels):
-    """Evalúa y registra un trailing stop sin colocar órdenes."""
-
+def compute_trailing_sl_candidate(symbol, position, price, sup_levels, res_levels,
+                                  tick_size, price_precision, min_move_ticks, buffer_ticks):
+    """
+    position: objeto con positionAmt y entryPrice
+    Retorna dict con información del SL candidato.
+    """
     try:
         amt = float(position.get("positionAmt", 0)) if position else 0.0
     except Exception:
         amt = 0.0
-
-    if amt == 0:
-        log("⏭️ sin cambios | razón=sin_posicion")
-        return
-
-    side = "LONG" if amt > 0 else "SHORT"
     try:
-        entry = float(position.get("entryPrice", 0))
+        entry = float(position.get("entryPrice", 0)) if position else 0.0
     except Exception:
         entry = 0.0
-
-    # Obtención de precisiones
-    tick_size = None
-    price_precision = 6
-    try:
-        info = exchange.futures_exchange_info()
-        sym = symbol.replace("/", "")
-        s_info = next((s for s in info.get("symbols", []) if s.get("symbol") == sym), {})
-        price_precision = int(s_info.get("pricePrecision", 6)) or 6
-        for f in s_info.get("filters", []):
-            if f.get("filterType") == "PRICE_FILTER":
-                tick_size = float(f.get("tickSize", 0))
-                break
-        if not tick_size or tick_size <= 0:
-            tick_size = 1 / (10 ** price_precision)
-    except Exception:
-        tick_size = None
-
-    BE_BUFFER_TICKS = int(os.getenv("BE_BUFFER_TICKS", "3"))
-    MIN_MOVE_TICKS = int(os.getenv("MIN_MOVE_TICKS", "2"))
-
-    # Lectura simple de SL actual
+    if amt > 0:
+        side = "LONG"
+    elif amt < 0:
+        side = "SHORT"
+    else:
+        return {
+            "ok": False,
+            "side": "LONG",
+            "entry": entry,
+            "sl_act": None,
+            "anchor": entry,
+            "sl_cand": entry,
+            "reason": "no_position",
+        }
     sl_act = None
     try:
-        orders = exchange.futures_get_open_orders(symbol=symbol.replace("/", ""))
-        for o in orders:
-            t = (o.get("type") or "").upper()
-            if t in ("STOP", "STOP_MARKET"):
-                sl_act = float(o.get("stopPrice") or o.get("price"))
-                break
+        sl_act = float(position.get("stopLossPrice"))
     except Exception:
         sl_act = None
+    if sl_act is None:
+        try:
+            side_close = "SELL" if amt > 0 else "BUY"
+            orders = Client().futures_get_open_orders(symbol=symbol.replace("/", ""))
+            o = next(
+                (
+                    o
+                    for o in orders
+                    if (o.get("reduceOnly") or o.get("closePosition"))
+                    and (o.get("type") or "").upper() in ("STOP", "STOP_MARKET")
+                    and (o.get("side") or "").upper() == side_close
+                ),
+                None,
+            )
+            if o:
+                sl_act = float(o.get("stopPrice") or o.get("price"))
+        except Exception:
+            sl_act = None
 
     def round_to_tick(p):
         if p is None or tick_size is None:
             return p
         return ajustar_precio(p, tick_size, price_precision)
 
-    sl_cand = None
-    anchor_level = None
-
-    if side == "LONG" and sup_levels:
-        for s in sup_levels:
-            lvl = s.get("level")
-            if lvl and lvl > entry:
-                anchor_level = float(lvl)
-                break
-        if anchor_level:
-            sl_cand = round_to_tick(anchor_level - BE_BUFFER_TICKS * tick_size)
-    elif side == "SHORT" and res_levels:
-        for r in res_levels:
-            lvl = r.get("level")
-            if lvl and lvl < entry:
-                anchor_level = float(lvl)
-                break
-        if anchor_level:
-            sl_cand = round_to_tick(anchor_level + BE_BUFFER_TICKS * tick_size)
-
-    if sl_cand is None:
-        log("⏭️ sin cambios | razón=sin_nivel_valido")
-        return
-
-    delta_ref = sl_act if sl_act is not None else entry
-    delta = abs(sl_cand - delta_ref)
+    if side == "LONG":
+        anchor = next((float(s.get("level")) for s in (sup_levels or []) if s.get("level") and float(s.get("level")) > entry), None)
+        if anchor is None:
+            return {
+                "ok": False,
+                "side": side,
+                "entry": entry,
+                "sl_act": sl_act,
+                "anchor": entry,
+                "sl_cand": entry,
+                "reason": "no_valid_level",
+            }
+        sl_cand = round_to_tick(anchor - buffer_ticks * tick_size)
+    else:
+        anchor = next((float(r.get("level")) for r in (res_levels or []) if r.get("level") and float(r.get("level")) < entry), None)
+        if anchor is None:
+            return {
+                "ok": False,
+                "side": side,
+                "entry": entry,
+                "sl_act": sl_act,
+                "anchor": entry,
+                "sl_cand": entry,
+                "reason": "no_valid_level",
+            }
+        sl_cand = round_to_tick(anchor + buffer_ticks * tick_size)
 
     if sl_act is not None:
         monotonic = sl_cand > sl_act if side == "LONG" else sl_cand < sl_act
-        delta_ok = delta >= MIN_MOVE_TICKS * tick_size
-        if not monotonic or not delta_ok:
-            log("⏭️ sin cambios | razón=Δ<ticks o no_mejora")
-            return
+        if not monotonic:
+            return {
+                "ok": False,
+                "side": side,
+                "entry": entry,
+                "sl_act": sl_act,
+                "anchor": anchor,
+                "sl_cand": sl_cand,
+                "reason": "non_monotonic",
+            }
+        if abs(sl_cand - sl_act) < min_move_ticks * tick_size:
+            return {
+                "ok": False,
+                "side": side,
+                "entry": entry,
+                "sl_act": sl_act,
+                "anchor": anchor,
+                "sl_cand": sl_cand,
+                "reason": "delta_below_min",
+            }
 
-    if side == "LONG":
-        log(
-            f"🔎 OBS: LONG entry={entry:.6f} px={price:.6f} SL_act={sl_act if sl_act is not None else '—'} "
-            f"| S*={anchor_level:.6f} buf={BE_BUFFER_TICKS}t → SL_cand={sl_cand:.6f} "
-            f"| Δ={delta:.6f} (ok)"
+    return {
+        "ok": True,
+        "side": side,
+        "entry": entry,
+        "sl_act": sl_act,
+        "anchor": anchor,
+        "sl_cand": sl_cand,
+        "reason": "",
+    }
+
+
+def apply_trailing_sl(exchange, symbol, side, qty, sl_cand, tick_size, price_precision, qty_precision):
+    """Coloca/actualiza STOP_MARKET reduceOnly al precio sl_cand."""
+    side_close = "SELL" if side == "LONG" else "BUY"
+    sym = symbol.replace("/", "")
+    try:
+        orders = exchange.futures_get_open_orders(symbol=sym)
+    except Exception:
+        orders = []
+
+    sl_order = next(
+        (
+            o
+            for o in orders
+            if (o.get("reduceOnly") or o.get("closePosition"))
+            and (o.get("type") or "").upper() in ("STOP", "STOP_MARKET")
+            and (o.get("side") or "").upper() == side_close
+        ),
+        None,
+    )
+
+    price_rounded = ajustar_precio(sl_cand, tick_size, price_precision)
+
+    if sl_order:
+        try:
+            stop_price = float(sl_order.get("stopPrice") or sl_order.get("price") or 0.0)
+        except Exception:
+            stop_price = 0.0
+        if abs(stop_price - price_rounded) < 0.5 * tick_size:
+            log("⏭️ SL sin cambios (dif < 0.5t)")
+            return
+        try:
+            exchange.futures_cancel_order(symbol=sym, orderId=sl_order.get("orderId"))
+        except Exception as e:
+            log(f"⚠️ Error cancelando SL: {e}")
+
+    qty_fmt = float(f"{qty:.{qty_precision}f}")
+    try:
+        exchange.futures_create_order(
+            symbol=sym,
+            side=side_close,
+            type="STOP_MARKET",
+            stopPrice=price_rounded,
+            quantity=qty_fmt,
+            reduceOnly=True,
         )
-    else:
-        log(
-            f"🔎 OBS: SHORT entry={entry:.6f} px={price:.6f} SL_act={sl_act if sl_act is not None else '—'} "
-            f"| R*={anchor_level:.6f} buf={BE_BUFFER_TICKS}t → SL_cand={sl_cand:.6f} "
-            f"| Δ={delta:.6f} (ok)"
-        )
+        log(f"🔒 SL actualizado → {price_rounded:.6f} ({side_close} STOP_MARKET reduceOnly)")
+    except Exception as e:
+        log(f"⚠️ Error actualizando SL: {e}")
 
 # Configuraciones personalizadas por par de trading
 config_por_moneda = {
@@ -961,7 +1026,43 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
         log(f"❌❌❌❌❌ Error calculando resistencias: {e}")
     
     position_info = bot.obtener_posicion_abierta()
-    evaluate_trailing_sl_observer(exchange, symbol_ref, position_info, price, sup_levels, levels)
+    position_for_sl = position_info or {"positionAmt": 0, "entryPrice": 0}
+
+    BE_BUFFER_TICKS = int(os.getenv("BE_BUFFER_TICKS", "3"))
+    MIN_MOVE_TICKS = int(os.getenv("MIN_MOVE_TICKS", "2"))
+    mode = os.getenv("TRAILING_SL_MODE", "observe")
+
+    result = compute_trailing_sl_candidate(
+        symbol_ref,
+        position_for_sl,
+        price,
+        sup_levels,
+        levels,
+        bot.tick_size,
+        bot.price_precision,
+        MIN_MOVE_TICKS,
+        BE_BUFFER_TICKS,
+    )
+
+    log(
+        f"🔎 OBS: {('LONG' if float(position_for_sl.get('positionAmt', 0))>0 else 'SHORT')} entry={result['entry']:.6f} px={price:.6f} "
+        f"SL_act={result['sl_act'] if result['sl_act'] is not None else '—'} "
+        f"| {'S*' if result['side']=='LONG' else 'R*'}={result['anchor']:.6f} buf={BE_BUFFER_TICKS}t → SL_cand={result['sl_cand']:.6f} "
+        f"| {'ok' if result['ok'] else 'skip:'+result['reason']}"
+    )
+
+    if mode == "execute" and result["ok"]:
+        qty_abs = abs(float(position_info["positionAmt"]))
+        apply_trailing_sl(
+            exchange,
+            symbol_ref,
+            result["side"],
+            qty_abs,
+            result["sl_cand"],
+            bot.tick_size,
+            bot.price_precision,
+            bot.quantity_precision,
+        )
 
     if position_info:
         bot.verificar_y_configurar_tp_sl()
