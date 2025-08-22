@@ -18,6 +18,9 @@ from support_levels import next_supports
 from sr_levels import get_sr_levels
 
 
+DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
+
+
 def _mask_key(key: str) -> str:
     """Devuelve la clave enmascarada mostrando solo los primeros y últimos 3 caracteres."""
     if not key:
@@ -53,19 +56,20 @@ class LoggingSession(requests.Session):
         masked_key = _mask_key(api_key)
         is_form = ctype == "application/x-www-form-urlencoded"
 
-        self._logger.info(
-            "Request %s %s | Content-Type: %s | X-MBX-APIKEY: %s | body: %s",
-            method.upper(),
-            url,
-            ctype,
-            masked_key,
-            body,
-        )
-        self._logger.info(
-            "Content-Type is application/x-www-form-urlencoded: %s | signature at end: %s",
-            is_form,
-            has_sig_end,
-        )
+        if DEBUG_MODE:
+            self._logger.info(
+                "DEBUG - Request %s %s | Content-Type: %s | X-MBX-APIKEY: %s | body: %s",
+                method.upper(),
+                url,
+                ctype,
+                masked_key,
+                body,
+            )
+            self._logger.info(
+                "DEBUG - Content-Type is application/x-www-form-urlencoded: %s | signature at end: %s",
+                is_form,
+                has_sig_end,
+            )
         return super().request(method, url, **kwargs)
 
 
@@ -245,6 +249,11 @@ DRIFT_MS = 0
 
 def log(msg: str):
     logger.info(msg)
+
+
+def debug_log(msg: str):
+    if DEBUG_MODE:
+        logger.info(f"DEBUG - {msg}")
 
 
 def server_drift_ms() -> int:
@@ -527,8 +536,8 @@ class FuturesBot:
             self.quantity_precision = s_info.get("quantityPrecision", 3)
             self.price_precision = int(s_info.get("pricePrecision", 6))
             if self.price_precision < 1:
-                log(
-                    f"[DEBUG] pricePrecision inválido {self.price_precision}. Se ajusta a 6"
+                debug_log(
+                    f"pricePrecision inválido {self.price_precision}. Se ajusta a 6"
                 )
                 self.price_precision = 6
 
@@ -580,7 +589,7 @@ class FuturesBot:
                     )
                     return None
                 return ajustar_precio(price, self.tick_size, price_precision, rounding)
-            log(f"[DEBUG] Precisión final a usar: {price_precision}")
+            debug_log(f"Precisión final a usar: {price_precision}")
             return round(float(price), price_precision)
         except Exception:
             return price
@@ -1498,6 +1507,9 @@ def handler(event, context):
     """AWS Lambda handler que ejecuta una iteración de trading."""
     log("═══════════════════ 🚀🚀🚀 INICIO EJECUCIÓN LAMBDA 🚀🚀🚀 ═══════════════════")
     load_dotenv()
+
+    global DEBUG_MODE
+    DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 
     key = os.getenv("BINANCE_API_KEY")
     secret = os.getenv("BINANCE_API_SECRET")

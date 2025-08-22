@@ -8,6 +8,7 @@ Bot de trading de futuros en Binance con patrones en 15m. Permite desactivar sto
 - `USE_BREAKOUT_DYNAMIC_STOPS` (por defecto `false`): si es `true` habilita el movimiento automático de stop a break-even/verde y otras lógicas de micro stops.
 - `TAKE_PROFIT_PCT` (por defecto `2.0`): porcentaje de take profit.
 - `STOP_LOSS_PCT` (por defecto `1.0`): porcentaje de stop loss.
+- `DEBUG_MODE` (por defecto `false`): si es `true` habilita logs detallados de requests.
 
 Ejemplo de `.env`:
 
@@ -16,6 +17,7 @@ SYMBOL=DOGEUSDT
 USE_BREAKOUT_DYNAMIC_STOPS=false
 TAKE_PROFIT_PCT=2.0
 STOP_LOSS_PCT=1.0
+DEBUG_MODE=false
 ```
 
 ## Pruebas
