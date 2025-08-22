@@ -177,14 +177,30 @@ load_dotenv()
 CID_ALLOWED_RE = re.compile(r"^[A-Za-z0-9-_]+$")
 ORDER_META_BY_CID = {}
 ORDER_META_BY_OID = {}
+IDEMPOTENCY_REGISTRY: dict[str, float] = {}
+
+def _clean_idempotency():
+    now = time.time()
+    expired = [k for k, v in IDEMPOTENCY_REGISTRY.items() if v < now]
+    for k in expired:
+        del IDEMPOTENCY_REGISTRY[k]
+
+def register_idempotency(key: str, ttl_min: int):
+    _clean_idempotency()
+    IDEMPOTENCY_REGISTRY[key] = time.time() + ttl_min * 60
+
+def idempotency_hit(key: str) -> bool:
+    _clean_idempotency()
+    return key in IDEMPOTENCY_REGISTRY
 
 
 def generate_client_order_id(params: dict, epoch_ms: int | None = None) -> str:
     """Genera un clientOrderId compacto y determinístico."""
-    if epoch_ms is None:
-        epoch_ms = int(time.time() * 1000)
     base = json.dumps(params, sort_keys=True, separators=(",", ":"))
-    h = hashlib.sha256(base.encode()).hexdigest()[:8]
+    hfull = hashlib.sha256(base.encode()).hexdigest()
+    if epoch_ms is None:
+        epoch_ms = int(hfull[:13], 16)
+    h = hfull[:8]
     return f"bot-{epoch_ms}-{h}"
 
 
@@ -834,6 +850,23 @@ class FuturesBot:
                 log(f"Futuros: Precio inválido {price_f}. Orden no enviada")
                 return
 
+            symbol = self.symbol.replace("/", "")
+            try:
+                open_orders = self.exchange.futures_get_open_orders(symbol=symbol)
+            except Exception as e:
+                log(f"❌❌❌❌❌ Error consultando órdenes previas: {e}")
+                open_orders = []
+            matches = [
+                o for o in open_orders
+                if (o.get("side", "").upper() == side.upper()
+                    and (o.get("type") or o.get("info", {}).get("type", "")).upper() == "LIMIT"
+                    and float(o.get("price", 0)) == price_f
+                    and float(o.get("origQty") or o.get("quantity") or 0) == qty)
+            ]
+            log(f"Futuros: pre-check openOrders coincidencias={len(matches)}")
+            if matches:
+                return
+
             monto = None
             try:
                 if qty and price_f and qty > 0 and price_f > 0:
@@ -854,17 +887,19 @@ class FuturesBot:
             r3_i = int(r3) if r3 else 0
             signal_ts = int(time.time() * 1000)
             params = {
-                "symbol": self.symbol.replace("/", ""),
+                "symbol": symbol,
                 "side": side.upper(),
                 "type": "LIMIT",
                 "price": price_f,
                 "quantity": qty,
                 "timeInForce": "GTC",
-                "signal_ts": signal_ts,
-                "ttl": PENDING_TTL_MIN,
             }
-            client_id = generate_client_order_id(params, epoch_ms=signal_ts)
+            client_id = generate_client_order_id(params)
             _log_cid(client_id)
+            hit = idempotency_hit(client_id)
+            log(f"idempotency_key={client_id} | hit={hit}")
+            if hit:
+                return
             metadata = {
                 "sr3S": s3_i,
                 "sr3R": r3_i,
@@ -877,7 +912,7 @@ class FuturesBot:
 
             try:
                 order = self.exchange.futures_create_order(
-                    symbol=self.symbol.replace("/", ""),
+                    symbol=symbol,
                     side=side.upper(),
                     type="LIMIT",
                     quantity=qty,
@@ -889,7 +924,7 @@ class FuturesBot:
                 if e.code == -1022:
                     log("⚠️ Binance -1022, reintentando sin clientOrderId")
                     order = self.exchange.futures_create_order(
-                        symbol=self.symbol.replace("/", ""),
+                        symbol=symbol,
                         side=side.upper(),
                         type="LIMIT",
                         quantity=qty,
@@ -902,6 +937,7 @@ class FuturesBot:
 
             _log_cid(client_id or "")
             store_order_metadata(client_id, order, metadata)
+            register_idempotency(client_id, PENDING_TTL_MIN)
             log("Futuros: Orden límite creada y permanece activa")
 
             # Guardar información de la orden para validaciones posteriores
