@@ -5,6 +5,7 @@ import logging
 import math
 import time
 
+import requests
 from binance.client import Client
 from dotenv import load_dotenv
 
@@ -142,8 +143,32 @@ if not logger.handlers:
 logger.propagate = False
 
 
+DRIFT_MS = 0
+
+
 def log(msg: str):
     logger.info(msg)
+
+
+def server_drift_ms() -> int:
+    """Calcula la deriva de tiempo con el servidor de Binance en ms."""
+    url = "https://fapi.binance.com/fapi/v1/time"
+    local_ms = int(time.time() * 1000)
+    server_ms = local_ms
+    try:
+        resp = requests.get(url, timeout=5, proxies=get_proxies())
+        data = resp.json()
+        server_ms = int(data.get("serverTime", server_ms))
+    except Exception:
+        pass
+    drift = server_ms - local_ms
+    logger.info(
+        "Binance timing: serverTime=%d localTime=%d drift_ms=%+d",
+        server_ms,
+        local_ms,
+        drift,
+    )
+    return drift
 
 
 def _parse_client_id(cid: str):
@@ -1334,9 +1359,14 @@ def handler(event, context):
         os.getenv("USE_BREAKOUT_DYNAMIC_STOPS", "false").lower() == "true"
     )
 
+    global DRIFT_MS
+    DRIFT_MS = server_drift_ms()
+
     proxies = get_proxies()
     req_params = {"proxies": proxies} if proxies else None
     client = Client(key, secret, testnet=testnet, requests_params=req_params)
+    client.timestamp_offset = DRIFT_MS
+    client.REQUEST_RECVWINDOW = 5000
     exchange = LoggingClient(client, testnet)
     if testnet:
         print("Modo TESTNET activado")
