@@ -4,9 +4,12 @@ import json
 import logging
 import math
 import time
+import hashlib
+import re
 
 import requests
 from binance.client import Client
+from binance.exceptions import BinanceAPIException
 from dotenv import load_dotenv
 
 from pattern_detection import detect_patterns
@@ -165,6 +168,49 @@ def detectar_breakout(exchange, symbol, window=ANALYSIS_WINDOW):
 
 
 load_dotenv()
+
+
+CID_ALLOWED_RE = re.compile(r"^[A-Za-z0-9-_]+$")
+ORDER_META_BY_CID = {}
+ORDER_META_BY_OID = {}
+
+
+def generate_client_order_id(params: dict, epoch_ms: int | None = None) -> str:
+    """Genera un clientOrderId compacto y determinístico."""
+    if epoch_ms is None:
+        epoch_ms = int(time.time() * 1000)
+    base = json.dumps(params, sort_keys=True, separators=(",", ":"))
+    h = hashlib.sha256(base.encode()).hexdigest()[:8]
+    return f"bot-{epoch_ms}-{h}"
+
+
+def _log_cid(cid: str):
+    charset_ok = bool(CID_ALLOWED_RE.fullmatch(cid))
+    logger.info(
+        "clientOrderId=%s | len=%d | charset_ok=%s",
+        cid,
+        len(cid),
+        charset_ok,
+    )
+
+
+def store_order_metadata(cid: str, order: dict | None, meta: dict):
+    if cid:
+        ORDER_META_BY_CID[cid] = meta
+    if order and order.get("orderId") is not None:
+        ORDER_META_BY_OID[str(order["orderId"])] = meta
+    logger.info("metadata mapped | cid=%s | oid=%s | data=%s", cid, order.get("orderId") if order else None, meta)
+
+
+def get_order_metadata(order: dict) -> dict:
+    cid = order.get("clientOrderId") or ""
+    oid = str(order.get("orderId", ""))
+    meta = ORDER_META_BY_CID.get(cid)
+    if meta is None:
+        meta = ORDER_META_BY_OID.get(oid)
+    if meta is None:
+        meta = _parse_client_id(cid)
+    return meta
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -797,20 +843,56 @@ class FuturesBot:
             r3 = sr.get("R", [None, None, None])[2] if sr.get("R") else None
             s3_i = int(s3) if s3 else 0
             r3_i = int(r3) if r3 else 0
-            client_id = (
-                f"bot{int(time.time()*1000)}|sr3S={s3_i}|sr3R={r3_i}"
-                f"|srasof={sr.get('asof')}|ttl={PENDING_TTL_MIN}"
-            )
+            signal_ts = int(time.time() * 1000)
+            params = {
+                "symbol": self.symbol.replace("/", ""),
+                "side": side.upper(),
+                "type": "LIMIT",
+                "price": price_f,
+                "quantity": qty,
+                "timeInForce": "GTC",
+                "signal_ts": signal_ts,
+                "ttl": PENDING_TTL_MIN,
+            }
+            client_id = generate_client_order_id(params, epoch_ms=signal_ts)
+            _log_cid(client_id)
+            metadata = {
+                "sr3S": s3_i,
+                "sr3R": r3_i,
+                "srasof": sr.get("asof"),
+                "ttl": PENDING_TTL_MIN,
+                "signal_ts": signal_ts,
+                "cfm": 0,
+                "base_id": client_id,
+            }
 
-            order = self.exchange.futures_create_order(
-                symbol=self.symbol.replace("/", ""),
-                side=side.upper(),
-                type="LIMIT",
-                quantity=qty,
-                price=price_f,
-                timeInForce="GTC",
-                newClientOrderId=client_id,
-            )
+            try:
+                order = self.exchange.futures_create_order(
+                    symbol=self.symbol.replace("/", ""),
+                    side=side.upper(),
+                    type="LIMIT",
+                    quantity=qty,
+                    price=price_f,
+                    timeInForce="GTC",
+                    newClientOrderId=client_id,
+                )
+            except BinanceAPIException as e:
+                if e.code == -1022:
+                    log("⚠️ Binance -1022, reintentando sin clientOrderId")
+                    order = self.exchange.futures_create_order(
+                        symbol=self.symbol.replace("/", ""),
+                        side=side.upper(),
+                        type="LIMIT",
+                        quantity=qty,
+                        price=price_f,
+                        timeInForce="GTC",
+                    )
+                    client_id = ""
+                else:
+                    raise
+
+            _log_cid(client_id or "")
+            store_order_metadata(client_id, order, metadata)
             log("Futuros: Orden límite creada y permanece activa")
 
             # Guardar información de la orden para validaciones posteriores
@@ -933,7 +1015,7 @@ class FuturesBot:
                 except Exception:
                     gap_atr_ok = False
 
-            cid_data = _parse_client_id(o.get("clientOrderId", ""))
+            cid_data = get_order_metadata(o)
             s3 = cid_data.get("sr3S")
             r3 = cid_data.get("sr3R")
             if (s3 is None or r3 is None) and PENDING_USE_SR3:
@@ -973,22 +1055,31 @@ class FuturesBot:
                 continue
 
             cfm = int(cid_data.get("cfm", 0))
+            base_id = cid_data.get("base_id", o.get("clientOrderId") or f"oid{o.get('orderId')}")
             if cfm + 1 < PENDING_CANCEL_CONFIRM_BARS:
-                new_id = o.get("clientOrderId", "") + f"|cfm={cfm + 1}"
+                new_id = f"{base_id}-c{cfm + 1}"
+                new_meta = dict(cid_data)
+                new_meta["cfm"] = cfm + 1
+                new_meta["base_id"] = base_id
                 if not DRY_RUN:
                     try:
                         if hasattr(self.exchange, "futures_cancel_replace_order"):
-                            self.exchange.futures_cancel_replace_order(
-                                symbol=symbol,
-                                side=side,
-                                type="LIMIT",
-                                timeInForce="GTC",
-                                price=entry,
-                                quantity=orig,
-                                cancelReplaceMode="MODIFY",
-                                cancelOrigClientOrderId=o.get("clientOrderId"),
-                                newClientOrderId=new_id,
-                            )
+                            kwargs = {
+                                "symbol": symbol,
+                                "side": side,
+                                "type": "LIMIT",
+                                "timeInForce": "GTC",
+                                "price": entry,
+                                "quantity": orig,
+                                "cancelReplaceMode": "MODIFY",
+                                "newClientOrderId": new_id,
+                            }
+                            if o.get("clientOrderId"):
+                                kwargs["cancelOrigClientOrderId"] = o.get("clientOrderId")
+                            else:
+                                kwargs["cancelOrigOrderId"] = o.get("orderId")
+                            self.exchange.futures_cancel_replace_order(**kwargs)
+                            store_order_metadata(new_id, None, new_meta)
                     except Exception:
                         pass
                 continue
@@ -1001,9 +1092,18 @@ class FuturesBot:
                 continue
 
             try:
-                self.exchange.futures_cancel_order(symbol=symbol, orderId=o.get("orderId"))
+                if o.get("clientOrderId"):
+                    self.exchange.futures_cancel_order(
+                        symbol=symbol, origClientOrderId=o.get("clientOrderId")
+                    )
+                else:
+                    self.exchange.futures_cancel_order(
+                        symbol=symbol, orderId=o.get("orderId")
+                    )
             except Exception as e:
-                log(f"❌ Error cancelando orden {o.get('orderId')}: {e}")
+                log(
+                    f"❌ Error cancelando orden {o.get('orderId') or o.get('clientOrderId')}: {e}"
+                )
             else:
                 log(
                     f"🚫 ORDEN PENDIENTE CANCELADA | {self.symbol} | side={side} | age={age_min:.1f}m | dist={dist_bps:.1f}bps | R3={r3} | S3={s3} | motivo={motivo}"

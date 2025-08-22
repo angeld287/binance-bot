@@ -28,7 +28,14 @@ class DummyExchange:
     def futures_symbol_ticker(self, symbol):
         return {"price": str(self.price)}
 
-    def futures_cancel_order(self, symbol, orderId):
+    def futures_cancel_order(self, symbol, orderId=None, origClientOrderId=None):
+        if orderId is None and origClientOrderId is not None:
+            target = next((o for o in self.open_orders if o.get("clientOrderId") == origClientOrderId), None)
+            if target:
+                orderId = target["orderId"]
+            else:
+                self.cancelled.append(origClientOrderId)
+                return
         self.cancelled.append(orderId)
         self.open_orders = [o for o in self.open_orders if o["orderId"] != orderId]
 
@@ -53,6 +60,8 @@ class DummyExchange:
 
 
 def test_cancel_by_ttl():
+    bot_trading.ORDER_META_BY_CID.clear()
+    bot_trading.ORDER_META_BY_OID.clear()
     now = int(time.time() * 1000)
     order = {
         "orderId": 1,
@@ -76,6 +85,8 @@ def test_cancel_by_ttl():
 
 
 def test_cancel_by_distance():
+    bot_trading.ORDER_META_BY_CID.clear()
+    bot_trading.ORDER_META_BY_OID.clear()
     now = int(time.time() * 1000)
     order = {
         "orderId": 2,
@@ -99,8 +110,10 @@ def test_cancel_by_distance():
 
 
 def test_cancel_by_sr3_buy():
+    bot_trading.ORDER_META_BY_CID.clear()
+    bot_trading.ORDER_META_BY_OID.clear()
     now = int(time.time() * 1000)
-    cid = "x|sr3S=90|sr3R=105|srasof=1|ttl=10"
+    cid = "bot-1-deadbeef"
     order = {
         "orderId": 3,
         "status": "NEW",
@@ -112,6 +125,7 @@ def test_cancel_by_sr3_buy():
         "time": now,
         "clientOrderId": cid
     }
+    bot_trading.ORDER_META_BY_CID[cid] = {"sr3S": "90", "sr3R": "105", "srasof": 1, "ttl": 10, "cfm": 0, "base_id": cid}
     ex = DummyExchange([order], price=106)
     bot = FuturesBot(ex, "TEST/USDT")
     bot_trading.PENDING_TTL_MIN = 10
@@ -123,8 +137,10 @@ def test_cancel_by_sr3_buy():
 
 
 def test_cancel_by_sr3_sell():
+    bot_trading.ORDER_META_BY_CID.clear()
+    bot_trading.ORDER_META_BY_OID.clear()
     now = int(time.time() * 1000)
-    cid = "x|sr3S=95|sr3R=105|srasof=1|ttl=10"
+    cid = "bot-1-cafebabe"
     order = {
         "orderId": 4,
         "status": "NEW",
@@ -136,6 +152,7 @@ def test_cancel_by_sr3_sell():
         "time": now,
         "clientOrderId": cid
     }
+    bot_trading.ORDER_META_BY_CID[cid] = {"sr3S": "95", "sr3R": "105", "srasof": 1, "ttl": 10, "cfm": 0, "base_id": cid}
     ex = DummyExchange([order], price=94)
     bot = FuturesBot(ex, "TEST/USDT")
     bot_trading.PENDING_TTL_MIN = 10
@@ -147,6 +164,8 @@ def test_cancel_by_sr3_sell():
 
 
 def test_partial_fill_adjusts_tp_sl():
+    bot_trading.ORDER_META_BY_CID.clear()
+    bot_trading.ORDER_META_BY_OID.clear()
     now = int(time.time() * 1000)
     order = {
         "orderId": 5,
