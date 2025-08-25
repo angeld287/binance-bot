@@ -1,10 +1,10 @@
 import os
 import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 
-from bot_trading import FuturesBot, config_por_moneda, IDEMPOTENCY_REGISTRY
-import bot_trading
+from core.bot_trading import FuturesBot, config_por_moneda, IDEMPOTENCY_REGISTRY
+import core.bot_trading as bot_trading
 
 config_por_moneda["TEST/USDT"] = {"atr_factor": 1.0}
 

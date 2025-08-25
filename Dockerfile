@@ -31,11 +31,14 @@ RUN pip install --no-binary=cffi -r requirements.txt -t /package && \
 RUN find /package -name "_cffi_backend*.so"
 
 # Copia tu script (si lo deseas probar en container)
-COPY bot_trading.py /package/
-COPY pattern_detection.py /package/
-COPY resistance_levels.py /package/
-COPY support_levels.py /package/
-COPY sr_levels.py /package/
+COPY src/core/bot_trading.py /package/
+COPY src/core/exchange.py /package/
+COPY src/core/logging_utils.py /package/
+COPY src/analysis/pattern_detection.py /package/
+COPY src/analysis/resistance_levels.py /package/
+COPY src/analysis/support_levels.py /package/
+COPY src/analysis/sr_levels.py /package/
+COPY src/strategies /package/strategies
 
 # Setea el directorio de trabajo
 WORKDIR /package
