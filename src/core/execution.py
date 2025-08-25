@@ -1340,9 +1340,9 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
                 bot.abrir_posicion(side, qty, order_price, rango)
         else:
             if testnet:
-                print(f"TESTNET activo - Sin breakout - Apalancamiento: {lev}x")
+                print(f"TESTNET activo - Sin señal de estrategia - Apalancamiento: {lev}x")
             else:
-                print("Sin breakout identificado")
+                print("Sin señal de estrategia")
 
     return price
 
