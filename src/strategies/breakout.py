@@ -1,6 +1,6 @@
 """Breakout-based trading strategy utilities."""
 
-from pattern_detection import detect_patterns
+from analysis.pattern_detection import detect_patterns
 
 
 ANALYSIS_WINDOW = 12

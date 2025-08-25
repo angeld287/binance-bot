@@ -1,85 +1,24 @@
 # -*- coding: utf-8 -*-
 import os
 import json
-import logging
 import math
 import time
 import hashlib
 import re
 
-import requests
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 from dotenv import load_dotenv
 
-from resistance_levels import next_resistances
-from support_levels import next_supports
-from sr_levels import get_sr_levels
+from analysis.resistance_levels import next_resistances
+from analysis.support_levels import next_supports
+from analysis.sr_levels import get_sr_levels
 from strategies import detectar_breakout
 
+from .exchange import get_proxies, LoggingClient, server_drift_ms
+from .logging_utils import logger, log, debug_log, LoggingSession
+from . import logging_utils
 
-DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-
-
-def _mask_key(key: str) -> str:
-    """Devuelve la clave enmascarada mostrando solo los primeros y últimos 3 caracteres."""
-    if not key:
-        return ""
-    if len(key) <= 6:
-        return key[0] + "***" + key[-1]
-    return f"{key[:3]}***{key[-3:]}"
-
-
-class LoggingSession(requests.Session):
-    """Sesión de requests que registra cada request saliente."""
-
-    def __init__(self, logger):
-        super().__init__()
-        self._logger = logger
-
-    def request(self, method, url, **kwargs):
-        headers = kwargs.get("headers", {})
-        data = kwargs.get("data")
-        ctype = headers.get("Content-Type") or self.headers.get("Content-Type")
-        api_key = headers.get("X-MBX-APIKEY") or self.headers.get("X-MBX-APIKEY")
-
-        body = data or ""
-        if isinstance(body, bytes):
-            body = body.decode()
-
-        has_sig_end = False
-        if body and "signature=" in body:
-            prefix, sig = body.rsplit("signature=", 1)
-            has_sig_end = body.endswith("signature=" + sig)
-            body = f"{prefix}signature=<hidden len={len(sig)}>"
-
-        masked_key = _mask_key(api_key)
-        is_form = ctype == "application/x-www-form-urlencoded"
-
-        if DEBUG_MODE:
-            self._logger.info(
-                "DEBUG - Request %s %s | Content-Type: %s | X-MBX-APIKEY: %s | body: %s",
-                method.upper(),
-                url,
-                ctype,
-                masked_key,
-                body,
-            )
-            self._logger.info(
-                "DEBUG - Content-Type is application/x-www-form-urlencoded: %s | signature at end: %s",
-                is_form,
-                has_sig_end,
-            )
-        return super().request(method, url, **kwargs)
-
-
-def get_proxies():
-    """Devuelve diccionario de proxies o None si no se usa proxy."""
-    testnet = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
-    proxy = os.getenv("PROXY_URL")
-    if not testnet and proxy:
-        return {"http": proxy, "https": proxy}
-    return None
 
 
 def ajustar_precio(precio, tick_size, price_precision=6, direction="floor"):
@@ -100,26 +39,6 @@ def ajustar_precio(precio, tick_size, price_precision=6, direction="floor"):
         return precio
 
 
-class LoggingClient:
-    """Envuelve un Client para registrar cada request."""
-
-    def __init__(self, client, testnet):
-        self._client = client
-        self.testnet = testnet
-
-    def __getattr__(self, name):
-        attr = getattr(self._client, name)
-        if callable(attr):
-            def wrapper(*args, **kwargs):
-                proxies = get_proxies()
-                env = "testnet" if self.testnet else "producción"
-                proxy_msg = "sí" if proxies else "no"
-                #log(f"Llamada {name} | entorno: {env} | usando proxy: {proxy_msg}")
-                return attr(*args, **kwargs)
-
-            return wrapper
-        return attr
-
 
 
 
@@ -130,6 +49,7 @@ CID_ALLOWED_RE = re.compile(r"^[A-Za-z0-9-_]+$")
 ORDER_META_BY_CID = {}
 ORDER_META_BY_OID = {}
 IDEMPOTENCY_REGISTRY: dict[str, float] = {}
+DRIFT_MS = 0
 
 def _clean_idempotency():
     now = time.time()
@@ -199,50 +119,6 @@ PENDING_CANCEL_CONFIRM_BARS = int(os.getenv("PENDING_CANCEL_CONFIRM_BARS", "2"))
 SR_TIMEFRAME = os.getenv("SR_TIMEFRAME", "15m")
 DRY_RUN = _env_bool("DRY_RUN", False)
 
-# Configuración de logging (AWS Lambda)
-logger = logging.getLogger("bot")
-logger.setLevel(logging.INFO)
-
-if not logger.handlers:
-    formatter = logging.Formatter("%(levelname)s - %(message)s")
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
-logger.propagate = False
-
-
-DRIFT_MS = 0
-
-
-def log(msg: str):
-    logger.info(msg)
-
-
-def debug_log(msg: str):
-    if DEBUG_MODE:
-        logger.info(f"DEBUG - {msg}")
-
-
-def server_drift_ms() -> int:
-    """Calcula la deriva de tiempo con el servidor de Binance en ms."""
-    url = "https://fapi.binance.com/fapi/v1/time"
-    local_ms = int(time.time() * 1000)
-    server_ms = local_ms
-    try:
-        resp = requests.get(url, timeout=5, proxies=get_proxies())
-        data = resp.json()
-        server_ms = int(data.get("serverTime", server_ms))
-    except Exception:
-        pass
-    drift = server_ms - local_ms
-    logger.info(
-        "Binance timing: serverTime=%d localTime=%d drift_ms=%+d",
-        server_ms,
-        local_ms,
-        drift,
-    )
-    return drift
 
 
 def _parse_client_id(cid: str):
@@ -1496,8 +1372,7 @@ def handler(event, context):
     log("═══════════════════ 🚀🚀🚀 INICIO EJECUCIÓN LAMBDA 🚀🚀🚀 ═══════════════════")
     load_dotenv()
 
-    global DEBUG_MODE
-    DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
+    logging_utils.DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 
     key = os.getenv("BINANCE_API_KEY")
     secret = os.getenv("BINANCE_API_SECRET")

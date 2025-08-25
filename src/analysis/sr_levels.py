@@ -1,8 +1,8 @@
 import time
 from typing import Dict, List
 
-from resistance_levels import next_resistances
-from support_levels import next_supports
+from .resistance_levels import next_resistances
+from .support_levels import next_supports
 
 
 def get_sr_levels(symbol: str, timeframe: str) -> Dict[str, List[float]]:

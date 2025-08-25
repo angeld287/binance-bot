@@ -1,14 +1,14 @@
 import os
 import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 
 # Configurar porcentajes de prueba
 os.environ['TAKE_PROFIT_PCT'] = '1.5'
 os.environ['STOP_LOSS_PCT'] = '1'
 
-from bot_trading import FuturesBot
-from bot_trading import config_por_moneda
+from core.bot_trading import FuturesBot
+from core.bot_trading import config_por_moneda
 
 config_por_moneda["TEST/USDT"] = {"atr_factor": 1.0}
 
