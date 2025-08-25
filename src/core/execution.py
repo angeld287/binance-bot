@@ -11,7 +11,7 @@ from binance.exceptions import BinanceAPIException
 from analysis.resistance_levels import next_resistances
 from analysis.support_levels import next_supports
 from analysis.sr_levels import get_sr_levels
-from strategies import detectar_breakout
+from strategies import generate_signal
 
 from .logging_utils import logger, log, debug_log
 from .positions import get_current_position_info, has_active_position
@@ -1310,7 +1310,7 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
         else:
             log("Orden pendiente detectada, esperando ejecución o cancelación.")
     else:
-        side, level, patterns, rango = detectar_breakout(exchange, symbol)
+        side, level, patterns, rango = generate_signal(exchange, symbol)
         if side:
             order_price = level * 0.999 if side == "buy" else level * 1.001
             if order_price is None or order_price <= 0:
