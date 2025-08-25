@@ -1,6 +1,6 @@
 # Bot de Trading Automatizado en Binance Futures
 
-## 🚀 Descripción.
+## 🚀 Descripción
 Bot en Python que ejecuta estrategias automáticas de trading sobre **Binance Futures**. Corre como función **AWS Lambda** programada por **EventBridge**, consulta precios vía API REST/WebSocket oficial y maneja órdenes *long/short* con **stop loss** y **take profit**. Todos los eventos se registran en **CloudWatch Logs**.
 
 ## 🏗️ Arquitectura
