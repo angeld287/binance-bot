@@ -3,8 +3,8 @@ import sys
 
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 
-from core.bot_trading import FuturesBot, config_por_moneda, IDEMPOTENCY_REGISTRY
-import core.bot_trading as bot_trading
+from core.execution import FuturesBot, config_por_moneda, IDEMPOTENCY_REGISTRY
+import core.execution as execution
 
 config_por_moneda["TEST/USDT"] = {"atr_factor": 1.0}
 
@@ -49,10 +49,10 @@ class DummyExchange:
 
 
 def _setup():
-    bot_trading.ORDER_META_BY_CID.clear()
-    bot_trading.ORDER_META_BY_OID.clear()
+    execution.ORDER_META_BY_CID.clear()
+    execution.ORDER_META_BY_OID.clear()
     IDEMPOTENCY_REGISTRY.clear()
-    bot_trading.get_sr_levels = lambda s, t: {}
+    execution.get_sr_levels = lambda s, t: {}
 
 
 def test_precheck_avoids_duplicate():

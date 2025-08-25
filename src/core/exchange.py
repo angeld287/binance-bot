@@ -1,8 +1,9 @@
 import os
 import time
 import requests
+from binance.client import Client
 
-from .logging_utils import logger
+from .logging_utils import logger, LoggingSession
 
 
 def get_proxies():
@@ -54,3 +55,23 @@ def server_drift_ms() -> int:
         drift,
     )
     return drift
+
+
+def build(cfg):
+    key = cfg.get("api_key")
+    secret = cfg.get("api_secret")
+    testnet = cfg.get("testnet", False)
+    proxies = get_proxies()
+    req_params = {"proxies": proxies} if proxies else None
+    client = Client(key, secret, testnet=testnet, requests_params=req_params)
+
+    session = LoggingSession(logger)
+    session.headers.update(client.session.headers)
+    if proxies:
+        session.proxies.update(proxies)
+    client.session = session
+
+    drift_ms = server_drift_ms()
+    client.timestamp_offset = drift_ms
+    client.REQUEST_RECVWINDOW = 5000
+    return LoggingClient(client, testnet)
