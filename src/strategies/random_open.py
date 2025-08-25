@@ -12,8 +12,10 @@ ANALYSIS_WINDOW = 12
 _seeded = False
 
 
-def detectar_breakout(exchange: Any, symbol: str, window: int = ANALYSIS_WINDOW, *args: Any, **kwargs: Any):
-    """Genera una señal aleatoria compatible con ``detectar_breakout`` original."""
+def generate_signal(
+    exchange: Any, symbol: str, window: int = ANALYSIS_WINDOW, *args: Any, **kwargs: Any
+):
+    """Genera una señal aleatoria compatible con la estrategia original."""
     global _seeded
     if not _seeded:
         seed = os.getenv("RANDOM_STRATEGY_SEED")

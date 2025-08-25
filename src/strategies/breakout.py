@@ -24,7 +24,7 @@ def _last_swing_low(ohlcv, window=ANALYSIS_WINDOW):
     return None
 
 
-def detectar_breakout(exchange, symbol, window=ANALYSIS_WINDOW):
+def generate_signal(exchange, symbol, window=ANALYSIS_WINDOW):
     """Busca rupturas de los últimos máximos o mínimos en 15m y 30m."""
     for tf in ["15m", "30m"]:
         try:
