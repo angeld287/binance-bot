@@ -8,8 +8,8 @@ sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 os.environ['TAKE_PROFIT_PCT'] = '1.5'
 os.environ['STOP_LOSS_PCT'] = '1'
 
-from core.bot_trading import FuturesBot, config_por_moneda
-import core.bot_trading as bot_trading
+from core.execution import FuturesBot, config_por_moneda
+import core.execution as execution
 
 config_por_moneda["TEST/USDT"] = {"atr_factor": 1.0}
 
@@ -60,8 +60,8 @@ class DummyExchange:
 
 
 def test_cancel_by_ttl():
-    bot_trading.ORDER_META_BY_CID.clear()
-    bot_trading.ORDER_META_BY_OID.clear()
+    execution.ORDER_META_BY_CID.clear()
+    execution.ORDER_META_BY_OID.clear()
     now = int(time.time() * 1000)
     order = {
         "orderId": 1,
@@ -76,17 +76,17 @@ def test_cancel_by_ttl():
     }
     ex = DummyExchange([order], price=100)
     bot = FuturesBot(ex, "TEST/USDT")
-    bot_trading.PENDING_TTL_MIN = 1
-    bot_trading.PENDING_USE_SR3 = False
-    bot_trading.PENDING_CANCEL_CONFIRM_BARS = 1
-    bot_trading.PENDING_MAX_GAP_BPS = 80
+    execution.PENDING_TTL_MIN = 1
+    execution.PENDING_USE_SR3 = False
+    execution.PENDING_CANCEL_CONFIRM_BARS = 1
+    execution.PENDING_MAX_GAP_BPS = 80
     bot.revisar_ordenes_pendientes()
     assert 1 in ex.cancelled
 
 
 def test_cancel_by_distance():
-    bot_trading.ORDER_META_BY_CID.clear()
-    bot_trading.ORDER_META_BY_OID.clear()
+    execution.ORDER_META_BY_CID.clear()
+    execution.ORDER_META_BY_OID.clear()
     now = int(time.time() * 1000)
     order = {
         "orderId": 2,
@@ -101,17 +101,17 @@ def test_cancel_by_distance():
     }
     ex = DummyExchange([order], price=110)
     bot = FuturesBot(ex, "TEST/USDT")
-    bot_trading.PENDING_TTL_MIN = 10
-    bot_trading.PENDING_USE_SR3 = False
-    bot_trading.PENDING_CANCEL_CONFIRM_BARS = 1
-    bot_trading.PENDING_MAX_GAP_BPS = 80
+    execution.PENDING_TTL_MIN = 10
+    execution.PENDING_USE_SR3 = False
+    execution.PENDING_CANCEL_CONFIRM_BARS = 1
+    execution.PENDING_MAX_GAP_BPS = 80
     bot.revisar_ordenes_pendientes()
     assert 2 in ex.cancelled
 
 
 def test_cancel_by_sr3_buy():
-    bot_trading.ORDER_META_BY_CID.clear()
-    bot_trading.ORDER_META_BY_OID.clear()
+    execution.ORDER_META_BY_CID.clear()
+    execution.ORDER_META_BY_OID.clear()
     now = int(time.time() * 1000)
     cid = "bot-1-deadbeef"
     order = {
@@ -125,20 +125,20 @@ def test_cancel_by_sr3_buy():
         "time": now,
         "clientOrderId": cid
     }
-    bot_trading.ORDER_META_BY_CID[cid] = {"sr3S": "90", "sr3R": "105", "srasof": 1, "ttl": 10, "cfm": 0, "base_id": cid}
+    execution.ORDER_META_BY_CID[cid] = {"sr3S": "90", "sr3R": "105", "srasof": 1, "ttl": 10, "cfm": 0, "base_id": cid}
     ex = DummyExchange([order], price=106)
     bot = FuturesBot(ex, "TEST/USDT")
-    bot_trading.PENDING_TTL_MIN = 10
-    bot_trading.PENDING_USE_SR3 = True
-    bot_trading.PENDING_SR_BUFFER_BPS = 15
-    bot_trading.PENDING_CANCEL_CONFIRM_BARS = 1
+    execution.PENDING_TTL_MIN = 10
+    execution.PENDING_USE_SR3 = True
+    execution.PENDING_SR_BUFFER_BPS = 15
+    execution.PENDING_CANCEL_CONFIRM_BARS = 1
     bot.revisar_ordenes_pendientes()
     assert 3 in ex.cancelled
 
 
 def test_cancel_by_sr3_sell():
-    bot_trading.ORDER_META_BY_CID.clear()
-    bot_trading.ORDER_META_BY_OID.clear()
+    execution.ORDER_META_BY_CID.clear()
+    execution.ORDER_META_BY_OID.clear()
     now = int(time.time() * 1000)
     cid = "bot-1-cafebabe"
     order = {
@@ -152,20 +152,20 @@ def test_cancel_by_sr3_sell():
         "time": now,
         "clientOrderId": cid
     }
-    bot_trading.ORDER_META_BY_CID[cid] = {"sr3S": "95", "sr3R": "105", "srasof": 1, "ttl": 10, "cfm": 0, "base_id": cid}
+    execution.ORDER_META_BY_CID[cid] = {"sr3S": "95", "sr3R": "105", "srasof": 1, "ttl": 10, "cfm": 0, "base_id": cid}
     ex = DummyExchange([order], price=94)
     bot = FuturesBot(ex, "TEST/USDT")
-    bot_trading.PENDING_TTL_MIN = 10
-    bot_trading.PENDING_USE_SR3 = True
-    bot_trading.PENDING_SR_BUFFER_BPS = 15
-    bot_trading.PENDING_CANCEL_CONFIRM_BARS = 1
+    execution.PENDING_TTL_MIN = 10
+    execution.PENDING_USE_SR3 = True
+    execution.PENDING_SR_BUFFER_BPS = 15
+    execution.PENDING_CANCEL_CONFIRM_BARS = 1
     bot.revisar_ordenes_pendientes()
     assert 4 in ex.cancelled
 
 
 def test_partial_fill_adjusts_tp_sl():
-    bot_trading.ORDER_META_BY_CID.clear()
-    bot_trading.ORDER_META_BY_OID.clear()
+    execution.ORDER_META_BY_CID.clear()
+    execution.ORDER_META_BY_OID.clear()
     now = int(time.time() * 1000)
     order = {
         "orderId": 5,
@@ -180,9 +180,9 @@ def test_partial_fill_adjusts_tp_sl():
     }
     ex = DummyExchange([order], price=100, position_amt=0.5)
     bot = FuturesBot(ex, "TEST/USDT")
-    bot_trading.PENDING_TTL_MIN = 1
-    bot_trading.PENDING_USE_SR3 = False
-    bot_trading.PENDING_CANCEL_CONFIRM_BARS = 1
+    execution.PENDING_TTL_MIN = 1
+    execution.PENDING_USE_SR3 = False
+    execution.PENDING_CANCEL_CONFIRM_BARS = 1
     bot.revisar_ordenes_pendientes()
     assert 5 in ex.cancelled
     # TP y SL creados para la cantidad ejecutada

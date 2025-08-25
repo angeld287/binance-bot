@@ -7,8 +7,8 @@ sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 os.environ['TAKE_PROFIT_PCT'] = '1.5'
 os.environ['STOP_LOSS_PCT'] = '1'
 
-from core.bot_trading import FuturesBot
-from core.bot_trading import config_por_moneda
+from core.execution import FuturesBot
+from core.execution import config_por_moneda
 
 config_por_moneda["TEST/USDT"] = {"atr_factor": 1.0}
 
