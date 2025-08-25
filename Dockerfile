@@ -30,15 +30,15 @@ RUN pip install --no-binary=cffi -r requirements.txt -t /package && \
 # Confirma existencia de _cffi_backend.so
 RUN find /package -name "_cffi_backend*.so"
 
-# Copia tu script (si lo deseas probar en container)
-COPY src/core/bot_trading.py /package/
-COPY src/core/exchange.py /package/
-COPY src/core/logging_utils.py /package/
-COPY src/analysis/pattern_detection.py /package/
-COPY src/analysis/resistance_levels.py /package/
-COPY src/analysis/support_levels.py /package/
-COPY src/analysis/sr_levels.py /package/
-COPY src/strategies /package/strategies
+# --- Copiar código manteniendo la MISMA estructura en /package ---
+RUN mkdir -p /package/core /package/analysis /package/strategies /package/config
+COPY src/core/        /package/core/
+COPY src/analysis/    /package/analysis/
+COPY src/strategies/  /package/strategies/
+COPY src/config/      /package/config/
 
-# Setea el directorio de trabajo
+# (opcional en contenedor; Lambda no lo requiere pero ayuda en pruebas)
+ENV PYTHONPATH="/package:${PYTHONPATH}"
+
+# Setea el directorio de trabajo para que el handler core.bot_trading.handler resuelva imports
 WORKDIR /package
