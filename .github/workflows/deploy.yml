@@ -3,7 +3,7 @@ name: Package and Deploy to Lambda using base image
 on:
   push:
     branches:
-      - main1
+      - main
 
 jobs:
   deploy:
