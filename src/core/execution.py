@@ -5,6 +5,9 @@ import math
 import time
 import hashlib
 import re
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
+
+getcontext().prec = 18
 
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
@@ -141,6 +144,67 @@ def _get_pct_env(var, alt_var, default_decimal):
     if pct <= 0:
         raise ValueError(f"❌❌❌❌❌ {var} debe ser mayor que 0")
     return pct / 100.0
+
+
+def floor_to_step(x, step):
+    """Floor x to the nearest multiple of step using Decimal precision."""
+    step_dec = Decimal(str(step))
+    x_dec = Decimal(str(x))
+    return float((x_dec // step_dec) * step_dec)
+
+
+def _ceil_to_step(x, step):
+    step_dec = Decimal(str(step))
+    x_dec = Decimal(str(x))
+    return float((x_dec / step_dec).to_integral_value(rounding=ROUND_UP) * step_dec)
+
+
+def get_symbol_filters(symbol, exchange_info):
+    step_size = 1.0
+    min_qty = 0.0
+    max_qty = float("inf")
+    min_notional = 0.0
+    s_info = next(
+        (s for s in exchange_info.get("symbols", []) if s.get("symbol") == symbol),
+        {},
+    )
+    for f in s_info.get("filters", []):
+        ftype = f.get("filterType")
+        if ftype in ("LOT_SIZE", "MARKET_LOT_SIZE"):
+            step_size = float(f.get("stepSize", step_size))
+            min_qty = float(f.get("minQty", min_qty))
+            max_qty = float(f.get("maxQty", max_qty))
+        elif ftype in ("MIN_NOTIONAL", "NOTIONAL"):
+            mn = f.get("minNotional") or f.get("notional")
+            if mn is not None:
+                min_notional = float(mn)
+    return step_size, min_qty, max_qty, min_notional
+
+
+def compute_qty_from_usdt(symbol, price, target_usdt, exchange_info):
+    step_size, min_qty, max_qty, min_notional = get_symbol_filters(
+        symbol, exchange_info
+    )
+    if price <= 0 or target_usdt <= 0:
+        return 0.0, 0.0
+    qty = floor_to_step(target_usdt / price, step_size)
+    notional = qty * price
+    if notional < min_notional:
+        qty = _ceil_to_step(min_notional / price, step_size)
+        notional = qty * price
+    if qty < min_qty:
+        qty = _ceil_to_step(min_qty, step_size)
+        notional = qty * price
+    if qty > max_qty:
+        qty = floor_to_step(max_qty, step_size)
+        notional = qty * price
+    diff = abs(notional - target_usdt) / target_usdt if target_usdt else 0.0
+    if diff > 0.05 and notional > target_usdt:
+        cand = floor_to_step(target_usdt / price, step_size)
+        if cand * price >= min_notional:
+            qty = cand
+            notional = qty * price
+    return qty, notional
 
 
 def compute_trailing_sl_candidate(symbol, position, price, sup_levels, res_levels,
@@ -1326,15 +1390,19 @@ def _run_iteration(exchange, bot, testnet, symbol, leverage=None):
                     else order_price * (1 + sl_pct)
                 )
                 symbol_key = symbol.replace("/", "")
-                if symbol_key == "BTCUSDT":
-                    base_amount = 110
-                elif symbol_key == "DOGEUSDT":
-                    base_amount = 6
-                else:
-                    base_amount = 110
-
-                amount_raw = (base_amount * lev) / price
-                qty = bot._fmt_qty(amount_raw)
+                target_usdt = float(os.getenv("TARGET_USDT", "7"))
+                step_size, _, _, min_notional = get_symbol_filters(symbol_key, info)
+                qty, notional = compute_qty_from_usdt(
+                    symbol_key, order_price, target_usdt, info
+                )
+                env_name = os.getenv("ENVIRONMENT") or (
+                    "TESTNET" if testnet else "PROD"
+                )
+                log(
+                    f"env={env_name} | symbol={symbol_key} | side={side} | lev={lev} | price={order_price} | target_usdt={target_usdt} | stepSize={step_size} | minNotional={min_notional} | qty_calculada={qty} | notional_calculado={notional}"
+                )
+                assert notional <= target_usdt * 1.1, "notional > permitido"
+                assert notional >= min_notional, "notional < minNotional"
                 if patterns:
                     print(f"Patrones detectados: {', '.join(patterns)}")
                 bot.abrir_posicion(side, qty, order_price, rango)
