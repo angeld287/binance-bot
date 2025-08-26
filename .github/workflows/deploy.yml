@@ -39,7 +39,8 @@ jobs:
 
       - name: Inject latest source files into package
         run: |
-          cp src/core/bot_trading.py ./package/
+          cp src/execution.py ./package/
+          cp src/execution_shims.py ./package/
           # Si tienes más archivos, agrégalos aquí
           cd package
           zip -r ../deployment.zip .
