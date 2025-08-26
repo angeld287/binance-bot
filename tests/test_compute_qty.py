@@ -3,7 +3,7 @@ import sys
 
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 
-from core.execution import compute_qty_from_usdt, floor_to_step
+from strategies.common import compute_qty_from_usdt, floor_to_step
 
 
 def test_compute_qty_doge():
