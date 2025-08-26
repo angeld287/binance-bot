@@ -1,24 +1,28 @@
-import os
-from typing import Any
-from . import breakout as _breakout
-from . import random_open as _random
+"""Strategies package.
 
-_SUPPORTED = {
-    "breakout": _breakout,
-    "random_open": _random,
-    "random": _random,  # alias opcional
-}
+Provides utilities to load concrete strategy implementations by name.
+"""
 
-def _strategy_name() -> str:
-    return os.getenv("STRATEGY_NAME", "breakout").strip().lower()
+from __future__ import annotations
 
-def generate_signal(*args: Any, **kwargs: Any):
+from typing import Type
+
+from .base import Strategy
+from .breakout import BreakoutStrategy
+
+
+def load_strategy(name: str | None) -> Strategy:
+    """Instantiate a strategy by name.
+
+    Parameters
+    ----------
+    name: str
+        Strategy identifier.  At the moment only ``"breakout"`` is
+        supported.  The comparison is case-insensitive.
     """
-    Punto único de entrada de estrategia.
-    Despacha en cada llamada según STRATEGY_NAME (runtime, no build).
-    """
-    mod = _SUPPORTED.get(_strategy_name(), _breakout)
-    fn = getattr(mod, "generate_signal")
-    return fn(*args, **kwargs)
+    name = (name or "breakout").lower()
+    if name == "breakout":
+        return BreakoutStrategy()
+    raise ValueError(f"Estrategia no soportada: {name}")
 
-__all__ = ["generate_signal"]
+__all__ = ["load_strategy", "BreakoutStrategy"]
