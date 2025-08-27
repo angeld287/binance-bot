@@ -1,7 +1,8 @@
 import json
 
-from .core import config_loader, exchange, execution, logging_utils
-from .core.logging_utils import log
+from core import config_loader, exchange, logging_utils
+from core import execution as core_execution
+from core.logging_utils import log
 
 
 def handler(event, context):
@@ -10,7 +11,7 @@ def handler(event, context):
     cfg = config_loader.get_runtime_config()
     logging_utils.DEBUG_MODE = cfg.get("debug_mode", False)
     ex = exchange.build(cfg)
-    price = execution.run_iteration(ex, cfg)
+    price = core_execution.run_iteration(ex, cfg)
     log("═══════════════════ 🛑🛑🛑 FIN EJECUCIÓN LAMBDA 🛑🛑🛑 ═══════════════════")
     return {
         "statusCode": 200,
