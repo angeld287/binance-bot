@@ -39,11 +39,11 @@ jobs:
 
       - name: Inject latest source files into package
         run: |
-          cp src/execution.py ./package/
-          cp src/core/        ./package/core/
-          cp src/analysis/    ./package/analysis/
-          cp src/strategies/  ./package/strategies/
-          cp src/config/      ./package/config/
+          cp -r src/execution.py ./package/
+          cp -r src/core/        ./package/core/
+          cp -r src/analysis/    ./package/analysis/
+          cp -r src/strategies/  ./package/strategies/
+          cp -r src/config/      ./package/config/
           # Si tienes más archivos, agrégalos aquí
           cd package
           zip -r ../deployment.zip .
