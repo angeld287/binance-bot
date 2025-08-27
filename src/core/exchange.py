@@ -2,6 +2,7 @@ import os
 import time
 import requests
 from binance.client import Client
+from binance.exceptions import BinanceAPIException
 
 from .logging_utils import logger, LoggingSession
 
@@ -29,8 +30,13 @@ class LoggingClient:
                 proxies = get_proxies()
                 env = "testnet" if self.testnet else "producción"
                 proxy_msg = "sí" if proxies else "no"
-                #log(f"Llamada {name} | entorno: {env} | usando proxy: {proxy_msg}")
-                return attr(*args, **kwargs)
+                try:
+                    return attr(*args, **kwargs)
+                except BinanceAPIException as e:
+                    if e.code == -1021:
+                        self._client.timestamp_offset = server_drift_ms()
+                        return attr(*args, **kwargs)
+                    raise
 
             return wrapper
         return attr
@@ -48,13 +54,17 @@ def server_drift_ms() -> int:
     except Exception:
         pass
     drift = server_ms - local_ms
+    safety_ms = int(os.getenv("SAFETY_MS", "300"))
+    offset = drift - safety_ms
     logger.info(
-        "Binance timing: serverTime=%d localTime=%d drift_ms=%+d",
+        "Binance timing: serverTime=%d localTime=%d drift_ms=%+d safety_ms=%d offset_ms=%+d",
         server_ms,
         local_ms,
         drift,
+        safety_ms,
+        offset,
     )
-    return drift
+    return offset
 
 
 def build(cfg):
@@ -65,13 +75,13 @@ def build(cfg):
     req_params = {"proxies": proxies} if proxies else None
     client = Client(key, secret, testnet=testnet, requests_params=req_params)
 
+    drift_ms = server_drift_ms()
+    client.timestamp_offset = drift_ms  # quedamos levemente por detrás
+    client.REQUEST_RECVWINDOW = int(os.getenv("RECV_WINDOW_MS", "5000"))
+    # Retry único ante -1021
     session = LoggingSession(logger)
     session.headers.update(client.session.headers)
     if proxies:
         session.proxies.update(proxies)
     client.session = session
-
-    drift_ms = server_drift_ms()
-    client.timestamp_offset = drift_ms
-    client.REQUEST_RECVWINDOW = 5000
     return LoggingClient(client, testnet)
