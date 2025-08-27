@@ -5,7 +5,7 @@ from .logging_utils import log
 
 
 def handler(event, context):
-    """AWS Lambda handler que ejecuta una iteración de trading."""
+    """AWS Lambda handler que ejecuta una iteración de trading"""
     log("═══════════════════ 🚀🚀🚀 INICIO EJECUCIÓN LAMBDA 🚀🚀🚀 ═══════════════════")
     cfg = config_loader.get_runtime_config()
     logging_utils.DEBUG_MODE = cfg.get("debug_mode", False)
