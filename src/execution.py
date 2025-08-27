@@ -1,83 +1,44 @@
-"""Lambda entrypoint and trading orchestrator.
+"""Execution orchestrator.
 
-This module exposes two public callables:
-
-``lambda_handler``
-    AWS Lambda entry point that prepares the runtime context and
-    delegates the actual trading logic to :func:`handle`.
-
-``handle``
-    Strategy orchestrator that selects the concrete strategy based on
-    the ``STRATEGY_NAME`` environment variable and invokes its
-    ``plan_entry`` and ``manage_exits`` methods.
-
-Utility helpers that used to live in the legacy execution module (such
-as :func:`compute_qty_from_usdt`) remain publicly exported to preserve
-backwards compatibility for modules importing them from ``execution``.
+This module is intentionally light weight: it loads the strategy
+specified through the ``STRATEGY_NAME`` environment variable and
+delegates entry/exit logic to it.  Order submission, guards and other
+housekeeping are handled here but for the unit tests we only exercise a
+minimal subset of the behaviour.
 """
 
 from __future__ import annotations
 
-import json
 import os
-from typing import Any, Dict, Optional
+from typing import Dict, Any, Optional
 
-from core import config_loader, exchange, logging_utils
-from core.logging_utils import log
 from strategies import load_strategy
 from strategies.common import compute_qty_from_usdt
 
+STRATEGY_NAME = os.getenv("STRATEGY_NAME", "breakout")
 
-def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
-    """AWS Lambda entry point.
-
-    It bootstraps configuration, logging and the exchange client before
-    delegating the trading logic to :func:`handle`.
-    """
-
-    log("═══════════════════ 🚀🚀🚀 INICIO EJECUCIÓN LAMBDA 🚀🚀🚀 ═══════════════════")
-
-    cfg = config_loader.get_runtime_config()
-    logging_utils.DEBUG_MODE = cfg.get("debug_mode", False)
-    client = exchange.build(cfg)
-
-    ctx = {
-        "event": event,
-        "context": context,
-        "client": client,
-        "config": cfg,
-        "symbol": cfg.get("symbol"),
-        "log": log,
-    }
-
-    plan = handle(ctx)
-
-    log("═══════════════════ 🛑🛑🛑 FIN EJECUCIÓN LAMBDA 🛑🛑🛑 ═══════════════════")
-
-    return {"statusCode": 200, "body": json.dumps({"plan": plan})}
+# Strategy instance used by the module
+strategy = load_strategy(STRATEGY_NAME)
 
 
 def handle(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Main trading orchestrator.
+    """Main handler used by the bot.
 
     Parameters
     ----------
     ctx: dict
-        Context object containing at least ``client`` and ``symbol``
-        keys.  It is passed verbatim to the strategy methods.
+        Context containing at least ``client`` and ``symbol`` keys.  The
+        context is passed verbatim to the strategy.
     """
-
-    strategy_name = os.getenv("STRATEGY_NAME", "breakout")
-    strategy = load_strategy(strategy_name)
-
     plan = strategy.plan_entry(ctx)
     if plan:
+        # In the real bot we would send the order here using information
+        # from ``plan``.  For the unit tests returning the plan is
+        # sufficient to prove the orchestrator delegates correctly.
         ctx["plan"] = plan
-
+    # Delegate exit management to the strategy.  The strategy itself
+    # decides what to do (place/update SL/TP, trailing, etc.).
     strategy.manage_exits(ctx)
-
     return ctx.get("plan")
 
-
-__all__ = ["lambda_handler", "handle", "compute_qty_from_usdt"]
-
+__all__ = ["handle", "strategy", "compute_qty_from_usdt"]

@@ -1,13 +1,18 @@
-"""Compatibility shim for the legacy AWS Lambda handler.
+import json
 
-The real entry point now lives in :mod:`execution.lambda_handler`.  This
-module is kept to avoid breaking deployments that still reference
-``core.bot_trading.handler``.
-"""
-
-from execution import lambda_handler as _lambda_handler
+from . import config_loader, exchange, execution, logging_utils
+from .logging_utils import log
 
 
-def handler(event, context):  # pragma: no cover - thin wrapper
-    return _lambda_handler(event, context)
-
+def handler(event, context):
+    """AWS Lambda handler que ejecuta una iteración de trading."""
+    log("═══════════════════ 🚀🚀🚀 INICIO EJECUCIÓN LAMBDA 🚀🚀🚀 ═══════════════════")
+    cfg = config_loader.get_runtime_config()
+    logging_utils.DEBUG_MODE = cfg.get("debug_mode", False)
+    ex = exchange.build(cfg)
+    price = execution.run_iteration(ex, cfg)
+    log("═══════════════════ 🛑🛑🛑 FIN EJECUCIÓN LAMBDA 🛑🛑🛑 ═══════════════════")
+    return {
+        "statusCode": 200,
+        "body": json.dumps({"price": price}),
+    }
