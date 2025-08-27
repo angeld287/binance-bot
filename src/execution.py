@@ -1,7 +1,7 @@
 import json
 
-from . import config_loader, exchange, execution, logging_utils
-from .logging_utils import log
+from .core import config_loader, exchange, execution, logging_utils
+from .core.logging_utils import log
 
 
 def handler(event, context):
