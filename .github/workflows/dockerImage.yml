@@ -39,7 +39,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t trading .
+          docker build -t trading-bot .
 
       - name: Tag Docker image
         run: |
