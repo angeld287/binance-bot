@@ -18,7 +18,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: eu-west-1
 
       - name: Get AWS Account ID
         id: aws
@@ -28,12 +28,12 @@ jobs:
 
       - name: Pull Docker image from ECR
         run: |
-          aws ecr get-login-password | docker login --username AWS --password-stdin ${{ steps.aws.outputs.account_id }}.dkr.ecr.us-east-1.amazonaws.com
-          docker pull ${{ steps.aws.outputs.account_id }}.dkr.ecr.us-east-1.amazonaws.com/lambda-bot-trading:latest
+          aws ecr get-login-password | docker login --username AWS --password-stdin ${{ steps.aws.outputs.account_id }}.dkr.ecr.eu-west-1.amazonaws.com
+          docker pull ${{ steps.aws.outputs.account_id }}.dkr.ecr.eu-west-1.amazonaws.com/trading-bot:latest
 
       - name: Create container and copy base package
         run: |
-          docker create --name lambda-temp ${{ steps.aws.outputs.account_id }}.dkr.ecr.us-east-1.amazonaws.com/lambda-bot-trading:latest
+          docker create --name lambda-temp ${{ steps.aws.outputs.account_id }}.dkr.ecr.eu-west-1.amazonaws.com/lambda-bot-trading:latest
           docker cp lambda-temp:/package ./package
           docker rm lambda-temp
 

@@ -18,7 +18,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: eu-west-1
 
       - name: Get AWS Account ID
         id: aws-account
@@ -28,24 +28,24 @@ jobs:
 
       - name: Create ECR repository (if not exists)
         run: |
-          aws ecr describe-repositories --repository-names lambda-bot-trading || \
-          aws ecr create-repository --repository-name lambda-bot-trading
+          aws ecr describe-repositories --repository-names trading-bot || \
+          aws ecr create-repository --repository-name trading-bot
 
       - name: Authenticate Docker to ECR
         run: |
           aws ecr get-login-password | docker login \
             --username AWS \
-            --password-stdin ${{ steps.aws-account.outputs.account_id }}.dkr.ecr.us-east-1.amazonaws.com
+            --password-stdin ${{ steps.aws-account.outputs.account_id }}.dkr.ecr.eu-west-1.amazonaws.com
 
       - name: Build Docker image
         run: |
-          docker build -t lambda-bot-trading .
+          docker build -t trading .
 
       - name: Tag Docker image
         run: |
-          docker tag lambda-bot-trading:latest \
-            ${{ steps.aws-account.outputs.account_id }}.dkr.ecr.us-east-1.amazonaws.com/lambda-bot-trading:latest
+          docker tag trading-bot:latest \
+            ${{ steps.aws-account.outputs.account_id }}.dkr.ecr.eu-west-1.amazonaws.com/trading-bot:latest
 
       - name: Push Docker image to ECR
         run: |
-          docker push ${{ steps.aws-account.outputs.account_id }}.dkr.ecr.us-east-1.amazonaws.com/lambda-bot-trading:latest
+          docker push ${{ steps.aws-account.outputs.account_id }}.dkr.ecr.eu-west-1.amazonaws.com/trading-bot:latest
