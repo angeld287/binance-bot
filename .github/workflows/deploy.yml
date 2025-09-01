@@ -50,11 +50,11 @@ jobs:
 
       - name: Upload ZIP to S3
         run: |
-          aws s3 cp deployment.zip s3://lambda-functions-dev-serverlessdeploymentbucket-99mw0zqcfjsg/trading-bot.zip
+          aws s3 cp deployment.zip s3://lambda-functions-dev-serverlessdeploymentbucket-irlanda/trading-bot.zip
 
       - name: Update Lambda function from S3
         run: |
           aws lambda update-function-code \
-            --function-name trading-bot-binance-64 \
-            --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-99mw0zqcfjsg \
+            --function-name trading-bot-breakout \
+            --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
             --s3-key trading-bot.zip
