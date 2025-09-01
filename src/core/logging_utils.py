@@ -20,6 +20,9 @@ class LoggingSession(requests.Session):
     def __init__(self, logger):
         super().__init__()
         self._logger = logger
+        # Disable any proxy configuration from environment or system
+        self.trust_env = False
+        self.proxies.clear()
 
     def request(self, method, url, **kwargs):
         headers = kwargs.get("headers", {})

@@ -7,15 +7,6 @@ from binance.exceptions import BinanceAPIException
 from .logging_utils import logger, LoggingSession
 
 
-def get_proxies():
-    """Devuelve diccionario de proxies o None si no se usa proxy."""
-    testnet = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
-    proxy = os.getenv("PROXY_URL")
-    if not testnet and proxy:
-        return {"http": proxy, "https": proxy}
-    return None
-
-
 class LoggingClient:
     """Envuelve un Client para registrar cada request."""
 
@@ -27,9 +18,6 @@ class LoggingClient:
         attr = getattr(self._client, name)
         if callable(attr):
             def wrapper(*args, **kwargs):
-                proxies = get_proxies()
-                env = "testnet" if self.testnet else "producción"
-                proxy_msg = "sí" if proxies else "no"
                 try:
                     return attr(*args, **kwargs)
                 except BinanceAPIException as e:
@@ -48,7 +36,10 @@ def server_drift_ms() -> int:
     local_ms = int(time.time() * 1000)
     server_ms = local_ms
     try:
-        resp = requests.get(url, timeout=5, proxies=get_proxies())
+        session = requests.Session()
+        session.trust_env = False
+        session.proxies.clear()
+        resp = session.get(url, timeout=5)
         data = resp.json()
         server_ms = int(data.get("serverTime", server_ms))
     except Exception:
@@ -71,9 +62,7 @@ def build(cfg):
     key = cfg.get("api_key")
     secret = cfg.get("api_secret")
     testnet = cfg.get("testnet", False)
-    proxies = get_proxies()
-    req_params = {"proxies": proxies} if proxies else None
-    client = Client(key, secret, testnet=testnet, requests_params=req_params)
+    client = Client(key, secret, testnet=testnet)
 
     drift_ms = server_drift_ms()
     client.timestamp_offset = drift_ms  # quedamos levemente por detrás
@@ -81,7 +70,5 @@ def build(cfg):
     # Retry único ante -1021
     session = LoggingSession(logger)
     session.headers.update(client.session.headers)
-    if proxies:
-        session.proxies.update(proxies)
     client.session = session
     return LoggingClient(client, testnet)
