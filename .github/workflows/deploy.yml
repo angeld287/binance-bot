@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/migracion_cierre_estrategia
 
 jobs:
   deploy:
