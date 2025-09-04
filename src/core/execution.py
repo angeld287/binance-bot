@@ -1,17 +1,15 @@
-# -*- coding: utf-8 -*-
-from strategies import _run_iteration, create_bot
+from datetime import datetime, timezone
+import os
 
-def run_iteration(exchange, cfg):
-    symbol = cfg.get("symbol", "BTC/USDT")
-    leverage = cfg.get("leverage")
-    use_breakout_dynamic_stops = cfg.get("use_breakout_dynamic_stops", False)
-    testnet = cfg.get("testnet", False)
-    bot = create_bot(
-        exchange,
-        symbol,
-        leverage=leverage,
-        use_breakout_dynamic_stops=use_breakout_dynamic_stops,
-    )
-    return _run_iteration(exchange, bot, testnet, symbol, leverage)
+from strategies import get_strategy_class
 
 
+def handler(event, context):
+    """Main Lambda handler delegating to selected strategy."""
+    strategy_name = os.getenv("STRATEGY", "liquidity_sweep")
+    cls = get_strategy_class(strategy_name)
+    strategy = cls()
+    # Placeholder exchange; real implementation would provide a Binance client
+    binance = None
+    result = strategy.run(exchange=binance, now_utc=datetime.now(timezone.utc), event=event)
+    return result

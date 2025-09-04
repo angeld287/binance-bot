@@ -1,46 +1,53 @@
-# strategies/__init__.py
-import os
 import importlib
-from typing import Any, Tuple, Type
+import os
+from typing import Type, Tuple
 
-# clave -> (módulo, nombre_de_clase)
-_SUPPORTED = {
-    "breakout":    ("breakout", "FuturesBot"),
-    "random_open": ("random_open", "FuturesBot"),
-    "random":      ("random_open", "FuturesBot"),  # alias
+_supported = {
+    "breakout": {
+        "aliases": ["breakout"],
+        "module": "strategies.breakout",
+        "class": "FuturesBot",
+    },
+    "random_open": {
+        "aliases": ["random_open", "random"],
+        "module": "strategies.random_open",
+        "class": "FuturesBot",
+    },
 }
 
-def _strategy_name() -> str:
-    return os.getenv("STRATEGY_NAME", "breakout").strip().lower()
+_supported.update({
+    "liquidity_sweep": {
+        "aliases": ["liquidity_sweep", "liquidsweep", "LiquidSweep"],
+        "module": "strategies.liquidity_sweep.strategy",
+        "class": "LiquiditySweepStrategy",
+    }
+})
 
-def _load() -> Tuple[object, Type]:
-    mod_name, cls_name = _SUPPORTED.get(_strategy_name(), ("breakout", "FuturesBot"))
-    mod = importlib.import_module(f"{__name__}.{mod_name}")
-    cls = getattr(mod, cls_name)
-    return mod, cls
 
-# === Señales (igual que ya tienes) ===
-def generate_signal(*args: Any, **kwargs: Any):
-    mod, _ = _load()
-    fn = getattr(mod, "generate_signal")
-    return fn(*args, **kwargs)
+def _normalize(name: str) -> str:
+    return name.replace(" ", "").lower()
 
-# === Factory de la clase ===
-def bot_class() -> Type:
-    """Devuelve la clase (no instancia) para la estrategia activa."""
-    _, cls = _load()
+
+def _get_entry(name: str) -> Tuple[object, Type]:
+    name_n = _normalize(name or os.getenv("STRATEGY", "breakout"))
+    for key, cfg in _supported.items():
+        aliases = [key] + cfg.get("aliases", [])
+        if name_n in [_normalize(a) for a in aliases]:
+            mod = importlib.import_module(cfg["module"])
+            cls = getattr(mod, cfg["class"])
+            return mod, cls
+    raise ValueError(f"Unknown strategy: {name}")
+
+
+def get_strategy_class(name: str | None = None) -> Type:
+    _, cls = _get_entry(name or os.getenv("STRATEGY", "breakout"))
     return cls
 
-def create_bot(*args: Any, **kwargs: Any):
-    """Crea la instancia del bot de la estrategia activa (runtime)."""
-    return bot_class()(*args, **kwargs)
 
-# === Alias opcional del nombre de clase ===
-# Permite: `from strategies import FuturesBot`
-# Nota: se resuelve una sola vez al momento del import.
-def __getattr__(name: str):
-    if name == "FuturesBot":
-        return bot_class()
-    raise AttributeError(name)
+def generateSignal(context, name: str | None = None):
+    mod, _ = _get_entry(name or os.getenv("STRATEGY", "breakout"))
+    fn = getattr(mod, "generateSignal")
+    return fn(context)
 
-__all__ = ["generate_signal", "bot_class", "create_bot", "FuturesBot"]
+
+__all__ = ["get_strategy_class", "generateSignal"]
