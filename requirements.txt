@@ -2,3 +2,5 @@ numpy
 python-dotenv
 cffi
 python-binance
+pydantic
+pydantic-settings

@@ -16,8 +16,8 @@ from analysis.resistance_levels import next_resistances
 from analysis.support_levels import next_supports
 from analysis.sr_levels import get_sr_levels
 
-from .logging_utils import logger, log, debug_log
-from .positions import get_current_position_info, has_active_position
+from core.logging_utils import logger, log, debug_log
+from core.positions import get_current_position_info, has_active_position
 
 from analysis.pattern_detection import detect_patterns
 
@@ -1458,4 +1458,13 @@ def generate_signal(exchange, symbol, window=ANALYSIS_WINDOW):
         except Exception:
             continue
     return None, None, [], (None, None)
+
+
+# Register strategy for plugin system
+try:
+    from plugins.registry import register_strategy
+
+    register_strategy("breakout", FuturesBot)
+except Exception:
+    pass
 

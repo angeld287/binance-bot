@@ -25,6 +25,14 @@ def generate_signal(*args: Any, **kwargs: Any):
     fn = getattr(mod, "generate_signal")
     return fn(*args, **kwargs)
 
+
+# === Iteración ===
+def _run_iteration(*args: Any, **kwargs: Any):
+    """Delegates to the underlying strategy's iteration helper."""
+    mod, _ = _load()
+    fn = getattr(mod, "_run_iteration")
+    return fn(*args, **kwargs)
+
 # === Factory de la clase ===
 def bot_class() -> Type:
     """Devuelve la clase (no instancia) para la estrategia activa."""
@@ -43,4 +51,4 @@ def __getattr__(name: str):
         return bot_class()
     raise AttributeError(name)
 
-__all__ = ["generate_signal", "bot_class", "create_bot", "FuturesBot"]
+__all__ = ["generate_signal", "bot_class", "create_bot", "FuturesBot", "_run_iteration"]
