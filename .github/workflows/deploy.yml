@@ -55,6 +55,6 @@ jobs:
       - name: Update Lambda function from S3
         run: |
           aws lambda update-function-code \
-            --function-name trading-bot-breakout \
+            --function-name trading-bot-liquidity-sweep \
             --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
             --s3-key trading-bot.zip
