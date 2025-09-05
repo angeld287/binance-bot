@@ -77,6 +77,25 @@ Para operar sin riesgo utilizar Binance Testnet:
 export BINANCE_TESTNET=true
 ```
 
+## 🔌 Extender con un broker o estrategia nueva
+El proyecto cuenta con un registro de *plugins* donde se pueden inscribir
+estrategias, brokers o proveedores de datos. Para añadir un broker:
+
+1. Implementa un adaptador en `src/adapters/brokers/mi_broker.py` que cumpla
+   la interfaz `BrokerPort` de `core.ports.broker`.
+2. Regístralo en el arranque importando y usando `register_broker`:
+   ```python
+   from plugins.registry import register_broker
+   from adapters.brokers.mi_broker import MiBroker
+
+   register_broker("mi_broker", MiBroker)
+   ```
+3. Define `FEATURE_BROKER=mi_broker` en las variables de entorno o en
+   `config/settings.py` para activarlo.
+
+El mismo patrón aplica para nuevas estrategias (`register_strategy`) o
+proveedores de datos (`register_datasource`).
+
 ## 🔒 Seguridad
 - Nunca exponer claves API en el repositorio.
 - Usar AWS Secrets Manager o Parameter Store en producción.
