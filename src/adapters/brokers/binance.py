@@ -15,8 +15,8 @@ from core.ports.broker import BrokerPort
 logger = logging.getLogger(__name__)
 
 
-def _clean_symbol(symbol: str) -> str:
-    return symbol.replace("/", "")
+def _to_binance_symbol(sym: str) -> str:
+    return sym.replace("/", "")
 
 
 class BinanceBroker(BrokerPort):
@@ -26,12 +26,19 @@ class BinanceBroker(BrokerPort):
         self._settings = settings
         # Reuse an HTTP session to benefit from keep-alive and reduce latency
         self._session = Session()
+        timeout = (
+            settings.HTTP_TIMEOUT
+            if hasattr(settings, "HTTP_TIMEOUT") and settings.HTTP_TIMEOUT
+            else 30
+        )
+        requests_params = {"timeout": timeout}
         self._client = Client(
             api_key=settings.BINANCE_API_KEY,
             api_secret=settings.BINANCE_API_SECRET,
             testnet=settings.PAPER_TRADING,
-            session=self._session,
+            requests_params=requests_params,
         )
+        self._client.session = getattr(self, "_session", None)
         # Cache for symbol filters to avoid repeated ``exchangeInfo`` calls
         self._filters_cache: Dict[str, Dict[str, Any]] = {}
 
@@ -39,7 +46,7 @@ class BinanceBroker(BrokerPort):
     # Orders
     def open_orders(self, symbol: str) -> list[Any]:
         try:
-            return self._client.futures_get_open_orders(symbol=_clean_symbol(symbol))  # type: ignore[return-value]
+            return self._client.futures_get_open_orders(symbol=_to_binance_symbol(symbol))  # type: ignore[return-value]
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to fetch open orders: %s", exc)
             raise
@@ -50,7 +57,7 @@ class BinanceBroker(BrokerPort):
         clientOrderId: str | None = None,
         orderId: str | None = None,
     ) -> dict[str, Any]:
-        params: dict[str, Any] = {"symbol": _clean_symbol(symbol)}
+        params: dict[str, Any] = {"symbol": _to_binance_symbol(symbol)}
         if orderId is not None:
             params["orderId"] = orderId
         if clientOrderId is not None:
@@ -72,7 +79,7 @@ class BinanceBroker(BrokerPort):
     ) -> dict[str, Any]:
         try:
             return self._client.futures_create_order(
-                symbol=_clean_symbol(symbol),
+                symbol=_to_binance_symbol(symbol),
                 side=side,
                 type="LIMIT",
                 price=price,
@@ -90,7 +97,7 @@ class BinanceBroker(BrokerPort):
         orderId: str | None = None,
         clientOrderId: str | None = None,
     ) -> dict[str, Any]:
-        params: dict[str, Any] = {"symbol": _clean_symbol(symbol)}
+        params: dict[str, Any] = {"symbol": _to_binance_symbol(symbol)}
         if orderId is not None:
             params["orderId"] = orderId
         if clientOrderId is not None:
@@ -111,7 +118,7 @@ class BinanceBroker(BrokerPort):
     ) -> dict[str, Any]:
         try:
             return self._client.futures_create_order(
-                symbol=_clean_symbol(symbol),
+                symbol=_to_binance_symbol(symbol),
                 side=side,
                 type="STOP_MARKET",
                 stopPrice=stopPrice,
@@ -140,7 +147,7 @@ class BinanceBroker(BrokerPort):
 
         try:
             return self._client.futures_create_order(
-                symbol=_clean_symbol(symbol),
+                symbol=_to_binance_symbol(symbol),
                 side=side,
                 type="LIMIT",
                 price=tpPrice,
@@ -162,7 +169,7 @@ class BinanceBroker(BrokerPort):
         minimise subsequent HTTP requests.
         """
 
-        sym = _clean_symbol(symbol)
+        sym = _to_binance_symbol(symbol)
         if not self._filters_cache:
             try:
                 info = self._client.futures_exchange_info()
