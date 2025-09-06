@@ -9,6 +9,7 @@ subset of functionality is implemented as required by the breakout strategy.
 
 import logging
 from typing import TYPE_CHECKING
+import requests
 
 from binance.client import Client
 
@@ -62,6 +63,18 @@ class BinanceMarketData(MarketDataPort):
                     "Binance get_price failed (attempt %s/3): %s", attempt + 1, exc
                 )
         raise RuntimeError("Failed to fetch price after retries")
+
+    def get_server_time_ms(self) -> int:
+        try:
+            with requests.Session() as session:
+                session.trust_env = False
+                session.proxies.clear()
+                resp = session.get("https://fapi.binance.com/fapi/v1/time", timeout=5)
+                resp.raise_for_status()
+                data = resp.json()
+                return int(data["serverTime"])
+        except Exception as exc:  # pragma: no cover - network failures
+            raise RuntimeError(f"Failed to fetch Binance server time: {exc}") from exc
 
 
 def make_market_data(settings: Settings) -> MarketDataPort:

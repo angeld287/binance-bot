@@ -14,3 +14,6 @@ class MarketData(Protocol):
 
     def get_price(self, symbol: str) -> float:
         ...
+
+    def get_server_time_ms(self) -> int:
+        ...
