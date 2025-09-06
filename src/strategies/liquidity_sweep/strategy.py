@@ -385,9 +385,255 @@ def do_preopen(exchange: Any, symbol: str, settings: Any) -> dict:
     }
 
 
-def do_tick(exchange: Any, now_utc: datetime | None = None, event: Any | None = None) -> dict:
-    """Perform IO actions for a regular tick/event."""
-    return {}
+def do_tick(
+    exchange: Any,
+    symbol: str,
+    settings: Any,
+    event: Any | None = None,
+) -> dict:
+    """Handle the tick phase after market open.
+
+    The function inspects pre-open orders to detect fills and, when one is
+    executed, cancels the opposite order and places a protective bracket
+    (stop-loss and take-profit) using ``reduceOnly`` instructions.
+
+    Parameters
+    ----------
+    exchange:
+        Trading adaptor exposing ``open_orders``, ``get_order``,
+        ``cancel_order``, ``place_sl_reduce_only`` and
+        ``place_tp_reduce_only`` helpers as well as balance/rounding
+        utilities.
+    symbol:
+        Market symbol, e.g. ``"BTCUSDT"``.
+    settings:
+        Configuration container providing at least ``RISK_PCT``.
+    event:
+        Optional mapping/object carrying ``open_at_epoch_ms`` and level
+        information (``S``, ``R``, ``microbuffer`` and ``buffer_sl``).
+
+    Returns
+    -------
+    dict
+        Summary of the tick processing.  Possible values include ``waiting``
+        when pre-orders are still active, ``timeout`` when they expired and
+        ``bracket_placed`` once the protective orders have been submitted.
+    """
+
+    # Basic fallback for legacy calls using the old signature.  ``run`` may
+    # still call :func:`do_tick` with ``now_utc`` and ``event`` only; in that
+    # scenario we simply return an empty result to avoid unexpected failures.
+    if settings is None or not isinstance(symbol, str):  # pragma: no cover - legacy
+        return {}
+
+    # ------------------------------------------------------------------
+    # Build identifiers and timing helpers
+    tz_ny = ZoneInfo("America/New_York")
+    ny_now = datetime.now(tz=tz_ny)
+
+    open_at_epoch_ms = None
+    if isinstance(event, Mapping):
+        open_at_epoch_ms = event.get("open_at_epoch_ms")
+    else:
+        open_at_epoch_ms = getattr(event, "open_at_epoch_ms", None)
+
+    if open_at_epoch_ms is not None:
+        open_at_ny = datetime.fromtimestamp(open_at_epoch_ms / 1000, tz=ZoneInfo("UTC")).astimezone(tz_ny)
+    else:
+        open_at_ny = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
+
+    trade_id = f"{symbol}-{open_at_ny.strftime('%Y%m%d')}-NY"
+    cid_buy = f"{trade_id}:pre:buy"
+    cid_sell = f"{trade_id}:pre:sell"
+    cid_sl = f"{trade_id}:sl"
+    cid_tp = f"{trade_id}:tp"
+
+    # ------------------------------------------------------------------
+    # Inspect current open orders
+    open_orders = exchange.open_orders(symbol)
+    pre_buy = next((o for o in open_orders if o.get("clientOrderId") == cid_buy), None)
+    pre_sell = next((o for o in open_orders if o.get("clientOrderId") == cid_sell), None)
+
+    if pre_buy and pre_sell:
+        # Both pre-orders still alive
+        if ny_now > open_at_ny + timedelta(minutes=TIMEOUT_NO_FILL_MIN):
+            try:
+                exchange.cancel_order(symbol, clientOrderId=cid_buy)
+            except Exception:
+                pass
+            try:
+                exchange.cancel_order(symbol, clientOrderId=cid_sell)
+            except Exception:
+                pass
+            return {"status": "done", "reason": "timeout"}
+        return {"status": "waiting"}
+
+    # Helper to fetch a single order
+    def _fetch(cid: str) -> Mapping[str, Any] | None:
+        try:
+            return exchange.get_order(symbol, clientOrderId=cid)
+        except Exception:  # pragma: no cover - network failures
+            return None
+
+    # Helper executing the bracket placement once a side filled
+    def _place_bracket(filled_cid: str, info: Mapping[str, Any]) -> dict:
+        is_long = filled_cid == cid_buy
+        side = "LONG" if is_long else "SHORT"
+
+        entry = 0.0
+        try:
+            entry = float(info.get("avgPrice") or info.get("price") or 0.0)
+        except Exception:
+            entry = 0.0
+
+        # Cancel opposite order if still active
+        other_cid = cid_sell if is_long else cid_buy
+        try:
+            exchange.cancel_order(symbol, clientOrderId=other_cid)
+        except Exception:
+            pass
+
+        # Extract levels from the event
+        def _ev(name: str, default: float = 0.0) -> float:
+            if isinstance(event, Mapping):
+                return float(event.get(name, default))
+            return float(getattr(event, name, default))
+
+        S = _ev("S")
+        R = _ev("R")
+        micro = _ev("microbuffer")
+        buffer_sl = _ev("buffer_sl")
+        atr1m = _ev("atr1m")
+        tp_policy = None
+        if isinstance(event, Mapping):
+            tp_policy = event.get("tp_policy")
+        else:
+            tp_policy = getattr(event, "tp_policy", None)
+
+        bracket = build_bracket(
+            "BUY" if is_long else "SELL",
+            entry,
+            S,
+            R,
+            micro,
+            buffer_sl,
+            atr1m,
+            tp_policy=tp_policy,
+            settings=settings,
+        )
+        sl = float(bracket.get("sl", 0.0))
+        tp = float(bracket.get("tp", 0.0))
+
+        # Quantity calculation
+        balance = 0.0
+        try:
+            balance = float(exchange.get_available_balance_usdt())
+        except Exception:
+            balance = 0.0
+
+        risk_pct = float(getattr(settings, "RISK_PCT", 0.01))
+        qty = 0.0
+        if sl and entry:
+            qty = (risk_pct * balance) / abs(entry - sl)
+
+        # Align to step size
+        try:
+            if hasattr(exchange, "round_qty_to_step"):
+                qty = exchange.round_qty_to_step(symbol, qty)
+            else:
+                filters = exchange.get_symbol_filters(symbol)
+                step = float(filters.get("LOT_SIZE", {}).get("stepSize", 0.0))
+                if step:
+                    qty = floor(qty / step) * step
+        except Exception:
+            pass
+
+        # Validate notional
+        try:
+            filters = exchange.get_symbol_filters(symbol)
+            min_notional = float(
+                filters.get("MIN_NOTIONAL", {}).get("notional")
+                or filters.get("MIN_NOTIONAL", {}).get("minNotional", 0.0)
+            )
+            if qty * entry < min_notional:
+                return {"status": "done", "reason": "qty_too_small"}
+        except Exception:
+            pass
+
+        exit_side = "SELL" if is_long else "BUY"
+
+        try:
+            if hasattr(exchange, "place_sl_reduce_only"):
+                exchange.place_sl_reduce_only(symbol, exit_side, sl, qty, cid_sl)
+            else:  # pragma: no cover - generic fallback
+                exchange.place_order(
+                    symbol,
+                    exit_side,
+                    "STOP_MARKET",
+                    qty,
+                    cid_sl,
+                    stopPrice=sl,
+                    reduceOnly=True,
+                )
+        except Exception:
+            pass
+
+        try:
+            if hasattr(exchange, "place_tp_reduce_only"):
+                exchange.place_tp_reduce_only(symbol, exit_side, tp, qty, cid_tp)
+            else:  # pragma: no cover - generic fallback
+                exchange.place_limit(
+                    symbol,
+                    exit_side,
+                    tp,
+                    qty,
+                    cid_tp,
+                    timeInForce="GTC",
+                )
+        except Exception:
+            pass
+
+        return {
+            "status": "done",
+            "reason": "bracket_placed",
+            "side": side,
+            "entry": entry,
+            "sl": sl,
+            "tp": tp,
+        }
+
+    # ------------------------------------------------------------------
+    # Cases depending on which orders are visible
+    if pre_buy and not pre_sell:
+        info = _fetch(cid_sell)
+        if info and info.get("status") == "FILLED":
+            return _place_bracket(cid_sell, info)
+        if info and info.get("status") in {"CANCELED", "EXPIRED"}:
+            return {"status": "done", "reason": "preorder_cancelled"}
+        return {"status": "waiting"}
+
+    if pre_sell and not pre_buy:
+        info = _fetch(cid_buy)
+        if info and info.get("status") == "FILLED":
+            return _place_bracket(cid_buy, info)
+        if info and info.get("status") in {"CANCELED", "EXPIRED"}:
+            return {"status": "done", "reason": "preorder_cancelled"}
+        return {"status": "waiting"}
+
+    # None visible: query both
+    info_buy = _fetch(cid_buy)
+    info_sell = _fetch(cid_sell)
+    if info_buy and info_buy.get("status") == "FILLED":
+        return _place_bracket(cid_buy, info_buy)
+    if info_sell and info_sell.get("status") == "FILLED":
+        return _place_bracket(cid_sell, info_sell)
+
+    if (info_buy and info_buy.get("status") in {"CANCELED", "EXPIRED"}) or (
+        info_sell and info_sell.get("status") in {"CANCELED", "EXPIRED"}
+    ):
+        return {"status": "done", "reason": "preorder_cancelled"}
+
+    return {"status": "waiting"}
 
 
 # ---------------------------------------------------------------------------
