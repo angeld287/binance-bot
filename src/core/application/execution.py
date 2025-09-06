@@ -68,15 +68,25 @@ def run_iteration(event_in: dict | None = None, now: datetime | None = None) -> 
     broker = _resolve_broker(settings)
 
     strategy_cls = STRATEGY_REGISTRY[settings.STRATEGY_NAME]
-    strategy = strategy_cls()
 
+    # Constructor compatible: intenta inyectar dependencias (legacy); si no, sin args (nuevo)
+    try:
+        strategy = strategy_cls(
+            market_data=market_data,
+            broker=broker,
+            settings=settings,
+        )
+    except TypeError:
+        strategy = strategy_cls()
+
+    # Método compatible: usa .run si existe; si no, cae a generate_signal (legacy)
     if hasattr(strategy, "run"):
         result = strategy.run(
             exchange=broker,
             market_data=market_data,
             settings=settings,
             now_utc=current_time,
-            event=event_in,
+            event=event_in,  # pasa el event para estrategias como liquidity-sweep
         )
         return result
     else:
