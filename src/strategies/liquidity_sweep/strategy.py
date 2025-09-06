@@ -8,8 +8,8 @@ starting point for a more complete implementation.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from math import floor
-from typing import Any, Iterable, Mapping
+from math import ceil, floor
+from typing import Any, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 
@@ -20,28 +20,177 @@ TIMEOUT_NO_FILL_MIN = 5  # minutes after NY open to keep processing ticks
 # Pure helper functions
 
 
-def compute_levels(order_book: Any, *args: Any, **kwargs: Any) -> list:
-    """Return estimated liquidity levels from ``order_book``.
+def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: Any) -> Mapping[str, float]:
+    """Compute support/resistance levels from recent 1m ``candles_m1``.
 
-    This function is a placeholder.  A real implementation should analyse
-    ``order_book`` and return a mapping with support/resistance levels plus
-    auxiliary values such as ATR and buffers.  The :func:`do_preopen`
-    implementation expects a dictionary with at least the following keys::
+    The implementation follows the requirements described in ``Paso 7`` of the
+    kata.  It performs the following steps:
 
-        {
-            "S": float,              # Support level
-            "R": float,              # Resistance level
-            "atr1m": float,
-            "atr15m": float,
-            "microbuffer": float,   # Entry buffer
-            "buffer_sl": float,     # Stop loss buffer
-        }
+    * Compute ATR for the 1m series and for the series aggregated to 15m.
+    * Detect fractal highs/lows (two candles on each side) in the last hour of
+      data and use them as support/resistance candidates.
+    * Score each candidate based on the number of touches within a small buffer,
+      confluence with the last 15m candle high/low and proximity to the current
+      price.
+    * Select the best support below and resistance above the current price,
+      ensuring the resulting range roughly matches the 15m ATR.
 
-    For the scope of this kata the function simply returns an empty dict so
-    that :func:`do_preopen` can be exercised in isolation.
+    Parameters
+    ----------
+    candles_m1:
+        Iterable of OHLCV candles in the typical Binance format
+        ``[timestamp, open, high, low, close, volume]``.
+
+    Returns
+    -------
+    Mapping[str, float]
+        Dictionary with keys ``S``, ``R``, ``atr1m``, ``atr15m``,
+        ``microbuffer`` and ``buffer_sl``.  Values are aligned to the provided
+        ``TICK_SIZE`` if available in ``settings``.
     """
 
-    return {}
+    settings = kwargs.get("settings")
+    if not candles_m1:
+        return {}
+
+    # ------------------------------------------------------------------
+    # Helpers
+    def _atr(candles: Sequence[Sequence[float]]) -> float:
+        trs: list[float] = []
+        prev_close = float(candles[0][4])
+        for _, _, high, low, close, *_ in candles:
+            h = float(high)
+            l = float(low)
+            c = float(close)
+            tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
+            trs.append(tr)
+            prev_close = c
+        return sum(trs) / len(trs) if trs else 0.0
+
+    def _resample_15m(candles: Sequence[Sequence[float]]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for i in range(0, len(candles), 15):
+            chunk = candles[i : i + 15]
+            if not chunk:
+                continue
+            high = max(float(c[2]) for c in chunk)
+            low = min(float(c[3]) for c in chunk)
+            close = float(chunk[-1][4])
+            ts = float(chunk[0][0])
+            out.append([ts, 0.0, high, low, close, 0.0])
+        return out
+
+    def _round_to_tick(value: float) -> float:
+        tick = getattr(settings, "TICK_SIZE", 0.0) if settings else 0.0
+        if tick:
+            return round(value / tick) * tick
+        return value
+
+    # ------------------------------------------------------------------
+    # ATR calculations
+    atr1m = _atr(candles_m1)
+    candles_15m = _resample_15m(candles_m1)
+    atr15m = _atr(candles_15m)
+
+    # Current price from last close
+    price_now = float(candles_m1[-1][4])
+
+    # Buffers
+    micro_pct = float(getattr(settings, "MICROBUFFER_PCT_MIN", 0.0002)) if settings else 0.0002
+    micro_mult = float(getattr(settings, "MICROBUFFER_ATR1M_MULT", 0.25)) if settings else 0.25
+    sl_pct = float(getattr(settings, "BUFFER_SL_PCT_MIN", 0.0005)) if settings else 0.0005
+    sl_mult = float(getattr(settings, "BUFFER_SL_ATR1M_MULT", 0.5)) if settings else 0.5
+
+    microbuffer = max(micro_pct * price_now, micro_mult * atr1m)
+    buffer_sl = max(sl_pct * price_now, sl_mult * atr1m)
+
+    # ------------------------------------------------------------------
+    # Detect fractals as level candidates
+    highs = [float(c[2]) for c in candles_m1]
+    lows = [float(c[3]) for c in candles_m1]
+
+    candidates: list[dict[str, float]] = []
+    for i in range(2, len(candles_m1) - 2):
+        h = highs[i]
+        l = lows[i]
+        if h > max(highs[i - 2 : i]) and h > max(highs[i + 1 : i + 3]):
+            candidates.append({"type": "R", "price": h})
+        if l < min(lows[i - 2 : i]) and l < min(lows[i + 1 : i + 3]):
+            candidates.append({"type": "S", "price": l})
+
+    if not candidates:
+        return {
+            "S": _round_to_tick(price_now - microbuffer),
+            "R": _round_to_tick(price_now + microbuffer),
+            "atr1m": atr1m,
+            "atr15m": atr15m,
+            "microbuffer": _round_to_tick(microbuffer),
+            "buffer_sl": _round_to_tick(buffer_sl),
+        }
+
+    last15_high = float(candles_15m[-1][2]) if candles_15m else highs[-1]
+    last15_low = float(candles_15m[-1][3]) if candles_15m else lows[-1]
+
+    def _touches(price: float, side: str) -> int:
+        count = 0
+        buf = microbuffer
+        if side == "R":
+            for h in highs:
+                if abs(h - price) <= buf:
+                    count += 1
+        else:
+            for l in lows:
+                if abs(l - price) <= buf:
+                    count += 1
+        return count
+
+    def _score(price: float, side: str) -> float:
+        touches = _touches(price, side)
+        confluence = 0
+        if side == "R" and abs(price - last15_high) <= microbuffer:
+            confluence = 1
+        if side == "S" and abs(price - last15_low) <= microbuffer:
+            confluence = 1
+        proximity = max(0.0, 1 - abs(price_now - price) / price_now)
+        return touches + confluence + proximity
+
+    scored = [dict(c, score=_score(c["price"], c["type"])) for c in candidates]
+
+    supports = [c for c in scored if c["price"] < price_now]
+    resistances = [c for c in scored if c["price"] > price_now]
+
+    supports.sort(key=lambda c: c["score"], reverse=True)
+    resistances.sort(key=lambda c: c["score"], reverse=True)
+
+    atr_min = 0.5 * atr15m
+    atr_max = 1.5 * atr15m
+
+    S = supports[0]["price"] if supports else price_now - microbuffer
+    R = resistances[0]["price"] if resistances else price_now + microbuffer
+    best_score = -1.0
+
+    for s in supports or [{"price": S, "score": 0.0}]:
+        for r in resistances or [{"price": R, "score": 0.0}]:
+            rng = r["price"] - s["price"]
+            if atr_min <= rng <= atr_max:
+                sc = s["score"] + r["score"]
+                if sc > best_score:
+                    best_score = sc
+                    S, R = s["price"], r["price"]
+
+    S = _round_to_tick(S)
+    R = _round_to_tick(R)
+    microbuffer = _round_to_tick(microbuffer)
+    buffer_sl = _round_to_tick(buffer_sl)
+
+    return {
+        "S": S,
+        "R": R,
+        "atr1m": atr1m,
+        "atr15m": atr15m,
+        "microbuffer": microbuffer,
+        "buffer_sl": buffer_sl,
+    }
 
 
 def build_entry_prices(levels: Iterable[Any], *args: Any, **kwargs: Any) -> list:
