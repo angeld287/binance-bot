@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
-from typing import Any
+from typing import Any, Dict
 
 from binance.client import Client
+from requests import Session
 
 from config.settings import Settings
 from core.ports.broker import BrokerPort
@@ -23,11 +24,16 @@ class BinanceBroker(BrokerPort):
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        # Reuse an HTTP session to benefit from keep-alive and reduce latency
+        self._session = Session()
         self._client = Client(
             api_key=settings.BINANCE_API_KEY,
             api_secret=settings.BINANCE_API_SECRET,
             testnet=settings.PAPER_TRADING,
+            session=self._session,
         )
+        # Cache for symbol filters to avoid repeated ``exchangeInfo`` calls
+        self._filters_cache: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Orders
@@ -125,13 +131,21 @@ class BinanceBroker(BrokerPort):
         qty: float,
         clientOrderId: str,
     ) -> dict[str, Any]:
+        """Place a take-profit limit reduce-only order.
+
+        Binance does not expose a dedicated "TP-LIMIT" order type in the
+        futures REST API, therefore we rely on a standard LIMIT order with the
+        ``reduceOnly`` flag so the position size can only decrease.
+        """
+
         try:
             return self._client.futures_create_order(
                 symbol=_clean_symbol(symbol),
                 side=side,
-                type="TAKE_PROFIT_MARKET",
-                stopPrice=tpPrice,
+                type="LIMIT",
+                price=tpPrice,
                 quantity=qty,
+                timeInForce="GTC",
                 reduceOnly=True,
                 newClientOrderId=clientOrderId,
             )
@@ -142,16 +156,27 @@ class BinanceBroker(BrokerPort):
     # ------------------------------------------------------------------
     # Helpers
     def get_symbol_filters(self, symbol: str) -> dict[str, Any]:
+        """Return and cache the exchange filters for ``symbol``.
+
+        The first call populates a cache with the filters for all symbols to
+        minimise subsequent HTTP requests.
+        """
+
+        sym = _clean_symbol(symbol)
+        if not self._filters_cache:
+            try:
+                info = self._client.futures_exchange_info()
+                for s in info.get("symbols", []):
+                    self._filters_cache[s.get("symbol", "")] = {
+                        f["filterType"]: f for f in s.get("filters", [])
+                    }
+            except Exception as exc:  # pragma: no cover - network failures
+                logger.error("Failed to fetch symbol filters: %s", exc)
+                raise
         try:
-            info = self._client.futures_exchange_info()
-            sym = _clean_symbol(symbol)
-            for s in info.get("symbols", []):
-                if s.get("symbol") == sym:
-                    return {f["filterType"]: f for f in s.get("filters", [])}
-        except Exception as exc:  # pragma: no cover - network failures
-            logger.error("Failed to fetch symbol filters: %s", exc)
-            raise
-        raise ValueError(f"Symbol {symbol} not found")
+            return self._filters_cache[sym]
+        except KeyError:
+            raise ValueError(f"Symbol {symbol} not found") from None
 
     def round_price_to_tick(self, symbol: str, px: float) -> float:
         filters = self.get_symbol_filters(symbol)
@@ -164,15 +189,28 @@ class BinanceBroker(BrokerPort):
         return float((Decimal(str(qty)) // step) * step)
 
     def get_available_balance_usdt(self) -> float:
+        """Return available USDT balance.
+
+        If the call fails or the USDT asset is missing, the method falls back
+        to ``settings.RISK_NOTIONAL_USDT`` (default ``0``).
+        """
+
         try:
             balances = self._client.futures_account_balance()
             for bal in balances:
                 if bal.get("asset") == "USDT":
                     return float(bal.get("availableBalance", 0.0))
         except Exception as exc:  # pragma: no cover - network failures
-            logger.error("Failed to fetch balance: %s", exc)
-            raise
-        raise RuntimeError("USDT balance not found")
+            logger.warning(
+                "Failed to fetch balance, using RISK_NOTIONAL_USDT fallback: %s",
+                exc,
+            )
+            return float(getattr(self._settings, "RISK_NOTIONAL_USDT", 0.0))
+
+        logger.warning(
+            "USDT balance not found, using RISK_NOTIONAL_USDT fallback",
+        )
+        return float(getattr(self._settings, "RISK_NOTIONAL_USDT", 0.0))
 
 
 def make_broker(settings: Settings) -> BrokerPort:
