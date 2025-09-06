@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime
 import logging
+import os
+import time
 
 from adapters.brokers.binance import make_broker
 from adapters.data_providers.binance import make_market_data
 from config.settings import load_settings, Settings
 from strategies import STRATEGY_REGISTRY
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("bot.exec")
 
 
 def _resolve_market_data(settings: Settings):
@@ -31,8 +33,33 @@ def run_iteration(now: datetime | None = None) -> dict[str, object]:
     logger.info(
         "Running iteration for %s at %s", settings.STRATEGY_NAME, current_time.isoformat()
     )
+    logger.info(
+        "Active config: %s",
+        settings.model_dump(exclude={"BINANCE_API_KEY", "BINANCE_API_SECRET"}),
+    )
 
     market_data = _resolve_market_data(settings)
+    try:
+        server_ms = market_data.get_server_time_ms()
+        local_ms = int(time.time() * 1000)
+        drift_ms = local_ms - server_ms
+        safety_ms = int(os.getenv("SAFETY_MS", "300"))
+        offset_ms = safety_ms - drift_ms
+        logger.info(
+            "Binance timing: serverTime=%d localTime=%d drift_ms=%+d safety_ms=%d offset_ms=%+d",
+            server_ms,
+            local_ms,
+            drift_ms,
+            safety_ms,
+            offset_ms,
+        )
+    except Exception as exc:  # pragma: no cover - network failures or unsupported
+        logger.debug("Unable to compute timing drift: %s", exc)
+    try:
+        price = market_data.get_price(settings.SYMBOL)
+        logger.info("Current price for %s: %f", settings.SYMBOL, price)
+    except Exception as exc:  # pragma: no cover - network failures
+        logger.warning("Failed to fetch current price: %s", exc)
     broker = _resolve_broker(settings)
 
     strategy_cls = STRATEGY_REGISTRY[settings.STRATEGY_NAME]
