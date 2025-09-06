@@ -25,7 +25,7 @@ def handler(event=None, context=None):  # pragma: no cover - entry point
         logger.info("Proxy: DISABLED (NAT)")
 
     try:
-        result = run_iteration()
+        result = run_iteration(event_in=event)
         status = 200
         body = result
     except Exception as exc:  # pragma: no cover - defensive

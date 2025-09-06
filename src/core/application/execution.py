@@ -25,7 +25,7 @@ def _resolve_broker(settings: Settings):
     raise ValueError(f"Unsupported broker: {settings.FEATURE_BROKER}")
 
 
-def run_iteration(now: datetime | None = None) -> dict[str, object]:
+def run_iteration(event_in: dict | None = None, now: datetime | None = None) -> dict:
     """Execute a single iteration of the bot orchestration."""
 
     current_time = now or datetime.utcnow()
@@ -68,10 +68,17 @@ def run_iteration(now: datetime | None = None) -> dict[str, object]:
     broker = _resolve_broker(settings)
 
     strategy_cls = STRATEGY_REGISTRY[settings.STRATEGY_NAME]
-    strategy = strategy_cls(
-        market_data=market_data, broker=broker, settings=settings
-    )
+    strategy = strategy_cls()
 
-    signal = strategy.generate_signal(current_time)
-
-    return {"ok": True, "strategy": settings.STRATEGY_NAME, "signal": signal}
+    if hasattr(strategy, "run"):
+        result = strategy.run(
+            exchange=broker,
+            market_data=market_data,
+            settings=settings,
+            now_utc=current_time,
+            event=event_in,
+        )
+        return result
+    else:
+        signal = strategy.generate_signal(current_time)
+        return {"ok": True, "strategy": settings.STRATEGY_NAME, "signal": signal}
