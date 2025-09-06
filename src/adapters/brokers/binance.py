@@ -45,7 +45,8 @@ class BinanceBroker(BrokerPort):
     def get_open_orders(self) -> list["Order"]:
         """Return currently open orders for the configured symbol."""
         try:
-            return self._client.futures_get_open_orders(symbol=self._settings.SYMBOL)  # type: ignore[return-value]
+            sym = self._settings.SYMBOL.replace("/", "")
+            return self._client.futures_get_open_orders(symbol=sym)  # type: ignore[return-value]
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to fetch open orders: %s", exc)
             raise
@@ -62,7 +63,8 @@ class BinanceBroker(BrokerPort):
     def cancel_order(self, id: str) -> None:
         """Cancel an existing order by id."""
         try:
-            self._client.futures_cancel_order(symbol=self._settings.SYMBOL, orderId=id)
+            sym = self._settings.SYMBOL.replace("/", "")
+            self._client.futures_cancel_order(symbol=sym, orderId=id)
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to cancel order %s: %s", id, exc)
             raise
@@ -70,7 +72,8 @@ class BinanceBroker(BrokerPort):
     def set_leverage(self, symbol: str, leverage: int) -> None:
         """Set the desired leverage for ``symbol``."""
         try:
-            self._client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            sym = symbol.replace("/", "")
+            self._client.futures_change_leverage(symbol=sym, leverage=leverage)
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to set leverage for %s: %s", symbol, exc)
             raise
@@ -78,7 +81,8 @@ class BinanceBroker(BrokerPort):
     def set_margin_mode(self, symbol: str, mode: str) -> None:
         """Change the margin mode (cross/isolated)."""
         try:
-            self._client.futures_change_margin_type(symbol=symbol, marginType=mode)
+            sym = symbol.replace("/", "")
+            self._client.futures_change_margin_type(symbol=sym, marginType=mode)
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to set margin mode for %s: %s", symbol, exc)
             raise

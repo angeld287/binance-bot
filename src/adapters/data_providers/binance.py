@@ -42,9 +42,10 @@ class BinanceMarketData(MarketDataPort):
         domain models are introduced this should be mapped accordingly.
         """
         # TODO: replace with shared retry helper
+        sym = symbol.replace("/", "")
         for attempt in range(3):
             try:
-                return self._client.get_klines(symbol=symbol, interval=interval, limit=limit)  # type: ignore[return-value]
+                return self._client.get_klines(symbol=sym, interval=interval, limit=limit)  # type: ignore[return-value]
             except Exception as exc:  # pragma: no cover - network failures
                 logger.warning(
                     "Binance get_klines failed (attempt %s/3): %s", attempt + 1, exc
@@ -54,9 +55,10 @@ class BinanceMarketData(MarketDataPort):
     def get_price(self, symbol: str) -> float:
         """Return the latest price for ``symbol``."""
         # TODO: replace with shared retry helper
+        sym = symbol.replace("/", "")
         for attempt in range(3):
             try:
-                ticker = self._client.get_symbol_ticker(symbol=symbol)
+                ticker = self._client.get_symbol_ticker(symbol=sym)
                 return float(ticker["price"])
             except Exception as exc:  # pragma: no cover - network failures
                 logger.warning(
