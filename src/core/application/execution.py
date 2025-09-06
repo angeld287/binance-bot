@@ -35,7 +35,12 @@ def run_iteration(now: datetime | None = None) -> dict[str, object]:
     )
     logger.info(
         "Active config: %s",
-        settings.model_dump(exclude={"BINANCE_API_KEY", "BINANCE_API_SECRET"}),
+        {
+            "STRATEGY_NAME": settings.STRATEGY_NAME,
+            "FEATURE_BROKER": settings.FEATURE_BROKER,
+            "SYMBOL": settings.SYMBOL,
+            "INTERVAL": settings.INTERVAL,
+        },
     )
 
     market_data = _resolve_market_data(settings)
