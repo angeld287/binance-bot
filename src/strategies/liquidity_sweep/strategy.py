@@ -11,9 +11,13 @@ from datetime import datetime, timedelta
 from math import ceil, floor
 from typing import Any, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
+import json
+import logging
 
 
 TIMEOUT_NO_FILL_MIN = 5  # minutes after NY open to keep processing ticks
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +378,19 @@ def do_preopen(exchange: Any, symbol: str, settings: Any) -> dict:
 
     _ensure_limit("BUY", buy_px, cid_buy)
     _ensure_limit("SELL", sell_px, cid_sell)
+    logger.info(
+        json.dumps(
+            {
+                "action": "preopen",
+                "trade_id": trade_id,
+                "side": None,
+                "prices": {"entry": None, "sl": None, "tp": None},
+                "clientOrderIds": {"buy": cid_buy, "sell": cid_sell},
+                "status": "preopen_ok",
+                "reason": None,
+            }
+        )
+    )
 
     return {
         "status": "preopen_ok",
@@ -448,6 +465,30 @@ def do_tick(
     cid_sl = f"{trade_id}:sl"
     cid_tp = f"{trade_id}:tp"
 
+    def _log(
+        status: str,
+        *,
+        reason: str | None = None,
+        side: str | None = None,
+        entry: float | None = None,
+        sl: float | None = None,
+        tp: float | None = None,
+        cids: Mapping[str, str] | None = None,
+    ) -> None:
+        logger.info(
+            json.dumps(
+                {
+                    "action": "tick",
+                    "trade_id": trade_id,
+                    "side": side,
+                    "prices": {"entry": entry, "sl": sl, "tp": tp},
+                    "clientOrderIds": cids or {"buy": cid_buy, "sell": cid_sell},
+                    "status": status,
+                    "reason": reason,
+                }
+            )
+        )
+
     # ------------------------------------------------------------------
     # Inspect current open orders
     open_orders = exchange.open_orders(symbol)
@@ -465,7 +506,9 @@ def do_tick(
                 exchange.cancel_order(symbol, clientOrderId=cid_sell)
             except Exception:
                 pass
+            _log("timeout")
             return {"status": "done", "reason": "timeout"}
+        _log("waiting")
         return {"status": "waiting"}
 
     # Helper to fetch a single order
@@ -592,6 +635,14 @@ def do_tick(
                 )
         except Exception:
             pass
+        _log(
+            "bracket_placed",
+            side=side,
+            entry=entry,
+            sl=sl,
+            tp=tp,
+            cids={"entry": filled_cid, "sl": cid_sl, "tp": cid_tp},
+        )
 
         return {
             "status": "done",
@@ -609,7 +660,9 @@ def do_tick(
         if info and info.get("status") == "FILLED":
             return _place_bracket(cid_sell, info)
         if info and info.get("status") in {"CANCELED", "EXPIRED"}:
+            _log("preorder_cancelled")
             return {"status": "done", "reason": "preorder_cancelled"}
+        _log("waiting")
         return {"status": "waiting"}
 
     if pre_sell and not pre_buy:
@@ -617,7 +670,9 @@ def do_tick(
         if info and info.get("status") == "FILLED":
             return _place_bracket(cid_buy, info)
         if info and info.get("status") in {"CANCELED", "EXPIRED"}:
+            _log("preorder_cancelled")
             return {"status": "done", "reason": "preorder_cancelled"}
+        _log("waiting")
         return {"status": "waiting"}
 
     # None visible: query both
@@ -631,8 +686,10 @@ def do_tick(
     if (info_buy and info_buy.get("status") in {"CANCELED", "EXPIRED"}) or (
         info_sell and info_sell.get("status") in {"CANCELED", "EXPIRED"}
     ):
+        _log("preorder_cancelled")
         return {"status": "done", "reason": "preorder_cancelled"}
 
+    _log("waiting")
     return {"status": "waiting"}
 
 
