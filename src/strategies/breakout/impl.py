@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Breakout trading strategy implementation.
 
 This class wraps the previous breakout logic and exposes it through the
@@ -7,17 +5,24 @@ This class wraps the previous breakout logic and exposes it through the
 performed exclusively via the injected ports.
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Any
 import logging
 
 from core.domain.models.Signal import Signal
-from core.ports.broker import Broker as BrokerPort
-from core.ports.market_data import MarketData as MarketDataPort
+from core.ports.broker import BrokerPort
+from core.ports.market_data import MarketDataPort
 from core.ports.strategy import Strategy
 from core.ports.settings import SettingsProvider, get_symbol
 
 logger = logging.getLogger("bot.strategy.breakout")
+
+
+def _interval_to_minutes(interval: str) -> int:
+    units = {"m": 1, "h": 60, "d": 1440}
+    return int(interval[:-1]) * units[interval[-1]]
 
 
 class BreakoutStrategy(Strategy):
@@ -48,7 +53,10 @@ class BreakoutStrategy(Strategy):
         symbol = get_symbol(self._settings)
         interval = self._settings.get("INTERVAL", "1h")
 
-        candles = self._market_data.get_klines(symbol=symbol, interval=interval, limit=2)
+        interval_min = _interval_to_minutes(interval)
+        candles = self._market_data.get_klines(
+            symbol=symbol, interval=interval, lookback_min=interval_min * 2
+        )
         logger.debug("Candles fetched: %s", candles)
         if len(candles) < 2:
             logger.info("🔎 OBS: %s", "skip:not_enough_candles")

@@ -1,33 +1,96 @@
+"""Broker port definition."""
+
 from __future__ import annotations
 
-from typing import Protocol, TYPE_CHECKING
-
-if TYPE_CHECKING:  # pragma: no cover
-    from core.domain.models.Order import Order
-    from core.domain.models.Position import Position
+from typing import Any, Protocol
 
 
-class Broker(Protocol):
+class BrokerPort(Protocol):
     """Abstract broker used by strategies to interact with the market."""
 
-    # Reading state
-    def get_positions(self) -> list["Position"]:
+    # ------------------------------------------------------------------
+    # Orders
+    def open_orders(self, symbol: str) -> list[Any]:
+        """Return the list of open orders for ``symbol``."""
+
         ...
 
-    def get_open_orders(self) -> list["Order"]:
+    def get_order(
+        self,
+        symbol: str,
+        clientOrderId: str | None = None,
+        orderId: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch a single order by id or client id."""
+
         ...
 
-    # Order management
-    def place_order(self, order: "Order") -> str:
-        """Place a new order and return the created order id."""
+    def place_limit(
+        self,
+        symbol: str,
+        side: str,
+        price: float,
+        qty: float,
+        clientOrderId: str,
+        timeInForce: str = "GTC",
+    ) -> dict[str, Any]:
+        """Place a limit order."""
+
         ...
 
-    def cancel_order(self, id: str) -> None:
+    def cancel_order(
+        self,
+        symbol: str,
+        orderId: str | None = None,
+        clientOrderId: str | None = None,
+    ) -> dict[str, Any]:
+        """Cancel an order by id or client id."""
+
         ...
 
-    # Configuration helpers
-    def set_leverage(self, symbol: str, leverage: int) -> None:
+    def place_sl_reduce_only(
+        self,
+        symbol: str,
+        side: str,
+        stopPrice: float,
+        qty: float,
+        clientOrderId: str,
+    ) -> dict[str, Any]:
+        """Place a stop-loss reduce-only order."""
+
         ...
 
-    def set_margin_mode(self, symbol: str, mode: str) -> None:
+    def place_tp_reduce_only(
+        self,
+        symbol: str,
+        side: str,
+        tpPrice: float,
+        qty: float,
+        clientOrderId: str,
+    ) -> dict[str, Any]:
+        """Place a take-profit reduce-only order."""
+
         ...
+
+    # ------------------------------------------------------------------
+    # Helpers
+    def get_symbol_filters(self, symbol: str) -> dict[str, Any]:
+        """Return exchange filters for ``symbol``."""
+
+        ...
+
+    def round_price_to_tick(self, symbol: str, px: float) -> float:
+        """Round ``px`` according to the tick size of ``symbol``."""
+
+        ...
+
+    def round_qty_to_step(self, symbol: str, qty: float) -> float:
+        """Round ``qty`` according to the quantity step of ``symbol``."""
+
+        ...
+
+    def get_available_balance_usdt(self) -> float:
+        """Return available USDT balance."""
+
+        ...
+
