@@ -1,11 +1,6 @@
+"""Binance market data adapter."""
+
 from __future__ import annotations
-
-"""Binance market data adapter.
-
-This module exposes a thin wrapper around the `python-binance` client that
-satisfies the :class:`core.ports.market_data.MarketData` protocol. Only a small
-subset of functionality is implemented as required by the breakout strategy.
-"""
 
 import logging
 from typing import TYPE_CHECKING
@@ -14,7 +9,7 @@ import requests
 from binance.client import Client
 
 from config.settings import Settings
-from core.ports.market_data import MarketData as MarketDataPort
+from core.ports.market_data import MarketDataPort
 
 if TYPE_CHECKING:  # pragma: no cover - domain models are not yet implemented
     from core.domain.models.Candle import Candle
@@ -23,11 +18,15 @@ if TYPE_CHECKING:  # pragma: no cover - domain models are not yet implemented
 logger = logging.getLogger(__name__)
 
 
+def _interval_to_minutes(interval: str) -> int:
+    units = {"m": 1, "h": 60, "d": 1440}
+    return int(interval[:-1]) * units[interval[-1]]
+
+
 class BinanceMarketData(MarketDataPort):
     """Market data provider backed by Binance REST endpoints."""
 
     def __init__(self, settings: Settings) -> None:
-        """Create the underlying Binance client from the provided settings."""
         self._settings = settings
         self._client = Client(
             api_key=settings.BINANCE_API_KEY,
@@ -35,14 +34,13 @@ class BinanceMarketData(MarketDataPort):
             testnet=settings.PAPER_TRADING,
         )
 
-    def get_klines(self, symbol: str, interval: str, limit: int) -> list["Candle"]:
-        """Return OHLC candles for a symbol.
+    def get_klines(self, symbol: str, interval: str, lookback_min: int) -> list["Candle"]:
+        """Return OHLC candles for a symbol over ``lookback_min`` minutes."""
 
-        The response is currently the raw output from the Binance client. When
-        domain models are introduced this should be mapped accordingly.
-        """
-        # TODO: replace with shared retry helper
         sym = symbol.replace("/", "")
+        minutes = _interval_to_minutes(interval)
+        limit = max(1, lookback_min // minutes)
+        # TODO: replace with shared retry helper
         for attempt in range(3):
             try:
                 return self._client.get_klines(symbol=sym, interval=interval, limit=limit)  # type: ignore[return-value]
@@ -53,8 +51,6 @@ class BinanceMarketData(MarketDataPort):
         raise RuntimeError("Failed to fetch klines after retries")
 
     def get_price(self, symbol: str) -> float:
-        """Return the latest price for ``symbol``."""
-        # TODO: replace with shared retry helper
         sym = symbol.replace("/", "")
         for attempt in range(3):
             try:
@@ -81,4 +77,6 @@ class BinanceMarketData(MarketDataPort):
 
 def make_market_data(settings: Settings) -> MarketDataPort:
     """Factory for a :class:`MarketDataPort` bound to Binance."""
+
     return BinanceMarketData(settings)
+
