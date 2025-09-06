@@ -15,7 +15,7 @@ from core.domain.models.Signal import Signal
 from core.ports.broker import Broker as BrokerPort
 from core.ports.market_data import MarketData as MarketDataPort
 from core.ports.strategy import Strategy
-from config.settings import Settings
+from core.ports.settings import SettingsProvider, get_symbol
 
 logger = logging.getLogger("bot.strategy.breakout")
 
@@ -27,7 +27,7 @@ class BreakoutStrategy(Strategy):
         self,
         market_data: MarketDataPort,
         broker: BrokerPort,
-        settings: Settings,
+        settings: SettingsProvider,
         repositories: Any | None = None,
     ) -> None:
         self._market_data = market_data
@@ -45,8 +45,8 @@ class BreakoutStrategy(Strategy):
         signal. If neither condition is met, ``None`` is returned.
         """
 
-        symbol = self._settings.SYMBOL
-        interval = self._settings.INTERVAL
+        symbol = get_symbol(self._settings)
+        interval = self._settings.get("INTERVAL", "1h")
 
         candles = self._market_data.get_klines(symbol=symbol, interval=interval, limit=2)
         logger.debug("Candles fetched: %s", candles)
