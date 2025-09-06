@@ -192,22 +192,97 @@ def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: 
         "buffer_sl": buffer_sl,
     }
 
+def _round_to_tick(value: float, tick: float) -> float:
+    """Round ``value`` to the closest ``tick`` size."""
 
-def build_entry_prices(levels: Iterable[Any], *args: Any, **kwargs: Any) -> list:
+    if tick:
+        return round(value / tick) * tick
+    return value
+
+
+def build_entry_prices(levels: Mapping[str, float], *args: Any, **kwargs: Any) -> Mapping[str, float]:
     """Derive entry prices from previously computed ``levels``.
 
+    Parameters
+    ----------
+    levels:
+        Mapping containing at least ``S`` (support), ``R`` (resistance) and
+        ``microbuffer`` values.
+
+    Returns
+    -------
+    Mapping[str, float]
+        Dictionary with ``buy_px`` and ``sell_px`` aligned to the provided tick
+        size (``settings.TICK_SIZE``).
+
+    Notes
+    -----
     This function is pure and performs no IO.
     """
-    return []
+
+    settings = kwargs.get("settings")
+    tick = float(getattr(settings, "TICK_SIZE", 0.0)) if settings else 0.0
+
+    try:
+        S = float(levels["S"])
+        R = float(levels["R"])
+        micro = float(levels["microbuffer"])
+    except Exception:
+        return {}
+
+    buy_px = _round_to_tick(S + micro, tick)
+    sell_px = _round_to_tick(R - micro, tick)
+    return {"buy_px": buy_px, "sell_px": sell_px}
 
 
-def build_bracket(entry_price: float, stop_loss: float, take_profit: float, *args: Any, **kwargs: Any) -> dict:
-    """Construct a bracket order description.
+def build_bracket(
+    side: str,
+    entry: float,
+    S: float,
+    R: float,
+    microbuffer: float,
+    buffer_sl: float,
+    atr1m: float,
+    tp_policy: str | None = None,
+    *args: Any,
+    **kwargs: Any,
+) -> Mapping[str, float]:
+    """Construct stop-loss and take-profit levels for a position.
 
-    Pure function that returns a dictionary describing the bracket
-    configuration.
+    Parameters mirror the description in ``Paso 8`` of the kata.  ``side``
+    accepts ``"BUY"``/``"LONG"`` for long positions and ``"SELL"``/``"SHORT"``
+    for shorts.
+
+    The function is pure and performs no IO.
     """
-    return {}
+
+    settings = kwargs.get("settings")
+    tick = float(getattr(settings, "TICK_SIZE", 0.0)) if settings else 0.0
+
+    is_long = str(side).upper() in {"BUY", "LONG"}
+
+    if is_long:
+        sl = S - buffer_sl
+        tp_struct = R - microbuffer
+        risk = entry - sl
+        reward = tp_struct - entry
+        if risk > 0 and reward / risk >= 1.2:
+            tp = tp_struct
+        else:
+            tp = entry + 1.8 * abs(entry - sl)
+    else:
+        sl = R + buffer_sl
+        tp_struct = S + microbuffer
+        risk = sl - entry
+        reward = entry - tp_struct
+        if risk > 0 and reward / risk >= 1.2:
+            tp = tp_struct
+        else:
+            tp = entry - 1.8 * abs(entry - sl)
+
+    sl = _round_to_tick(sl, tick)
+    tp = _round_to_tick(tp, tick)
+    return {"sl": sl, "tp": tp}
 
 
 # ---------------------------------------------------------------------------
