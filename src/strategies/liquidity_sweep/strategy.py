@@ -731,12 +731,16 @@ class LiquiditySweepStrategy:
         tick_end = open_at_ny + timedelta(minutes=TIMEOUT_NO_FILL_MIN)
 
         if force_phase == "preopen" or preopen_start <= ny_now < preopen_end:
-            return do_preopen(exchange, utc_now)
+            resp = do_preopen(exchange, utc_now)
+            resp.setdefault("status", "preopen_ok")
+            return resp
 
         if force_phase == "tick" or tick_start <= ny_now < tick_end:
-            return do_tick(exchange, utc_now, event)
+            resp = do_tick(exchange, utc_now, event)
+            resp.setdefault("status", "waiting")
+            return resp
 
-        return {"status": "idle", "reason": "out_of_window"}
+        return {"status": "done", "reason": "out_of_window"}
 
 
 # ---------------------------------------------------------------------------
@@ -749,7 +753,4 @@ def generateSignal(context: Mapping[str, Any]) -> dict:
     ``context`` is expected to provide ``exchange``, ``now_utc`` and ``event``
     items.  The function delegates to :meth:`LiquiditySweepStrategy.run`.
     """
-    exchange = context.get("exchange")
-    now_utc = context.get("now_utc")
-    event = context.get("event")
-    return LiquiditySweepStrategy().run(exchange, now_utc=now_utc, event=event)
+    return LiquiditySweepStrategy().run(**context)
