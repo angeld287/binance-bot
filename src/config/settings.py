@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Any
+import logging
+import os
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -28,7 +30,8 @@ class Settings(BaseSettings):
     BINANCE_API_SECRET: str | None = None
 
     LOG_LEVEL: str = "INFO"
-    PAPER_TRADING: bool = True
+    BINANCE_TESTNET: bool = False
+    PAPER_TRADING: bool | None = None  # Deprecated; fallback to BINANCE_TESTNET
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -40,4 +43,19 @@ class Settings(BaseSettings):
 @lru_cache
 def load_settings() -> Settings:
     """Factory function to load settings from environment or .env file."""
-    return Settings()
+    settings = Settings()
+
+    # Fallback: map legacy PAPER_TRADING to BINANCE_TESTNET if the new variable
+    # is not explicitly provided.
+    if os.getenv("BINANCE_TESTNET") is None and os.getenv("PAPER_TRADING") is not None:
+        settings.BINANCE_TESTNET = bool(settings.PAPER_TRADING)
+
+    testnet = settings.BINANCE_TESTNET
+    domain = (
+        "https://testnet.binancefuture.com" if testnet else "https://fapi.binance.com"
+    )
+    logging.getLogger(__name__).info(
+        "BINANCE_TESTNET=%s domain=%s", testnet, domain
+    )
+
+    return settings
