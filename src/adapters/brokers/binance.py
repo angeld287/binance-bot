@@ -43,6 +43,8 @@ class BinanceBroker(BrokerPort):
             testnet=settings.BINANCE_TESTNET,
             requests_params=requests_params,
         )
+
+        logger.warning("self._client=%r", self._client.FUTURES_URL)
         self._client.session = getattr(self, "_session", None)
         # Cache for symbol filters to avoid repeated ``exchangeInfo`` calls
         self._filters_cache: Dict[str, Dict[str, Any]] = {}
