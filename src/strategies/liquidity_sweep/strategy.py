@@ -293,7 +293,7 @@ def build_bracket(
 # Internal IO helpers
 
 
-def do_preopen(exchange: Any, symbol: str, settings: Any) -> dict:
+def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> dict:
     """Perform pre-open IO actions.
 
     The function fetches recent candle data to compute support and resistance
@@ -303,10 +303,13 @@ def do_preopen(exchange: Any, symbol: str, settings: Any) -> dict:
     Parameters
     ----------
     exchange:
-        Object providing market-data and trading capabilities.  It must expose
-        ``get_klines``/``fetch_ohlcv`` for candles, ``open_orders`` to query
-        current orders, ``place_limit`` and ``cancel_order`` to manage orders as
-        well as helpers ``get_symbol_filters`` and ``round_price_to_tick``.
+        Trading adapter used to inspect and manage orders.  It must expose
+        ``open_orders`` to query current orders, ``place_limit`` and
+        ``cancel_order`` to manage them as well as helpers
+        ``get_symbol_filters`` and ``round_price_to_tick``.
+    market_data:
+        Data provider exposing ``fetch_ohlcv`` or ``get_klines`` to retrieve
+        candle information.
     symbol:
         Market symbol, e.g. ``"BTCUSDT"``.
     settings:
@@ -323,10 +326,10 @@ def do_preopen(exchange: Any, symbol: str, settings: Any) -> dict:
 
     # ------------------------------------------------------------------
     # Fetch 1m candles
-    if hasattr(exchange, "get_klines"):
-        candles = exchange.get_klines(symbol=symbol, interval="1m", lookback_min=lookback)
-    else:  # pragma: no cover - fallback for exchanges exposing ccxt-like API
-        candles = exchange.fetch_ohlcv(symbol, timeframe="1m", limit=lookback)  # type: ignore[attr-defined]
+    if hasattr(market_data, "fetch_ohlcv"):
+        candles = market_data.fetch_ohlcv(symbol, timeframe="1m", limit=lookback)
+    else:  # pragma: no cover - fallback for providers exposing get_klines only
+        candles = market_data.get_klines(symbol=symbol, interval="1m", lookback_min=lookback)
 
     levels: Mapping[str, float] = compute_levels(candles, settings=settings) or {}
     S = float(levels.get("S", 0.0))
@@ -406,6 +409,7 @@ def do_tick(
     exchange: Any,
     symbol: str,
     settings: Any,
+    market_data: Any | None = None,
     event: Any | None = None,
 ) -> dict:
     """Handle the tick phase after market open.
@@ -425,6 +429,8 @@ def do_tick(
         Market symbol, e.g. ``"BTCUSDT"``.
     settings:
         Configuration container providing at least ``RISK_PCT``.
+    market_data:
+        Data provider, currently unused but kept for interface symmetry.
     event:
         Optional mapping/object carrying ``open_at_epoch_ms`` and level
         information (``S``, ``R``, ``microbuffer`` and ``buffer_sl``).
@@ -741,12 +747,12 @@ class LiquiditySweepStrategy:
         tick_end = open_at_ny + timedelta(minutes=timeout_min)
 
         if force_phase == "preopen" or preopen_start <= ny_now < preopen_end:
-            resp = do_preopen(exchange, symbol, settings)
+            resp = do_preopen(exchange, market_data, symbol, settings)
             resp.setdefault("status", "preopen_ok")
             return resp
 
         if force_phase == "tick" or tick_start <= ny_now < tick_end:
-            resp = do_tick(exchange, symbol, settings, event)
+            resp = do_tick(exchange, symbol, settings, market_data, event)
             resp.setdefault("status", "waiting")
             return resp
 
