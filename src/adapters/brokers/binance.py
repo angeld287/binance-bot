@@ -38,7 +38,7 @@ class BinanceBroker(BrokerPort):
         self._client = Client(
             api_key=settings.BINANCE_API_KEY,
             api_secret=settings.BINANCE_API_SECRET,
-            testnet=settings.PAPER_TRADING,
+            testnet=settings.BINANCE_TESTNET,
             requests_params=requests_params,
         )
         self._client.session = getattr(self, "_session", None)

@@ -31,7 +31,7 @@ class BinanceMarketData(MarketDataPort):
         self._client = Client(
             api_key=settings.BINANCE_API_KEY,
             api_secret=settings.BINANCE_API_SECRET,
-            testnet=settings.PAPER_TRADING,
+            testnet=settings.BINANCE_TESTNET,
         )
 
     def get_klines(self, symbol: str, interval: str, lookback_min: int) -> list["Candle"]:
@@ -95,7 +95,12 @@ class BinanceMarketData(MarketDataPort):
             with requests.Session() as session:
                 session.trust_env = False
                 session.proxies.clear()
-                resp = session.get("https://fapi.binance.com/fapi/v1/time", timeout=5)
+                base_url = (
+                    "https://testnet.binancefuture.com"
+                    if self._settings.BINANCE_TESTNET
+                    else "https://fapi.binance.com"
+                )
+                resp = session.get(f"{base_url}/fapi/v1/time", timeout=5)
                 resp.raise_for_status()
                 data = resp.json()
                 return int(data["serverTime"])
