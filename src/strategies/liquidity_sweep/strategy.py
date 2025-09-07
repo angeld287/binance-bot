@@ -701,7 +701,12 @@ class LiquiditySweepStrategy:
     """High level strategy coordinator."""
 
     def run(
-        self, exchange: Any, now_utc: datetime | None = None, event: Any | None = None
+        self,
+        exchange: Any,
+        market_data: Any | None = None,
+        settings: Any | None = None,
+        now_utc: datetime | None = None,
+        event: Any | None = None,
     ) -> dict:
         """Execute the strategy and return a result dictionary."""
         utc_now = now_utc or datetime.now(tz=ZoneInfo("UTC"))
@@ -709,14 +714,19 @@ class LiquiditySweepStrategy:
 
         open_at_epoch_ms = None
         force_phase = None
+        symbol = getattr(settings, "SYMBOL", None)
         if isinstance(event, Mapping):
             open_at_epoch_ms = event.get("open_at_epoch_ms")
             force_phase = event.get("force_phase")
+            symbol = event.get("symbol", symbol)
+            timeout_min = event.get("timeout_no_fill_min", TIMEOUT_NO_FILL_MIN)
         else:
             open_at_epoch_ms = getattr(event, "open_at_epoch_ms", None)
             force_phase = getattr(event, "force_phase", None)
             if isinstance(event, str) and event in {"preopen", "tick"}:
                 force_phase = event
+            symbol = getattr(event, "symbol", symbol)
+            timeout_min = getattr(event, "timeout_no_fill_min", TIMEOUT_NO_FILL_MIN)
 
         if open_at_epoch_ms is not None:
             open_at_ny = datetime.fromtimestamp(open_at_epoch_ms / 1000, tz=ZoneInfo("UTC")).astimezone(
@@ -728,15 +738,15 @@ class LiquiditySweepStrategy:
         preopen_start = open_at_ny - timedelta(minutes=5)
         preopen_end = open_at_ny
         tick_start = open_at_ny
-        tick_end = open_at_ny + timedelta(minutes=TIMEOUT_NO_FILL_MIN)
+        tick_end = open_at_ny + timedelta(minutes=timeout_min)
 
         if force_phase == "preopen" or preopen_start <= ny_now < preopen_end:
-            resp = do_preopen(exchange, utc_now)
+            resp = do_preopen(exchange, symbol, settings)
             resp.setdefault("status", "preopen_ok")
             return resp
 
         if force_phase == "tick" or tick_start <= ny_now < tick_end:
-            resp = do_tick(exchange, utc_now, event)
+            resp = do_tick(exchange, symbol, settings, event)
             resp.setdefault("status", "waiting")
             return resp
 
