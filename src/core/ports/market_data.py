@@ -16,6 +16,11 @@ class MarketDataPort(Protocol):
 
         ...
 
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
+        """Return ``limit`` candles in ``[ms, open, high, low, close, volume]`` format."""
+
+        ...
+
     def get_price(self, symbol: str) -> float:
         ...
 

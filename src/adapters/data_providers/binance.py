@@ -50,6 +50,34 @@ class BinanceMarketData(MarketDataPort):
                 )
         raise RuntimeError("Failed to fetch klines after retries")
 
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
+        """Fetch OHLCV data using Binance klines endpoint.
+
+        Parameters mirror :func:`ccxt`'s ``fetch_ohlcv``.  Returned candles are
+        normalized to ``[ms, open, high, low, close, volume]``.
+        """
+
+        sym = symbol.replace("/", "")
+        for attempt in range(3):
+            try:
+                data = self._client.get_klines(symbol=sym, interval=timeframe, limit=limit)
+                return [
+                    [
+                        float(k[0]),
+                        float(k[1]),
+                        float(k[2]),
+                        float(k[3]),
+                        float(k[4]),
+                        float(k[5]),
+                    ]
+                    for k in data
+                ]
+            except Exception as exc:  # pragma: no cover - network failures
+                logger.warning(
+                    "Binance fetch_ohlcv failed (attempt %s/3): %s", attempt + 1, exc
+                )
+        raise RuntimeError("Failed to fetch klines after retries")
+
     def get_price(self, symbol: str) -> float:
         sym = symbol.replace("/", "")
         for attempt in range(3):
