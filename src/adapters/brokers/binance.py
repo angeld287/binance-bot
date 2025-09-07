@@ -32,8 +32,9 @@ class BinanceBroker(BrokerPort):
             else 30
         )
         requests_params = {"timeout": timeout}
-        logger.warning("BINANCE_API_KEY=%r", settings.BINANCE_API_KEY)
-        logger.warning("BINANCE_API_SECRET=%r", settings.BINANCE_API_SECRET)
+        logger.warning(f"BINANCE_API_KEY={settings.BINANCE_API_KEY}")
+        logger.warning("BINANCE_API_SECRET=%s", settings.BINANCE_API_SECRET)   # sin comillas
+
         logger.warning("BINANCE_TESTNET=%r", settings.BINANCE_TESTNET)
         logger.warning("requests_params=%r", requests_params)
 
