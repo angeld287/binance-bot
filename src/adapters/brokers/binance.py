@@ -67,6 +67,7 @@ class BinanceBroker(BrokerPort):
     def open_orders(self, symbol: str) -> list[Any]:
         try:
             c = self._client
+            logger.warning("session.headers=%s", c)
             # Obtiene datos del cliente (con fallback por si cambian nombres internos)
             api_key = getattr(c, "key", None) or getattr(c, "api_key", None) \
                     or getattr(getattr(c, "session", None), "headers", {}).get("X-MBX-APIKEY")
@@ -77,13 +78,13 @@ class BinanceBroker(BrokerPort):
             offset = getattr(c, "timestamp_offset", None)
             testnet = getattr(c, "testnet", None)
             has_hdr = "X-MBX-APIKEY" in getattr(getattr(c, "session", None), "headers", {})
-#
+
             logger.warning(
                 "BINANCE CLIENT DBG | base_url=%s testnet=%s offset_ms=%s recvWindow=%s key=%s has_header_in_session=%s",
                 base_url, testnet, offset, recv, BinanceBroker._redact(api_key), has_hdr
             )
             logger.debug("session.headers=%s", self._safe_dict(getattr(c.session, "headers", {})))
-#
+
             ## Hook para ver los headers de la petición REAL (algunas SDK los inyectan per-request)
             if hasattr(c, "session") and not getattr(c.session, "_reqlog_attached", False):
                 def _hook(resp, *a, **k):
