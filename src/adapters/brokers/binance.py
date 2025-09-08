@@ -78,7 +78,7 @@ class BinanceBroker(BrokerPort):
                 getattr(c, "base_url", None),
                 getattr(c, "FUTURES_URL", None),
                 getattr(c, "API_URL", None),
-                _redact(getattr(c, "API_KEY", None) or getattr(c, "api_key", None) or headers.get("X-MBX-APIKEY")),
+                self._redact(getattr(c, "API_KEY", None) or getattr(c, "api_key", None) or headers.get("X-MBX-APIKEY")),
                 getattr(c, "REQUEST_RECVWINDOW", getattr(c, "REQUEST_RECWINDOW", None)),
                 getattr(c, "timestamp_offset", None),
                 getattr(c, "testnet", None),
