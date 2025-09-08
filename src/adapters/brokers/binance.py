@@ -66,17 +66,17 @@ class BinanceBroker(BrokerPort):
     # Orders
     def open_orders(self, symbol: str) -> list[Any]:
         try:
-            #c = self._client
-            ## Obtiene datos del cliente (con fallback por si cambian nombres internos)
-            #api_key = getattr(c, "key", None) or getattr(c, "api_key", None) \
-            #        or getattr(getattr(c, "session", None), "headers", {}).get("X-MBX-APIKEY")
-            #base_url = getattr(c, "base_url", None) or getattr(c, "_base_url", "<unknown>")
-            #recv = getattr(c, "REQUEST_RECVWINDOW", None)
-            #if recv is None:
-            #    recv = getattr(c, "REQUEST_RECWINDOW", None)
-            #offset = getattr(c, "timestamp_offset", None)
-            #testnet = getattr(c, "testnet", None)
-            #has_hdr = "X-MBX-APIKEY" in getattr(getattr(c, "session", None), "headers", {})
+            c = self._client
+            # Obtiene datos del cliente (con fallback por si cambian nombres internos)
+            api_key = getattr(c, "key", None) or getattr(c, "api_key", None) \
+                    or getattr(getattr(c, "session", None), "headers", {}).get("X-MBX-APIKEY")
+            base_url = getattr(c, "base_url", None) or getattr(c, "_base_url", "<unknown>")
+            recv = getattr(c, "REQUEST_RECVWINDOW", None)
+            if recv is None:
+                recv = getattr(c, "REQUEST_RECWINDOW", None)
+            offset = getattr(c, "timestamp_offset", None)
+            testnet = getattr(c, "testnet", None)
+            has_hdr = "X-MBX-APIKEY" in getattr(getattr(c, "session", None), "headers", {})
 #
             #logger.warning(
             #    "BINANCE CLIENT DBG | base_url=%s testnet=%s offset_ms=%s recvWindow=%s key=%s has_header_in_session=%s",
