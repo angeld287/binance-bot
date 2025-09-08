@@ -53,7 +53,7 @@ class BinanceBroker(BrokerPort):
         # Cache for symbol filters to avoid repeated ``exchangeInfo`` calls
         self._filters_cache: Dict[str, Dict[str, Any]] = {}
 
-    def _redact(s: str) -> str:
+    def _redact(self, s: str) -> str:
         if not s:
             return "<empty>"
         s = str(s)
