@@ -69,20 +69,18 @@ class BinanceBroker(BrokerPort):
             c = self._client
             # Obtiene datos del cliente (con fallback por si cambian nombres internos)
             # 1) Headers de la sesión (lo que realmente se manda por defecto)
-            headers = getattr(getattr(c, "session", None), "headers", {})
 
-            # 2) Atributos útiles del cliente
-            logger.warning(
-                "client dbg | class=%s base_url=%s futures_url=%s api_url=%s key=%s recvWindow=%s offset_ms=%s testnet=%s",
-                f"{c.__class__.__module__}.{c.__class__.__name__}",
-                getattr(c, "base_url", None),
-                getattr(c, "FUTURES_URL", None),
-                getattr(c, "API_URL", None),
-                self._redact(getattr(c, "API_KEY", None) or getattr(c, "api_key", None) or headers.get("X-MBX-APIKEY")),
-                getattr(c, "REQUEST_RECVWINDOW", getattr(c, "REQUEST_RECWINDOW", None)),
-                getattr(c, "timestamp_offset", None),
-                getattr(c, "testnet", None),
-            )
+            # adjunta una sola vez
+            if hasattr(c, "session") and not getattr(c.session, "_dbg_hook", False):
+                def _hook(resp, *_, **__):
+                    req = resp.request
+                    # aquí vemos lo que realmente salió por cable
+                    h = {k: ("<redacted>" if k.lower()=="x-mbx-apikey" else v) for k,v in (req.headers or {}).items()}
+                    logger.warning("REQ %s %s | headers=%s | status=%s %s",
+                                req.method, req.url, h, resp.status_code, resp.reason)
+                c.session.hooks.setdefault("response", []).append(_hook)
+                c.session._dbg_hook = True
+
 
 
             return c.futures_get_open_orders(symbol=_to_binance_symbol(symbol))  # type: ignore[return-value]
