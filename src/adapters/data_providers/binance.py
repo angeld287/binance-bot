@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 from typing import TYPE_CHECKING
 import requests
 
@@ -23,6 +25,15 @@ def _interval_to_minutes(interval: str) -> int:
     return int(interval[:-1]) * units[interval[-1]]
 
 
+def _calc_drift_ms(client: Client) -> int:
+    now_ms = int(time.time() * 1000)
+    try:  # pragma: no cover - network failures
+        server_ms = client.futures_time().get("serverTime", now_ms)
+    except Exception:  # pragma: no cover - network failures
+        return 0
+    return int(server_ms) - now_ms
+
+
 class BinanceMarketData(MarketDataPort):
     """Market data provider backed by Binance REST endpoints."""
 
@@ -33,6 +44,9 @@ class BinanceMarketData(MarketDataPort):
             api_secret=settings.BINANCE_API_SECRET,
             testnet=settings.BINANCE_TESTNET,
         )
+        drift_ms = _calc_drift_ms(self._client)
+        self._client.timestamp_offset = drift_ms  # quedamos levemente por detrás
+        self._client.REQUEST_RECVWINDOW = int(os.getenv("RECV_WINDOW_MS", "5000"))
 
     def get_klines(self, symbol: str, interval: str, lookback_min: int) -> list["Candle"]:
         """Return OHLC candles for a symbol over ``lookback_min`` minutes."""

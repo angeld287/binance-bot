@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 from decimal import Decimal
 from typing import Any, Dict
 
@@ -17,6 +19,15 @@ logger = logging.getLogger(__name__)
 
 def _to_binance_symbol(sym: str) -> str:
     return sym.replace("/", "")
+
+
+def _calc_drift_ms(client: Client) -> int:
+    now_ms = int(time.time() * 1000)
+    try:  # pragma: no cover - network failures
+        server_ms = client.futures_time().get("serverTime", now_ms)
+    except Exception:  # pragma: no cover - network failures
+        return 0
+    return int(server_ms) - now_ms
 
 
 class BinanceBroker(BrokerPort):
@@ -39,6 +50,9 @@ class BinanceBroker(BrokerPort):
         logger.warning("requests_params=%r", requests_params)
 
         self._client = Client(settings.BINANCE_API_KEY, settings.BINANCE_API_SECRET)
+        drift_ms = _calc_drift_ms(self._client)
+        self._client.timestamp_offset = drift_ms  # quedamos levemente por detrás
+        self._client.REQUEST_RECVWINDOW = int(os.getenv("RECV_WINDOW_MS", "5000"))
 
         logger.warning("self._client=%r", self._client.FUTURES_URL)
         self._client.session = getattr(self, "_session", None)
