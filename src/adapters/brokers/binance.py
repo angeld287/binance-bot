@@ -80,7 +80,7 @@ class BinanceBroker(BrokerPort):
 
             logger.warning(
                 "BINANCE CLIENT DBG | base_url=%s testnet=%s offset_ms=%s recvWindow=%s key=%s has_header_in_session=%s",
-                base_url, testnet, offset, recv, self._redact(api_key), has_hdr
+                base_url, testnet, offset, recv, has_hdr
             )
             logger.debug("session.headers=%s", self._safe_dict(getattr(c.session, "headers", {})))
 
