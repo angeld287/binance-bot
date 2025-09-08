@@ -39,13 +39,7 @@ class BinanceMarketData(MarketDataPort):
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        logger.warning(f"BinanceMarketData - BINANCE_API_KEY={settings.BINANCE_API_KEY}")
-        logger.warning("BinanceMarketData - BINANCE_API_SECRET=%s", settings.BINANCE_API_SECRET)   # sin comillas
-
-        logger.warning("BinanceMarketData - BINANCE_TESTNET=%r", settings.BINANCE_TESTNET)
         self._client = Client(settings.BINANCE_API_KEY,settings.BINANCE_API_SECRET,)
-        logger.warning("BinanceMarketData -  self._client=%r", self._client.FUTURES_URL)
-
         drift_ms = _calc_drift_ms(self._client)
         self._client.timestamp_offset = drift_ms  # quedamos levemente por detrás
         self._client.REQUEST_RECVWINDOW = int(os.getenv("RECV_WINDOW_MS", "5000"))

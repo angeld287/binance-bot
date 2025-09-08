@@ -43,26 +43,57 @@ class BinanceBroker(BrokerPort):
             else 30
         )
         requests_params = {"timeout": timeout}
-        logger.warning(f"BINANCE_API_KEY={settings.BINANCE_API_KEY}")
-        logger.warning("BINANCE_API_SECRET=%s", settings.BINANCE_API_SECRET)   # sin comillas
-
-        logger.warning("BINANCE_TESTNET=%r", settings.BINANCE_TESTNET)
-        logger.warning("requests_params=%r", requests_params)
 
         self._client = Client(settings.BINANCE_API_KEY, settings.BINANCE_API_SECRET)
         drift_ms = _calc_drift_ms(self._client)
         self._client.timestamp_offset = drift_ms  # quedamos levemente por detrás
         self._client.REQUEST_RECVWINDOW = int(os.getenv("RECV_WINDOW_MS", "5000"))
 
-        logger.warning("self._client=%r", self._client.FUTURES_URL)
         self._client.session = getattr(self, "_session", None)
         # Cache for symbol filters to avoid repeated ``exchangeInfo`` calls
         self._filters_cache: Dict[str, Dict[str, Any]] = {}
 
+    def _redact(s: str) -> str:
+        if not s:
+            return "<empty>"
+        s = str(s)
+        return s[:6] + "…" + s[-4:]
+
+    def _safe_dict(d):
+        return {k: ("<redacted>" if k.lower() in {"x-mbx-apikey", "authorization"} else v)
+                for k, v in (d or {}).items()}
     # ------------------------------------------------------------------
     # Orders
     def open_orders(self, symbol: str) -> list[Any]:
         try:
+            c = self._client
+            # Obtiene datos del cliente (con fallback por si cambian nombres internos)
+            api_key = getattr(c, "key", None) or getattr(c, "api_key", None) \
+                    or getattr(getattr(c, "session", None), "headers", {}).get("X-MBX-APIKEY")
+            base_url = getattr(c, "base_url", None) or getattr(c, "_base_url", "<unknown>")
+            recv = getattr(c, "REQUEST_RECVWINDOW", None)
+            if recv is None:
+                recv = getattr(c, "REQUEST_RECWINDOW", None)
+            offset = getattr(c, "timestamp_offset", None)
+            testnet = getattr(c, "testnet", None)
+            has_hdr = "X-MBX-APIKEY" in getattr(getattr(c, "session", None), "headers", {})
+
+            logger.warning(
+                "BINANCE CLIENT DBG | base_url=%s testnet=%s offset_ms=%s recvWindow=%s key=%s has_header_in_session=%s",
+                base_url, testnet, offset, recv, _redact(api_key), has_hdr
+            )
+            logger.debug("session.headers=%s", _safe_dict(getattr(c.session, "headers", {})))
+
+            # Hook para ver los headers de la petición REAL (algunas SDK los inyectan per-request)
+            if hasattr(c, "session") and not getattr(c.session, "_reqlog_attached", False):
+                def _hook(resp, *a, **k):
+                    req = resp.request
+                    logger.debug("REQ %s %s | headers=%s | status=%s %s | body=<omitted>",
+                                req.method, req.url, _safe_dict(req.headers),
+                                resp.status_code, resp.reason)
+                c.session.hooks.setdefault("response", []).append(_hook)
+                c.session._reqlog_attached = True
+                
             return self._client.futures_get_open_orders(symbol=_to_binance_symbol(symbol))  # type: ignore[return-value]
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to fetch open orders: %s", exc)
