@@ -80,20 +80,20 @@ class BinanceBroker(BrokerPort):
 
             logger.warning(
                 "BINANCE CLIENT DBG | base_url=%s testnet=%s offset_ms=%s recvWindow=%s key=%s has_header_in_session=%s",
-                base_url, testnet, offset, recv, _redact(api_key), has_hdr
+                base_url, testnet, offset, recv, self._redact(api_key), has_hdr
             )
-            logger.debug("session.headers=%s", _safe_dict(getattr(c.session, "headers", {})))
+            logger.debug("session.headers=%s", self._safe_dict(getattr(c.session, "headers", {})))
 
             # Hook para ver los headers de la petición REAL (algunas SDK los inyectan per-request)
             if hasattr(c, "session") and not getattr(c.session, "_reqlog_attached", False):
                 def _hook(resp, *a, **k):
                     req = resp.request
                     logger.debug("REQ %s %s | headers=%s | status=%s %s | body=<omitted>",
-                                req.method, req.url, _safe_dict(req.headers),
+                                req.method, req.url, self._safe_dict(req.headers),
                                 resp.status_code, resp.reason)
                 c.session.hooks.setdefault("response", []).append(_hook)
                 c.session._reqlog_attached = True
-                
+
             return self._client.futures_get_open_orders(symbol=_to_binance_symbol(symbol))  # type: ignore[return-value]
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to fetch open orders: %s", exc)
