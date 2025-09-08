@@ -67,6 +67,8 @@ class BinanceBroker(BrokerPort):
     def open_orders(self, symbol: str) -> list[Any]:
         try:
             c = self._client
+            api_key = getattr(c, "API_KEY", None) or getattr(c, "api_key", None)
+            logger.warning("REQ %s", api_key)
             # Obtiene datos del cliente (con fallback por si cambian nombres internos)
             # 1) Headers de la sesión (lo que realmente se manda por defecto)
 
