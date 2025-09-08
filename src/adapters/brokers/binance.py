@@ -82,14 +82,14 @@ class BinanceBroker(BrokerPort):
                 "BINANCE CLIENT DBG | base_url=%s testnet=%s offset_ms=%s recvWindow=%s key=%s has_header_in_session=%s",
                 base_url, testnet, offset, recv, BinanceBroker._redact(api_key), has_hdr
             )
-            logger.debug("session.headers=%s", self._safe_dict(getattr(c.session, "headers", {})))
+            logger.debug("session.headers=%s", self._safe_dict(self, getattr(c.session, "headers", {})))
 #
             ## Hook para ver los headers de la petición REAL (algunas SDK los inyectan per-request)
             if hasattr(c, "session") and not getattr(c.session, "_reqlog_attached", False):
                 def _hook(resp, *a, **k):
                     req = resp.request
                     logger.debug("REQ %s %s | headers=%s | status=%s %s | body=<omitted>",
-                                req.method, req.url, self._safe_dict(req.headers),
+                                req.method, req.url, self._safe_dict(self, req.headers),
                                 resp.status_code, resp.reason)
                 c.session.hooks.setdefault("response", []).append(_hook)
                 c.session._reqlog_attached = True
