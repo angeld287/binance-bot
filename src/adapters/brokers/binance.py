@@ -67,35 +67,25 @@ class BinanceBroker(BrokerPort):
     def open_orders(self, symbol: str) -> list[Any]:
         try:
             c = self._client
-            logger.warning("session.headers=%s", c)
             # Obtiene datos del cliente (con fallback por si cambian nombres internos)
-            api_key = getattr(c, "key", None) or getattr(c, "api_key", None) \
-                    or getattr(getattr(c, "session", None), "headers", {}).get("X-MBX-APIKEY")
-            base_url = getattr(c, "base_url", None) or getattr(c, "_base_url", "<unknown>")
-            recv = getattr(c, "REQUEST_RECVWINDOW", None)
-            if recv is None:
-                recv = getattr(c, "REQUEST_RECWINDOW", None)
-            offset = getattr(c, "timestamp_offset", None)
-            testnet = getattr(c, "testnet", None)
-            has_hdr = "X-MBX-APIKEY" in getattr(getattr(c, "session", None), "headers", {})
+            # 1) Headers de la sesión (lo que realmente se manda por defecto)
+            headers = getattr(getattr(c, "session", None), "headers", {})
 
+            # 2) Atributos útiles del cliente
             logger.warning(
-                "BINANCE CLIENT DBG | base_url=%s testnet=%s offset_ms=%s recvWindow=%s key=%s has_header_in_session=%s",
-                base_url, testnet, offset, recv, BinanceBroker._redact(api_key), has_hdr
+                "client dbg | class=%s base_url=%s futures_url=%s api_url=%s key=%s recvWindow=%s offset_ms=%s testnet=%s",
+                f"{c.__class__.__module__}.{c.__class__.__name__}",
+                getattr(c, "base_url", None),
+                getattr(c, "FUTURES_URL", None),
+                getattr(c, "API_URL", None),
+                _redact(getattr(c, "API_KEY", None) or getattr(c, "api_key", None) or headers.get("X-MBX-APIKEY")),
+                getattr(c, "REQUEST_RECVWINDOW", getattr(c, "REQUEST_RECWINDOW", None)),
+                getattr(c, "timestamp_offset", None),
+                getattr(c, "testnet", None),
             )
-            logger.debug("session.headers=%s", self._safe_dict(getattr(c.session, "headers", {})))
 
-            ## Hook para ver los headers de la petición REAL (algunas SDK los inyectan per-request)
-            if hasattr(c, "session") and not getattr(c.session, "_reqlog_attached", False):
-                def _hook(resp, *a, **k):
-                    req = resp.request
-                    logger.debug("REQ %s %s | headers=%s | status=%s %s | body=<omitted>",
-                                req.method, req.url, self._safe_dict(req.headers),
-                                resp.status_code, resp.reason)
-                c.session.hooks.setdefault("response", []).append(_hook)
-                c.session._reqlog_attached = True
 
-            return self._client.futures_get_open_orders(symbol=_to_binance_symbol(symbol))  # type: ignore[return-value]
+            return c.futures_get_open_orders(symbol=_to_binance_symbol(symbol))  # type: ignore[return-value]
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to fetch open orders: %s", exc)
             raise
