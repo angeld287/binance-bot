@@ -78,10 +78,10 @@ class BinanceBroker(BrokerPort):
             testnet = getattr(c, "testnet", None)
             has_hdr = "X-MBX-APIKEY" in getattr(getattr(c, "session", None), "headers", {})
 #
-            #logger.warning(
-            #    "BINANCE CLIENT DBG | base_url=%s testnet=%s offset_ms=%s recvWindow=%s key=%s has_header_in_session=%s",
-            #    base_url, testnet, offset, recv, has_hdr
-            #)
+            logger.warning(
+                "BINANCE CLIENT DBG | base_url=%s testnet=%s offset_ms=%s recvWindow=%s key=%s has_header_in_session=%s",
+                base_url, testnet, offset, recv, has_hdr
+            )
             #logger.debug("session.headers=%s", self._safe_dict(getattr(c.session, "headers", {})))
 #
             ## Hook para ver los headers de la petición REAL (algunas SDK los inyectan per-request)
