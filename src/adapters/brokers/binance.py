@@ -49,7 +49,7 @@ class BinanceBroker(BrokerPort):
         self._client.timestamp_offset = drift_ms  # quedamos levemente por detrás
         self._client.REQUEST_RECVWINDOW = int(os.getenv("RECV_WINDOW_MS", "5000"))
 
-        self._client.session = getattr(self, "_session", None)
+        #self._client.session = getattr(self, "_session", None)
         # Cache for symbol filters to avoid repeated ``exchangeInfo`` calls
         self._filters_cache: Dict[str, Dict[str, Any]] = {}
 
