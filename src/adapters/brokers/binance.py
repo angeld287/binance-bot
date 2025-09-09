@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import logging
+import hmac, hashlib, logging
 import os
 import time
 from decimal import Decimal
@@ -28,6 +28,41 @@ def _calc_drift_ms(client: Client) -> int:
     except Exception:  # pragma: no cover - network failures
         return 0
     return int(server_ms) - now_ms
+
+def attach_signature_audit(client, api_secret: str):
+    key = (api_secret or "").strip().encode()
+
+    if hasattr(client, "session") and not getattr(client.session, "_sig_audit", False):
+        def _hook(resp, *_, **__):
+            req = resp.request
+            if req.method != "POST" or "/fapi/v1/order" not in req.url:
+                return
+            body = req.body or b""
+            s = body.decode("utf-8", "ignore") if isinstance(body, (bytes, bytearray)) else str(body)
+
+            # Separa payload y firma enviada
+            parts = s.split("&signature=")
+            payload = parts[0]
+            sent_sig = parts[1] if len(parts) > 1 else ""
+
+            # Recalcula firma local
+            calc_sig = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+            # Lista de parámetros que realmente viajaron (en orden exacto)
+            pairs = [p for p in payload.split("&") if p]
+            names = [p.split("=", 1)[0] for p in pairs]
+
+            # Chequeos básicos
+            required = {"symbol","side","type","timestamp"}
+            missing = sorted(required - set(names))
+            has_signature_field = any(p.startswith("signature=") for p in pairs)
+
+            logger.warning(
+                "SIG-AUDIT | match=%s | params=%s | missing=%s | has_signature_field=%s | payload_prefix=%r",
+                calc_sig == sent_sig, names, missing, has_signature_field, payload[:120]
+            )
+        client.session.hooks.setdefault("response", []).append(_hook)
+        client.session._sig_audit = True
 
 
 class BinanceBroker(BrokerPort):
@@ -64,7 +99,6 @@ class BinanceBroker(BrokerPort):
     # Orders
     def open_orders(self, symbol: str) -> list[Any]:
         try:
-            logger.info("open_orders FETCH OPEN ORDERS")
             return self._client.futures_get_open_orders(symbol=_to_binance_symbol(symbol))  # type: ignore[return-value]
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to fetch open orders: %s", exc)
@@ -98,9 +132,7 @@ class BinanceBroker(BrokerPort):
     ) -> dict[str, Any]:
         try:
             logger.info("place_limit PLACE LIMIT ORDERS")
-            h = self._client.session.headers
-            h.pop("Content-Type", None)
-            h.pop("content-type", None)
+            attach_signature_audit(self._client, self._settings.BINANCE_API_SECRET)
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
