@@ -98,6 +98,9 @@ class BinanceBroker(BrokerPort):
     ) -> dict[str, Any]:
         try:
             logger.info("place_limit PLACE LIMIT ORDERS")
+            h = self._client.session.headers
+            h.pop("Content-Type", None)
+            h.pop("content-type", None)
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
