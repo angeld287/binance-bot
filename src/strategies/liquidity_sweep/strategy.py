@@ -382,21 +382,27 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
     def _ceil_step(x: float) -> float:
         return ceil(x / step) * step if step else x
 
-    price = 0.0
-    try:
-        if market_data and hasattr(market_data, "get_price"):
-            price = float(market_data.get_price(symbol))
-    except Exception:
-        price = 0.0
-    if not price:
-        price = (buy_px + sell_px) / 2
-
-    qty_min = max(min_qty, _ceil_step(min_notional / price if price else 0.0))
+    def _floor_step(x: float) -> float:
+        return floor(x / step) * step if step else x
 
     risk_notional = float(getattr(settings, "RISK_NOTIONAL_USDT", 0.0) or 0.0)
+
     if risk_notional > 0:
-        qty_budget = _ceil_step(risk_notional / price if price else 0.0)
+        price = min(buy_px, sell_px)
+        qty_min = max(min_qty, _ceil_step(min_notional / price if price else 0.0))
+        qty_budget = _floor_step(risk_notional / price if price else 0.0)
     else:
+        price = 0.0
+        try:
+            if market_data and hasattr(market_data, "get_price"):
+                price = float(market_data.get_price(symbol))
+        except Exception:
+            price = 0.0
+        if not price:
+            price = (buy_px + sell_px) / 2
+
+        qty_min = max(min_qty, _ceil_step(min_notional / price if price else 0.0))
+
         balance = 0.0
         try:
             balance = float(exchange.get_available_balance_usdt())
@@ -430,8 +436,7 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
         if hasattr(exchange, "round_qty_to_step"):
             qty_budget = exchange.round_qty_to_step(symbol, qty_from_risk)
         else:
-            qty_budget = floor(qty_from_risk / step) * step if step else qty_from_risk
-
+            qty_budget = _floor_step(qty_from_risk)
     if qty_budget < qty_min:
         logger.info(
             json.dumps(
@@ -448,11 +453,11 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
         )
         return {"status": "no_trade", "reason": "qty_too_small"}
 
-    qty = max(qty_budget, qty_min)
+    qty_final = max(qty_budget, qty_min)
 
     open_orders = exchange.open_orders(symbol)
 
-    def _ensure_limit(side: str, price: float, cid: str, qty: float) -> None:
+    def _ensure_limit(side: str, price: float, cid: str) -> None:
         existing = next((o for o in open_orders if o.get("clientOrderId") == cid), None)
         if existing:
             try:
@@ -466,21 +471,17 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
             json.dumps(
                 {
                     "sym": symbol,
-                    "side": side,
-                    "type": "LIMIT",
-                    "tif": "GTC",
-                    "price_final": price,
-                    "qty_final": qty,
-                    "notional": price * qty,
-                    "cid": cid,
-                    "reduceOnly": False,
+                    "price": price,
+                    "qty_min": qty_min,
+                    "qty_budget": qty_budget,
+                    "qty_final": qty_final,
                 }
             )
         )
-        exchange.place_limit(symbol, side, price, qty, cid, timeInForce="GTC")
+        exchange.place_limit(symbol, side, price, qty_final, cid, timeInForce="GTC")
 
-    _ensure_limit("BUY", buy_px, cid_buy, qty)
-    _ensure_limit("SELL", sell_px, cid_sell, qty)
+    _ensure_limit("BUY", buy_px, cid_buy)
+    _ensure_limit("SELL", sell_px, cid_sell)
     logger.info(
         json.dumps(
             {
@@ -687,11 +688,14 @@ def do_tick(
         def _ceil_step(x: float) -> float:
             return ceil(x / step) * step if step else x
 
+        def _floor_step(x: float) -> float:
+            return floor(x / step) * step if step else x
+
         qty_min = max(min_qty, _ceil_step(min_notional / entry if entry else 0.0))
 
         risk_notional = float(getattr(settings, "RISK_NOTIONAL_USDT", 0.0) or 0.0)
         if risk_notional > 0 and entry:
-            qty_budget = _ceil_step(risk_notional / entry)
+            qty_budget = _floor_step(risk_notional / entry)
         else:
             balance = 0.0
             try:
@@ -706,25 +710,25 @@ def do_tick(
             if hasattr(exchange, "round_qty_to_step"):
                 qty_budget = exchange.round_qty_to_step(symbol, qty_from_risk)
             else:
-                qty_budget = floor(qty_from_risk / step) * step if step else qty_from_risk
+                qty_budget = _floor_step(qty_from_risk)
 
         if qty_budget < qty_min:
             _log("no_trade", reason="qty_too_small")
             return {"status": "done", "reason": "qty_too_small"}
 
-        qty = max(qty_budget, qty_min)
+        qty_final = max(qty_budget, qty_min)
 
         exit_side = "SELL" if is_long else "BUY"
 
         try:
             if hasattr(exchange, "place_sl_reduce_only"):
-                exchange.place_sl_reduce_only(symbol, exit_side, sl, qty, cid_sl)
+                exchange.place_sl_reduce_only(symbol, exit_side, sl, qty_final, cid_sl)
             else:  # pragma: no cover - generic fallback
                 exchange.place_order(
                     symbol,
                     exit_side,
                     "STOP_MARKET",
-                    qty,
+                    qty_final,
                     cid_sl,
                     stopPrice=sl,
                     reduceOnly=True,
@@ -734,13 +738,13 @@ def do_tick(
 
         try:
             if hasattr(exchange, "place_tp_reduce_only"):
-                exchange.place_tp_reduce_only(symbol, exit_side, tp, qty, cid_tp)
+                exchange.place_tp_reduce_only(symbol, exit_side, tp, qty_final, cid_tp)
             else:  # pragma: no cover - generic fallback
                 exchange.place_limit(
                     symbol,
                     exit_side,
                     tp,
-                    qty,
+                    qty_final,
                     cid_tp,
                     timeInForce="GTC",
                 )
