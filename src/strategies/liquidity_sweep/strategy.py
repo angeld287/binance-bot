@@ -13,6 +13,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 import json
 import logging
+from decimal import Decimal
 
 
 TIMEOUT_NO_FILL_MIN = 5  # minutes after NY open to keep processing ticks
@@ -472,7 +473,47 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
                 }
             )
         )
-        exchange.place_limit(symbol, side, price, qty_final, cid, timeInForce="GTC")
+        # Normalize quantity and price according to exchange filters
+        if hasattr(exchange, "round_qty_to_step"):
+            qty_norm = exchange.round_qty_to_step(symbol, qty_final)
+        else:
+            qty_norm = _floor_step(qty_final)
+
+        if hasattr(exchange, "round_price_to_tick"):
+            price_norm = exchange.round_price_to_tick(symbol, price)
+        elif tick:
+            price_norm = floor(price / tick) * tick
+        else:
+            price_norm = price
+
+        step_decimals = max(0, -Decimal(str(step)).as_tuple().exponent) if step else 0
+        tick_decimals = max(0, -Decimal(str(tick)).as_tuple().exponent) if tick else 0
+
+        qty_str = (
+            f"{qty_norm:.{step_decimals}f}" if step_decimals else f"{int(qty_norm)}"
+        )
+        price_str = (
+            f"{price_norm:.{tick_decimals}f}" if tick_decimals else f"{int(price_norm)}"
+        )
+
+        logger.info(
+            json.dumps(
+                {
+                    "sym": symbol,
+                    "price_after_tick": price_str,
+                    "qty_after_step": qty_str,
+                }
+            )
+        )
+
+        exchange.place_limit(
+            symbol,
+            side,
+            price_str,
+            qty_str,
+            cid,
+            timeInForce="GTC",
+        )
 
     _ensure_limit("BUY", buy_px, cid_buy)
     _ensure_limit("SELL", sell_px, cid_sell)
