@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import hmac, hashlib, logging
+import hmac, hashlib, logging, urllib.parse as _url
 import os
 import time
 from decimal import Decimal
@@ -32,37 +32,51 @@ def _calc_drift_ms(client: Client) -> int:
 def attach_signature_audit(client, api_secret: str):
     key = (api_secret or "").strip().encode()
 
-    if hasattr(client, "session") and not getattr(client.session, "_sig_audit", False):
+    if hasattr(client, "session") and not getattr(client.session, "_sig_audit2", False):
         def _hook(resp, *_, **__):
             req = resp.request
             if req.method != "POST" or "/fapi/v1/order" not in req.url:
                 return
+
+            # --- cuerpo enviado ---
             body = req.body or b""
-            s = body.decode("utf-8", "ignore") if isinstance(body, (bytes, bytearray)) else str(body)
+            body_str = body.decode("utf-8", "ignore") if isinstance(body, (bytes, bytearray)) else str(body)
 
-            # Separa payload y firma enviada
-            parts = s.split("&signature=")
-            payload = parts[0]
-            sent_sig = parts[1] if len(parts) > 1 else ""
+            # --- query enviado ---
+            parsed = _url.urlsplit(req.url)
+            qs = parsed.query  # puede contener signature
 
-            # Recalcula firma local
-            calc_sig = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+            # Tomar firma “enviada”: primero de body, si no, de la URL
+            sent_sig = ""
+            for s in (body_str, qs):
+                if not s:
+                    continue
+                i = s.rfind("&signature=")
+                if i >= 0:
+                    sent_sig = s[i + len("&signature="):]
+                    break
 
-            # Lista de parámetros que realmente viajaron (en orden exacto)
-            pairs = [p for p in payload.split("&") if p]
-            names = [p.split("=", 1)[0] for p in pairs]
+            # ¿Con qué payload firmar?
+            # python-binance normalmente firma EXACTAMENTE el string que envía (cuerpo para POST).
+            # Pero hay versiones que ponen todo en query. Probamos ambos y vemos si alguno cuadra.
+            candidates = [p for p in (body_str, qs) if p]
+            matches = []
+            for payload in candidates:
+                calc = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+                matches.append(calc == sent_sig)
 
-            # Chequeos básicos
-            required = {"symbol","side","type","timestamp"}
-            missing = sorted(required - set(names))
-            has_signature_field = any(p.startswith("signature=") for p in pairs)
+            # lista de nombres de parámetros reales que viajaron (del body si existió; si no, del query)
+            use = body_str or qs
+            names = [p.split("=",1)[0] for p in use.split("&") if p]
 
             logger.warning(
-                "SIG-AUDIT | match=%s | params=%s | missing=%s | has_signature_field=%s | payload_prefix=%r",
-                calc_sig == sent_sig, names, missing, has_signature_field, payload[:120]
+                "SIG-AUDIT2 | sig_in_body=%s sig_in_url=%s | match_body=%s match_url=%s | params=%s | payload_prefix=%r",
+                ("&signature=" in body_str), ("&signature=" in qs),
+                (matches[0] if body_str else None), (matches[-1] if qs else None),
+                names, use[:160]
             )
         client.session.hooks.setdefault("response", []).append(_hook)
-        client.session._sig_audit = True
+        client.session._sig_audit2 = True
 
 
 class BinanceBroker(BrokerPort):
@@ -132,6 +146,8 @@ class BinanceBroker(BrokerPort):
     ) -> dict[str, Any]:
         try:
             logger.info("place_limit PLACE LIMIT ORDERS")
+            h = self._client.session.headers
+            h.pop("Content-Type", None); h.pop("content-type", None)
             attach_signature_audit(self._client, self._settings.BINANCE_API_SECRET)
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
