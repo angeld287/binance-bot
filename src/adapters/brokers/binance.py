@@ -50,6 +50,8 @@ class BinanceBroker(BrokerPort):
         drift_ms = _calc_drift_ms(self._client)
         self._client.timestamp_offset = drift_ms  # quedamos levemente por detrás
         self._client.REQUEST_RECVWINDOW = int(os.getenv("RECV_WINDOW_MS", "5000"))
+        self._client.session.headers.setdefault("X-MBX-APIKEY",
+            getattr(self._client, "API_KEY", None) or getattr(self._client, "api_key", None))
 
         #self._client.session = getattr(self, "_session", None)
         # Cache for symbol filters to avoid repeated ``exchangeInfo`` calls
@@ -68,27 +70,7 @@ class BinanceBroker(BrokerPort):
     # Orders
     def open_orders(self, symbol: str) -> list[Any]:
         try:
-            c = self._client
-            api_key = getattr(c, "API_KEY", None) or getattr(c, "api_key", None)
-            c.session.headers["X-MBX-APIKEY"] = api_key
-
-            # Obtiene datos del cliente (con fallback por si cambian nombres internos)
-            # 1) Headers de la sesión (lo que realmente se manda por defecto)
-
-            # adjunta una sola vez
-            if hasattr(c, "session") and not getattr(c.session, "_dbg_hook", False):
-                def _hook(resp, *_, **__):
-                    req = resp.request
-                    # aquí vemos lo que realmente salió por cable
-                    h = {k: ("<redacted>" if k.lower()=="x-mbx-apikey" else v) for k,v in (req.headers or {}).items()}
-                    logger.warning("REQ %s %s | headers=%s | status=%s %s",
-                                req.method, req.url, h, resp.status_code, resp.reason)
-                c.session.hooks.setdefault("response", []).append(_hook)
-                c.session._dbg_hook = True
-
-
-
-            return c.futures_get_open_orders(symbol=_to_binance_symbol(symbol))  # type: ignore[return-value]
+            return self._client.futures_get_open_orders(symbol=_to_binance_symbol(symbol))  # type: ignore[return-value]
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to fetch open orders: %s", exc)
             raise
