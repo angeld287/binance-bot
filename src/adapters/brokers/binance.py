@@ -50,11 +50,6 @@ class BinanceBroker(BrokerPort):
             testnet=settings.BINANCE_TESTNET,
             requests_params=requests_params,
         )
-        _api_key = getattr(self._client, "API_KEY", None) or getattr(
-            self._client, "api_key", None
-        )
-        if _api_key:
-            self._client.session.headers.setdefault("X-MBX-APIKEY", _api_key)
         
         # Cache for symbol filters to avoid repeated ``exchangeInfo`` calls
         self._filters_cache: Dict[str, Dict[str, Any]] = {}
