@@ -145,22 +145,9 @@ class BinanceBroker(BrokerPort):
         timeInForce: str = "GTC",
     ) -> dict[str, Any]:
         try:
-            logger.info("place_limit PLACE LIMIT ORDERS")
-            h = self._client.session.headers
-            h.pop("Content-Type", None); h.pop("content-type", None)
-
-            # 2) Limita recvWindow a algo estándar (y evita valores grandes)
-            self._client.REQUEST_RECVWINDOW = min(int(os.getenv("RECV_WINDOW_MS", "5000")), 60000)
-
             # 3) Sanea el newClientOrderId (solo [A-Za-z0-9_-], máx 36)
             safe_id = re.sub(r'[^A-Za-z0-9_-]', '-', clientOrderId)[:36]
-            sec_from_client = (
-                getattr(self._client, "API_SECRET", None)
-                or getattr(self._client, "api_secret", None)
-                or ""
-            ).strip()
-            attach_signature_audit(self._client, sec_from_client)
-            logger.warning("CID raw=%r | safe=%r", clientOrderId, safe_id)
+            
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
