@@ -462,6 +462,21 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
             if tick and abs(current_price - price) <= tick:
                 return
             exchange.cancel_order(symbol, clientOrderId=cid)
+        logger.info(
+            json.dumps(
+                {
+                    "sym": symbol,
+                    "side": side,
+                    "type": "LIMIT",
+                    "tif": "GTC",
+                    "price_final": price,
+                    "qty_final": qty,
+                    "notional": price * qty,
+                    "cid": cid,
+                    "reduceOnly": False,
+                }
+            )
+        )
         exchange.place_limit(symbol, side, price, qty, cid, timeInForce="GTC")
 
     _ensure_limit("BUY", buy_px, cid_buy, qty)
