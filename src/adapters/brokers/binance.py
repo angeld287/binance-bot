@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import hmac, hashlib, logging, urllib.parse as _url
+import hmac, hashlib, logging, re, urllib.parse as _url
 import os
 import time
 from decimal import Decimal
@@ -148,6 +148,12 @@ class BinanceBroker(BrokerPort):
             logger.info("place_limit PLACE LIMIT ORDERS")
             h = self._client.session.headers
             h.pop("Content-Type", None); h.pop("content-type", None)
+
+            # 2) Limita recvWindow a algo estándar (y evita valores grandes)
+            self._client.REQUEST_RECVWINDOW = min(int(os.getenv("RECV_WINDOW_MS", "5000")), 60000)
+
+            # 3) Sanea el newClientOrderId (solo [A-Za-z0-9_-], máx 36)
+            safe_id = re.sub(r'[^A-Za-z0-9_-]', '-', clientOrderId)[:36]
             sec_from_client = (
                 getattr(self._client, "API_SECRET", None) or
                 getattr(self._client, "api_secret", None) or
