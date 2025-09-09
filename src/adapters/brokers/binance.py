@@ -97,6 +97,7 @@ class BinanceBroker(BrokerPort):
         timeInForce: str = "GTC",
     ) -> dict[str, Any]:
         try:
+            logger.info("place_limit PLACE LIMIT ORDERS")
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
