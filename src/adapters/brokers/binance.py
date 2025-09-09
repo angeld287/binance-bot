@@ -148,7 +148,12 @@ class BinanceBroker(BrokerPort):
             logger.info("place_limit PLACE LIMIT ORDERS")
             h = self._client.session.headers
             h.pop("Content-Type", None); h.pop("content-type", None)
-            attach_signature_audit(self._client, self._settings.BINANCE_API_SECRET)
+            sec_from_client = (
+                getattr(self._client, "API_SECRET", None) or
+                getattr(self._client, "api_secret", None) or
+                ""
+            )
+            attach_signature_audit(self._client, sec_from_client)
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
