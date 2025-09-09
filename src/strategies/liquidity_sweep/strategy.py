@@ -438,20 +438,14 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
         else:
             qty_budget = _floor_step(qty_from_risk)
     if qty_budget < qty_min:
-        logger.info(
-            json.dumps(
-                {
-                    "action": "preopen",
-                    "trade_id": trade_id,
-                    "side": None,
-                    "prices": {"entry": None, "sl": None, "tp": None},
-                    "clientOrderIds": {"buy": cid_buy, "sell": cid_sell},
-                    "status": "no_trade",
-                    "reason": "qty_too_small",
-                }
-            )
-        )
-        return {"status": "no_trade", "reason": "qty_too_small"}
+        logger.info(json.dumps({
+            "action": "preopen",
+            "reason": "budget_below_min_using_qty_min",
+            "qty_min": qty_min,
+            "qty_budget": qty_budget
+        }))
+        qty_final = qty_min
+        # (no returns aquí; seguir)
 
     qty_final = max(qty_budget, qty_min)
 
@@ -713,8 +707,13 @@ def do_tick(
                 qty_budget = _floor_step(qty_from_risk)
 
         if qty_budget < qty_min:
-            _log("no_trade", reason="qty_too_small")
-            return {"status": "done", "reason": "qty_too_small"}
+            logger.info(json.dumps({
+                "action": "tick",
+                "reason": "budget_below_min_using_qty_min",
+                "qty_min": qty_min,
+                "qty_budget": qty_budget
+            }))
+            qty_final = qty_min
 
         qty_final = max(qty_budget, qty_min)
 
