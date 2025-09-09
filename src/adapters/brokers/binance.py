@@ -51,8 +51,7 @@ class BinanceBroker(BrokerPort):
             requests_params=requests_params,
         )
         self._client.session = getattr(self, "_session", None)
-        self._client.session.headers.setdefault("X-MBX-APIKEY",
-            getattr(self._client, "API_KEY", None) or getattr(self._client, "api_key", None))
+        
         # Cache for symbol filters to avoid repeated ``exchangeInfo`` calls
         self._filters_cache: Dict[str, Dict[str, Any]] = {}
 
