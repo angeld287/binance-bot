@@ -155,11 +155,12 @@ class BinanceBroker(BrokerPort):
             # 3) Sanea el newClientOrderId (solo [A-Za-z0-9_-], máx 36)
             safe_id = re.sub(r'[^A-Za-z0-9_-]', '-', clientOrderId)[:36]
             sec_from_client = (
-                getattr(self._client, "API_SECRET", None) or
-                getattr(self._client, "api_secret", None) or
-                ""
-            )
+                getattr(self._client, "API_SECRET", None)
+                or getattr(self._client, "api_secret", None)
+                or ""
+            ).strip()
             attach_signature_audit(self._client, sec_from_client)
+            logger.warning("CID raw=%r | safe=%r", clientOrderId, safe_id)
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
@@ -167,7 +168,7 @@ class BinanceBroker(BrokerPort):
                 price=price,
                 quantity=qty,
                 timeInForce=timeInForce,
-                newClientOrderId=clientOrderId,
+                newClientOrderId=safe_id,
             )
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to place limit order: %s", exc)
