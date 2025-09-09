@@ -335,6 +335,8 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
     S = float(levels.get("S", 0.0))
     R = float(levels.get("R", 0.0))
     microbuffer = float(levels.get("microbuffer", 0.0))
+    buffer_sl = float(levels.get("buffer_sl", 0.0))
+    atr1m = float(levels.get("atr1m", 0.0))
 
     buy_px = S + microbuffer
     sell_px = R - microbuffer
