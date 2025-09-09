@@ -361,13 +361,96 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
     cid_buy = f"{trade_id}:pre:buy"
     cid_sell = f"{trade_id}:pre:sell"
 
-    qty = 1.0
-    if hasattr(exchange, "round_qty_to_step"):
-        qty = exchange.round_qty_to_step(symbol, qty)
+    # ------------------------------------------------------------------
+    # Determine quantity meeting exchange minimums
+    filters = {}
+    try:
+        filters = exchange.get_symbol_filters(symbol)
+    except Exception:  # pragma: no cover - helper not available
+        filters = {}
+
+    lot = filters.get("LOT_SIZE", {})
+    min_qty = float(lot.get("minQty", 0.0))
+    step = float(lot.get("stepSize", 0.0))
+    min_notional = float(
+        filters.get("MIN_NOTIONAL", {}).get("notional")
+        or filters.get("MIN_NOTIONAL", {}).get("minNotional", 0.0)
+    )
+
+    def _ceil_step(x: float) -> float:
+        return ceil(x / step) * step if step else x
+
+    price = 0.0
+    try:
+        if market_data and hasattr(market_data, "get_price"):
+            price = float(market_data.get_price(symbol))
+    except Exception:
+        price = 0.0
+    if not price:
+        price = (buy_px + sell_px) / 2
+
+    qty_min = max(min_qty, _ceil_step(min_notional / price if price else 0.0))
+
+    risk_notional = float(getattr(settings, "RISK_NOTIONAL_USDT", 0.0) or 0.0)
+    if risk_notional > 0:
+        qty_budget = _ceil_step(risk_notional / price if price else 0.0)
+    else:
+        balance = 0.0
+        try:
+            balance = float(exchange.get_available_balance_usdt())
+        except Exception:
+            balance = 0.0
+        risk_pct = float(getattr(settings, "RISK_PCT", 0.01))
+        br_long = build_bracket(
+            "BUY",
+            buy_px,
+            S,
+            R,
+            microbuffer,
+            buffer_sl,
+            atr1m,
+            settings=settings,
+        )
+        br_short = build_bracket(
+            "SELL",
+            sell_px,
+            S,
+            R,
+            microbuffer,
+            buffer_sl,
+            atr1m,
+            settings=settings,
+        )
+        sl_long = float(br_long.get("sl", 0.0))
+        sl_short = float(br_short.get("sl", 0.0))
+        risk = max(abs(buy_px - sl_long), abs(sl_short - sell_px))
+        qty_from_risk = (risk_pct * balance) / risk if risk else 0.0
+        if hasattr(exchange, "round_qty_to_step"):
+            qty_budget = exchange.round_qty_to_step(symbol, qty_from_risk)
+        else:
+            qty_budget = floor(qty_from_risk / step) * step if step else qty_from_risk
+
+    if qty_budget < qty_min:
+        logger.info(
+            json.dumps(
+                {
+                    "action": "preopen",
+                    "trade_id": trade_id,
+                    "side": None,
+                    "prices": {"entry": None, "sl": None, "tp": None},
+                    "clientOrderIds": {"buy": cid_buy, "sell": cid_sell},
+                    "status": "no_trade",
+                    "reason": "qty_too_small",
+                }
+            )
+        )
+        return {"status": "no_trade", "reason": "qty_too_small"}
+
+    qty = max(qty_budget, qty_min)
 
     open_orders = exchange.open_orders(symbol)
 
-    def _ensure_limit(side: str, price: float, cid: str) -> None:
+    def _ensure_limit(side: str, price: float, cid: str, qty: float) -> None:
         existing = next((o for o in open_orders if o.get("clientOrderId") == cid), None)
         if existing:
             try:
@@ -379,8 +462,8 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
             exchange.cancel_order(symbol, clientOrderId=cid)
         exchange.place_limit(symbol, side, price, qty, cid, timeInForce="GTC")
 
-    _ensure_limit("BUY", buy_px, cid_buy)
-    _ensure_limit("SELL", sell_px, cid_sell)
+    _ensure_limit("BUY", buy_px, cid_buy, qty)
+    _ensure_limit("SELL", sell_px, cid_sell, qty)
     logger.info(
         json.dumps(
             {
@@ -572,42 +655,47 @@ def do_tick(
         )
         sl = float(bracket.get("sl", 0.0))
         tp = float(bracket.get("tp", 0.0))
-
-        # Quantity calculation
-        balance = 0.0
-        try:
-            balance = float(exchange.get_available_balance_usdt())
-        except Exception:
-            balance = 0.0
-
-        risk_pct = float(getattr(settings, "RISK_PCT", 0.01))
-        qty = 0.0
-        if sl and entry:
-            qty = (risk_pct * balance) / abs(entry - sl)
-
-        # Align to step size
-        try:
-            if hasattr(exchange, "round_qty_to_step"):
-                qty = exchange.round_qty_to_step(symbol, qty)
-            else:
-                filters = exchange.get_symbol_filters(symbol)
-                step = float(filters.get("LOT_SIZE", {}).get("stepSize", 0.0))
-                if step:
-                    qty = floor(qty / step) * step
-        except Exception:
-            pass
-
-        # Validate notional
         try:
             filters = exchange.get_symbol_filters(symbol)
-            min_notional = float(
-                filters.get("MIN_NOTIONAL", {}).get("notional")
-                or filters.get("MIN_NOTIONAL", {}).get("minNotional", 0.0)
-            )
-            if qty * entry < min_notional:
-                return {"status": "done", "reason": "qty_too_small"}
-        except Exception:
-            pass
+        except Exception:  # pragma: no cover - helper not available
+            filters = {}
+        lot = filters.get("LOT_SIZE", {})
+        min_qty = float(lot.get("minQty", 0.0))
+        step = float(lot.get("stepSize", 0.0))
+        min_notional = float(
+            filters.get("MIN_NOTIONAL", {}).get("notional")
+            or filters.get("MIN_NOTIONAL", {}).get("minNotional", 0.0)
+        )
+
+        def _ceil_step(x: float) -> float:
+            return ceil(x / step) * step if step else x
+
+        qty_min = max(min_qty, _ceil_step(min_notional / entry if entry else 0.0))
+
+        risk_notional = float(getattr(settings, "RISK_NOTIONAL_USDT", 0.0) or 0.0)
+        if risk_notional > 0 and entry:
+            qty_budget = _ceil_step(risk_notional / entry)
+        else:
+            balance = 0.0
+            try:
+                balance = float(exchange.get_available_balance_usdt())
+            except Exception:
+                balance = 0.0
+            risk_pct = float(getattr(settings, "RISK_PCT", 0.01))
+            qty_from_risk = 0.0
+            if sl and entry:
+                diff = abs(entry - sl)
+                qty_from_risk = (risk_pct * balance) / diff if diff else 0.0
+            if hasattr(exchange, "round_qty_to_step"):
+                qty_budget = exchange.round_qty_to_step(symbol, qty_from_risk)
+            else:
+                qty_budget = floor(qty_from_risk / step) * step if step else qty_from_risk
+
+        if qty_budget < qty_min:
+            _log("no_trade", reason="qty_too_small")
+            return {"status": "done", "reason": "qty_too_small"}
+
+        qty = max(qty_budget, qty_min)
 
         exit_side = "SELL" if is_long else "BUY"
 
