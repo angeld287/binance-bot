@@ -39,10 +39,11 @@ class BinanceMarketData(MarketDataPort):
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._client = Client(settings.BINANCE_API_KEY,settings.BINANCE_API_SECRET,)
-        drift_ms = _calc_drift_ms(self._client)
-        self._client.timestamp_offset = drift_ms  # quedamos levemente por detrás
-        self._client.REQUEST_RECVWINDOW = int(os.getenv("RECV_WINDOW_MS", "5000"))
+        self._client = Client(
+            api_key=settings.BINANCE_API_KEY,
+            api_secret=settings.BINANCE_API_SECRET,
+            testnet=settings.BINANCE_TESTNET,
+        )
 
     def get_klines(self, symbol: str, interval: str, lookback_min: int) -> list["Candle"]:
         """Return OHLC candles for a symbol over ``lookback_min`` minutes."""

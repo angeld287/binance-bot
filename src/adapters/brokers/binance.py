@@ -43,17 +43,16 @@ class BinanceBroker(BrokerPort):
             else 30
         )
         requests_params = {"timeout": timeout}
+        logger.warning("BINANCE_API_KEY=%r", settings.BINANCE_API_KEY)
+        logger.warning("BINANCE_API_SECRET=%r", settings.BINANCE_API_SECRET)
 
-        api_key = settings.BINANCE_API_KEY
-        api_key_secret = settings.BINANCE_API_SECRET
-        self._client = Client(api_key, api_key_secret)
-        drift_ms = _calc_drift_ms(self._client)
-        self._client.timestamp_offset = drift_ms  # quedamos levemente por detrás
-        self._client.REQUEST_RECVWINDOW = int(os.getenv("RECV_WINDOW_MS", "5000"))
-        self._client.session.headers.setdefault("X-MBX-APIKEY",
-            getattr(self._client, "API_KEY", None) or getattr(self._client, "api_key", None))
-
-        #self._client.session = getattr(self, "_session", None)
+        self._client = Client(
+            api_key=settings.BINANCE_API_KEY,
+            api_secret=settings.BINANCE_API_SECRET,
+            testnet=settings.BINANCE_TESTNET,
+            requests_params=requests_params,
+        )
+        self._client.session = getattr(self, "_session", None)
         # Cache for symbol filters to avoid repeated ``exchangeInfo`` calls
         self._filters_cache: Dict[str, Dict[str, Any]] = {}
 
@@ -63,9 +62,6 @@ class BinanceBroker(BrokerPort):
         s = str(s)
         return s[:6] + "…" + s[-4:]
 
-    def _safe_dict(self, d):
-        return {k: ("<redacted>" if k.lower() in {"x-mbx-apikey", "authorization"} else v)
-                for k, v in (d or {}).items()}
     # ------------------------------------------------------------------
     # Orders
     def open_orders(self, symbol: str) -> list[Any]:
