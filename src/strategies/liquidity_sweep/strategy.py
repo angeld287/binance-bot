@@ -386,6 +386,30 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
         return floor(x / step) * step if step else x
 
     risk_notional = float(getattr(settings, "RISK_NOTIONAL_USDT", 0.0) or 0.0)
+    qty_from_risk = None
+
+    br_long = build_bracket(
+        "BUY",
+        buy_px,
+        S,
+        R,
+        microbuffer,
+        buffer_sl,
+        atr1m,
+        settings=settings,
+    )
+    br_short = build_bracket(
+        "SELL",
+        sell_px,
+        S,
+        R,
+        microbuffer,
+        buffer_sl,
+        atr1m,
+        settings=settings,
+    )
+    sl_long = float(br_long.get("sl", 0.0))
+    sl_short = float(br_short.get("sl", 0.0))
 
     if risk_notional > 0:
         price = min(buy_px, sell_px)
@@ -409,28 +433,6 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
         except Exception:
             balance = 0.0
         risk_pct = float(getattr(settings, "RISK_PCT", 0.01))
-        br_long = build_bracket(
-            "BUY",
-            buy_px,
-            S,
-            R,
-            microbuffer,
-            buffer_sl,
-            atr1m,
-            settings=settings,
-        )
-        br_short = build_bracket(
-            "SELL",
-            sell_px,
-            S,
-            R,
-            microbuffer,
-            buffer_sl,
-            atr1m,
-            settings=settings,
-        )
-        sl_long = float(br_long.get("sl", 0.0))
-        sl_short = float(br_short.get("sl", 0.0))
         risk = max(abs(buy_px - sl_long), abs(sl_short - sell_px))
         qty_from_risk = (risk_pct * balance) / risk if risk else 0.0
         if hasattr(exchange, "round_qty_to_step"):
@@ -467,18 +469,32 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
             if tick and abs(current_price - price) <= tick:
                 return
             exchange.cancel_order(symbol, clientOrderId=cid)
+        price_final = price
+        entry_px = price_final
+        sl_px = sl_long if side == "BUY" else sl_short
         logger.info(
-            json.dumps(
-                {
-                    "sym": symbol,
-                    "price": price,
-                    "qty_min": qty_min,
-                    "qty_budget": qty_budget,
-                    "qty_final": qty_final,
-                }
-            )
+            "SIZER | sym=%s side=%s price=%.5f step=%s tick=%s minQty=%s minNotional=%s "
+            "risk_pct=%s risk_usdt=%s entry=%.5f sl=%.5f dist=%.6f qty_from_risk=%s "
+            "qty_from_budget=%s qty_min=%s qty_final=%s cid=%s",
+            symbol,
+            side,
+            price_final,
+            step,
+            tick,
+            min_qty,
+            min_notional,
+            getattr(settings, "RISK_PCT", None),
+            getattr(settings, "RISK_NOTIONAL_USDT", 0),
+            entry_px,
+            sl_px,
+            abs(entry_px - sl_px),
+            qty_from_risk,
+            qty_budget,
+            qty_min,
+            qty_final,
+            cid,
         )
-        exchange.place_limit(symbol, side, price, qty_final, cid, timeInForce="GTC")
+        exchange.place_limit(symbol, side, price_final, qty_final, cid, timeInForce="GTC")
 
     _ensure_limit("BUY", buy_px, cid_buy)
     _ensure_limit("SELL", sell_px, cid_sell)
