@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import hmac, hashlib, logging, re, urllib.parse as _url
+import hmac, hashlib, logging, urllib.parse as _url
 import os
 import time
 from decimal import Decimal
@@ -13,6 +13,7 @@ from requests import Session
 
 from config.settings import Settings
 from core.ports.broker import BrokerPort
+from common.utils import sanitize_client_order_id
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,7 @@ class BinanceBroker(BrokerPort):
         if orderId is not None:
             params["orderId"] = orderId
         if clientOrderId is not None:
-            params["origClientOrderId"] = clientOrderId
+            params["origClientOrderId"] = sanitize_client_order_id(clientOrderId)
         try:
             return self._client.futures_get_order(**params)
         except Exception as exc:  # pragma: no cover - network failures
@@ -146,7 +147,7 @@ class BinanceBroker(BrokerPort):
     ) -> dict[str, Any]:
         try:
             # 3) Sanea el newClientOrderId (solo [A-Za-z0-9_-], máx 36)
-            safe_id = re.sub(r'[^A-Za-z0-9_-]', '-', clientOrderId)[:36]
+            safe_id = sanitize_client_order_id(clientOrderId)
             
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
@@ -171,7 +172,7 @@ class BinanceBroker(BrokerPort):
         if orderId is not None:
             params["orderId"] = orderId
         if clientOrderId is not None:
-            params["origClientOrderId"] = clientOrderId
+            params["origClientOrderId"] = sanitize_client_order_id(clientOrderId)
         try:
             return self._client.futures_cancel_order(**params)
         except Exception as exc:  # pragma: no cover - network failures
@@ -187,6 +188,7 @@ class BinanceBroker(BrokerPort):
         clientOrderId: str,
     ) -> dict[str, Any]:
         try:
+            safe_id = sanitize_client_order_id(clientOrderId)
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
@@ -194,7 +196,7 @@ class BinanceBroker(BrokerPort):
                 stopPrice=stopPrice,
                 quantity=qty,
                 reduceOnly=True,
-                newClientOrderId=clientOrderId,
+                newClientOrderId=safe_id,
             )
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to place SL order: %s", exc)
@@ -216,6 +218,7 @@ class BinanceBroker(BrokerPort):
         """
 
         try:
+            safe_id = sanitize_client_order_id(clientOrderId)
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
@@ -224,7 +227,7 @@ class BinanceBroker(BrokerPort):
                 quantity=qty,
                 timeInForce="GTC",
                 reduceOnly=True,
-                newClientOrderId=clientOrderId,
+                newClientOrderId=safe_id,
             )
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to place TP order: %s", exc)
