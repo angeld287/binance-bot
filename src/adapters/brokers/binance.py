@@ -64,6 +64,7 @@ class BinanceBroker(BrokerPort):
     # Orders
     def open_orders(self, symbol: str) -> list[Any]:
         try:
+            logger.info("open_orders FETCH OPEN ORDERS")
             return self._client.futures_get_open_orders(symbol=_to_binance_symbol(symbol))  # type: ignore[return-value]
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to fetch open orders: %s", exc)
