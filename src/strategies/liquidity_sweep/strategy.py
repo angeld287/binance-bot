@@ -294,6 +294,51 @@ def build_bracket(
 # Internal IO helpers
 
 
+def _has_position_or_active_orders(exchange: Any, symbol: str) -> tuple[bool, list[Any]]:
+    """Return ``True`` if there's an open position or active order for ``symbol``.
+
+    The function attempts to reuse the same inspection logic employed during
+    the tick phase: it queries open orders and checks their ``status`` and also
+    inspects the current position size when the broker exposes a position
+    endpoint.  A non-zero ``positionAmt`` or any order with a ``NEW``,
+    ``PARTIALLY_FILLED`` or ``PENDING_NEW`` status triggers a ``True`` result.
+    """
+
+    open_orders: list[Any] = []
+    try:
+        open_orders = exchange.open_orders(symbol)
+    except Exception:
+        open_orders = []
+
+    for o in open_orders:
+        st = str(o.get("status", "")).upper()
+        if st in {"NEW", "PARTIALLY_FILLED", "PENDING_NEW"}:
+            return True, open_orders
+
+    qty = 0.0
+    try:
+        if hasattr(exchange, "position_information"):
+            info = exchange.position_information(symbol)
+        elif hasattr(exchange, "futures_position_information"):
+            info = exchange.futures_position_information(symbol)
+        elif hasattr(exchange, "get_position"):
+            info = exchange.get_position(symbol)
+        else:
+            info = None
+
+        if info is not None:
+            if isinstance(info, list):
+                info = info[0] if info else {}
+            qty = float(info.get("positionAmt", 0.0))
+    except Exception:
+        qty = 0.0
+
+    if abs(qty) > 0:
+        return True, open_orders
+
+    return False, open_orders
+
+
 def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> dict:
     """Perform pre-open IO actions.
 
@@ -324,6 +369,11 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
     """
 
     lookback = getattr(settings, "MAX_LOOKBACK_MIN", 60)
+
+    should_skip, open_orders = _has_position_or_active_orders(exchange, symbol)
+    if should_skip:
+        logger.info(json.dumps({"action": "preopen", "reason": "existing_position_or_orders"}))
+        return {"status": "preopen_skipped"}
 
     # ------------------------------------------------------------------
     # Fetch 1m candles
@@ -449,8 +499,6 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
         # (no returns aquí; seguir)
 
     qty_final = max(qty_budget, qty_min)
-
-    open_orders = exchange.open_orders(symbol)
 
     def _ensure_limit(side: str, price: float, cid: str) -> None:
         existing = next((o for o in open_orders if o.get("clientOrderId") == cid), None)
