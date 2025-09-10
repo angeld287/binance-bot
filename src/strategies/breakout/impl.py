@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 import logging
 
+from common.utils import sanitize_client_order_id
 from core.domain.models.Signal import Signal
 from core.ports.broker import BrokerPort
 from core.ports.market_data import MarketDataPort
@@ -105,3 +106,76 @@ class BreakoutStrategy(Strategy):
 
         price = self._market_data.get_price(symbol)
         return Signal(action=action, price=price, time=now)
+
+    # ------------------------------------------------------------------
+    def run(
+        self,
+        exchange: BrokerPort | None = None,
+        market_data: MarketDataPort | None = None,
+        settings: SettingsProvider | None = None,
+        now_utc: datetime | None = None,
+        event: Any | None = None,
+    ) -> dict[str, Any]:
+        """Execute the strategy once and place an order if a signal emerges."""
+
+        exch = exchange or self._broker
+        settings = settings or self._settings
+        market_data = market_data or self._market_data
+        now = now_utc or datetime.utcnow()
+
+        signal = self.generate_signal(now)
+        if signal is None:
+            return {"status": "no_signal"}
+
+        symbol = get_symbol(settings)
+
+        # Determine quantity based on available balance and risk percentage
+        balance = 0.0
+        try:
+            balance = float(exch.get_available_balance_usdt())
+        except Exception:
+            balance = 0.0
+        risk_pct = float(getattr(settings, "RISK_PCT", 0.0) or 0.0)
+        notional = balance * risk_pct
+        qty = notional / signal.price if signal.price else 0.0
+
+        # Obtain filters and normalise price and quantity
+        filters = exch.get_symbol_filters(symbol)
+        price_norm = exch.round_price_to_tick(symbol, signal.price)
+        qty_norm = exch.round_qty_to_step(symbol, qty)
+
+        min_notional = float(
+            filters.get("MIN_NOTIONAL", {}).get("notional")
+            or filters.get("MIN_NOTIONAL", {}).get("minNotional", 0.0)
+        )
+        if price_norm * qty_norm < min_notional and price_norm > 0:
+            qty_norm = exch.round_qty_to_step(symbol, min_notional / price_norm)
+
+        cid = sanitize_client_order_id(f"breakout-{int(now.timestamp())}")
+
+        try:
+            order = exch.place_limit(
+                symbol,
+                signal.action,
+                price_norm,
+                qty_norm,
+                cid,
+                timeInForce="GTC",
+            )
+        except TypeError:  # pragma: no cover - legacy brokers
+            order = exch.place_limit(
+                symbol,
+                signal.action,
+                price_norm,
+                qty_norm,
+                cid,
+            )
+
+        return {
+            "status": "order_placed",
+            "side": signal.action,
+            "price": price_norm,
+            "qty": qty_norm,
+            "clientOrderId": cid,
+            "order": order,
+        }
