@@ -5,13 +5,14 @@ from typing import Any
 import logging
 import os
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    STRATEGY_NAME: str = "breakout"
+    STRATEGY_NAME: str = Field(default="breakout", alias="STRATEGY")
     FEATURE_BROKER: str = "binance"
     FEATURE_DATASOURCE: str = "binance"
 
