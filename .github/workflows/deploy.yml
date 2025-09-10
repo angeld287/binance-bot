@@ -49,9 +49,16 @@ jobs:
         run: |
           aws s3 cp deployment.zip s3://lambda-functions-dev-serverlessdeploymentbucket-irlanda/trading-bot.zip
 
-      - name: Update Lambda function from S3
+      - name: Update Lambda function "liquidity-sweep" from S3
         run: |
           aws lambda update-function-code \
             --function-name trading-bot-liquidity-sweep \
+            --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
+            --s3-key trading-bot.zip
+
+      - name: Update Lambda function "breakout-sol" from S3
+        run: |
+          aws lambda update-function-code \
+            --function-name bot-breakout-sol \
             --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
             --s3-key trading-bot.zip
