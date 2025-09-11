@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 import logging
+import json
+from math import ceil
 
 from common.utils import sanitize_client_order_id
 from core.domain.models.Signal import Signal
@@ -129,27 +131,66 @@ class BreakoutStrategy(Strategy):
 
         symbol = get_symbol(settings)
 
-        # Determine quantity based on available balance and risk percentage
-        balance = 0.0
-        try:
-            balance = float(exch.get_available_balance_usdt())
-        except Exception:
-            balance = 0.0
-        risk_pct = float(getattr(settings, "RISK_PCT", 0.0) or 0.0)
-        notional = balance * risk_pct
-        qty = notional / signal.price if signal.price else 0.0
+        price_prev = signal.price
+        price_norm = exch.round_price_to_tick(symbol, price_prev)
 
-        # Obtain filters and normalise price and quantity
         filters = exch.get_symbol_filters(symbol)
-        price_norm = exch.round_price_to_tick(symbol, signal.price)
-        qty_norm = exch.round_qty_to_step(symbol, qty)
-
+        lot = filters.get("LOT_SIZE", {})
+        step_size = float(lot.get("stepSize", 0.0))
+        qty_min = float(lot.get("minQty", 0.0))
+        tick_size = float(filters.get("PRICE_FILTER", {}).get("tickSize", 0.0))
         min_notional = float(
             filters.get("MIN_NOTIONAL", {}).get("notional")
             or filters.get("MIN_NOTIONAL", {}).get("minNotional", 0.0)
         )
+
+        risk_notional = float(getattr(settings, "RISK_NOTIONAL_USDT", 0.0) or 0.0)
+        qty_target_src = "NONE"
+        if risk_notional > 0 and price_norm > 0:
+            qty_target = risk_notional / price_norm
+            qty_target_src = "NOTIONAL"
+        else:
+            balance = 0.0
+            try:
+                balance = float(exch.get_available_balance_usdt())
+            except Exception:
+                balance = 0.0
+            risk_pct = float(getattr(settings, "RISK_PCT", 0.0) or 0.0)
+            if risk_pct > 0 and balance > 0 and price_norm > 0:
+                qty_target = (balance * risk_pct) / price_norm
+                qty_target_src = "PCT"
+            else:
+                qty_target = 0.0
+
+        def _ceil_to_step(x: float, step: float) -> float:
+            return ceil(x / step) * step if step else x
+
+        qty_min_by_notional = _ceil_to_step(min_notional / price_norm if price_norm else 0.0, step_size)
+        qty_norm = exch.round_qty_to_step(symbol, max(qty_target, qty_min, qty_min_by_notional))
+
         if price_norm * qty_norm < min_notional and price_norm > 0:
-            qty_norm = exch.round_qty_to_step(symbol, min_notional / price_norm)
+            qty_norm = exch.round_qty_to_step(
+                symbol, _ceil_to_step(min_notional / price_norm, step_size)
+            )
+
+        logger.info(
+            json.dumps(
+                {
+                    "sizing_trace": {
+                        "price_prev": price_prev,
+                        "price_norm": price_norm,
+                        "stepSize": step_size,
+                        "tickSize": tick_size,
+                        "minQty": qty_min,
+                        "minNotional": min_notional,
+                        "qty_target_src": qty_target_src,
+                        "qty_target": qty_target,
+                        "qty_norm": qty_norm,
+                        "notional": price_norm * qty_norm,
+                    }
+                }
+            )
+        )
 
         cid = sanitize_client_order_id(f"breakout-{int(now.timestamp())}")
 
