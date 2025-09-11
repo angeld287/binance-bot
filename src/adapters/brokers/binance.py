@@ -136,7 +136,7 @@ class BinanceBroker(BrokerPort):
             logger.error("Failed to fetch order: %s", exc)
             raise
 
-    def place_limit(
+    def place_entry_limit(
         self,
         symbol: str,
         side: str,
@@ -144,11 +144,12 @@ class BinanceBroker(BrokerPort):
         qty: float,
         clientOrderId: str,
         timeInForce: str = "GTC",
+        **extra: Any,
     ) -> dict[str, Any]:
+        """Place a limit entry order."""
+
         try:
-            # 3) Sanea el newClientOrderId (solo [A-Za-z0-9_-], máx 36)
             safe_id = sanitize_client_order_id(clientOrderId)
-            
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
@@ -157,9 +158,34 @@ class BinanceBroker(BrokerPort):
                 quantity=qty,
                 timeInForce=timeInForce,
                 newClientOrderId=safe_id,
+                **extra,
             )
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to place limit order: %s", exc)
+            raise
+
+    def place_entry_market(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        clientOrderId: str,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        """Place a market entry order."""
+
+        try:
+            safe_id = sanitize_client_order_id(clientOrderId)
+            return self._client.futures_create_order(
+                symbol=_to_binance_symbol(symbol),
+                side=side,
+                type="MARKET",
+                quantity=qty,
+                newClientOrderId=safe_id,
+                **extra,
+            )
+        except Exception as exc:  # pragma: no cover - network failures
+            logger.error("Failed to place market order: %s", exc)
             raise
 
     def cancel_order(
@@ -179,7 +205,7 @@ class BinanceBroker(BrokerPort):
             logger.error("Failed to cancel order: %s", exc)
             raise
 
-    def place_sl_reduce_only(
+    def place_stop_reduce_only(
         self,
         symbol: str,
         side: str,

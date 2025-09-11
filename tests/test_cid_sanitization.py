@@ -42,13 +42,16 @@ def test_broker_uses_sanitized_ids(monkeypatch):
     settings = Settings(BINANCE_API_KEY="k", BINANCE_API_SECRET="s")
     broker = BinanceBroker(settings)
 
-    broker.place_limit("BTC/USDT", "BUY", 1.0, 1.0, RAW)
+    broker.place_entry_limit("BTC/USDT", "BUY", 1.0, 1.0, RAW)
     assert broker._client.last_params["newClientOrderId"] == EXPECTED
 
-    broker.place_sl_reduce_only("BTC/USDT", "BUY", 1.0, 1.0, RAW)
+    broker.place_stop_reduce_only("BTC/USDT", "BUY", 1.0, 1.0, RAW)
     assert broker._client.last_params["newClientOrderId"] == EXPECTED
 
     broker.place_tp_reduce_only("BTC/USDT", "SELL", 1.0, 1.0, RAW)
+    assert broker._client.last_params["newClientOrderId"] == EXPECTED
+
+    broker.place_entry_market("BTC/USDT", "BUY", 1.0, RAW)
     assert broker._client.last_params["newClientOrderId"] == EXPECTED
 
     broker.get_order("BTC/USDT", clientOrderId=RAW)

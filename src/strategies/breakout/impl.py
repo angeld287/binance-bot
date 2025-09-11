@@ -154,7 +154,7 @@ class BreakoutStrategy(Strategy):
         cid = sanitize_client_order_id(f"breakout-{int(now.timestamp())}")
 
         try:
-            order = exch.place_limit(
+            order = exch.place_entry_limit(
                 symbol,
                 signal.action,
                 price_norm,
@@ -163,7 +163,7 @@ class BreakoutStrategy(Strategy):
                 timeInForce="GTC",
             )
         except TypeError:  # pragma: no cover - legacy brokers
-            order = exch.place_limit(
+            order = exch.place_entry_limit(
                 symbol,
                 signal.action,
                 price_norm,

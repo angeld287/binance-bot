@@ -350,7 +350,7 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
     ----------
     exchange:
         Trading adapter used to inspect and manage orders.  It must expose
-        ``open_orders`` to query current orders, ``place_limit`` and
+        ``open_orders`` to query current orders, ``place_entry_limit`` and
         ``cancel_order`` to manage them as well as helpers
         ``get_symbol_filters`` and ``round_price_to_tick``.
     market_data:
@@ -554,7 +554,7 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
             )
         )
 
-        exchange.place_limit(
+        exchange.place_entry_limit(
             symbol,
             side,
             price_str,
@@ -606,9 +606,10 @@ def do_tick(
     ----------
     exchange:
         Trading adaptor exposing ``open_orders``, ``get_order``,
-        ``cancel_order``, ``place_sl_reduce_only`` and
+        ``cancel_order``, ``place_stop_reduce_only`` and
         ``place_tp_reduce_only`` helpers as well as balance/rounding
-        utilities.
+        utilities.  Entry orders are submitted via ``place_entry_limit`` or
+        ``place_entry_market``.
     symbol:
         Market symbol, e.g. ``"BTCUSDT"``.
     settings:
@@ -808,36 +809,54 @@ def do_tick(
 
         exit_side = "SELL" if is_long else "BUY"
 
-        try:
-            if hasattr(exchange, "place_sl_reduce_only"):
-                exchange.place_sl_reduce_only(symbol, exit_side, sl, qty_final, cid_sl)
-            else:  # pragma: no cover - generic fallback
-                exchange.place_order(
+        if hasattr(exchange, "place_stop_reduce_only"):
+            try:
+                exchange.place_stop_reduce_only(symbol, exit_side, sl, qty_final, cid_sl)
+            except Exception as exc:
+                logger.error("Failed to place SL order: %s", exc)
+                raise
+        elif hasattr(exchange, "place_stop"):
+            try:  # pragma: no cover - generic fallback
+                exchange.place_stop(
                     symbol,
                     exit_side,
-                    "STOP_MARKET",
+                    sl,
                     qty_final,
                     cid_sl,
-                    stopPrice=sl,
                     reduceOnly=True,
                 )
-        except Exception:
-            pass
+            except Exception as exc:
+                logger.error("Failed to place SL order: %s", exc)
+                raise
+        else:
+            err = "exchange adapter lacks place_stop_reduce_only/place_stop"
+            logger.error(err)
+            raise AttributeError(err)
 
-        try:
-            if hasattr(exchange, "place_tp_reduce_only"):
+        if hasattr(exchange, "place_tp_reduce_only"):
+            try:
                 exchange.place_tp_reduce_only(symbol, exit_side, tp, qty_final, cid_tp)
-            else:  # pragma: no cover - generic fallback
-                exchange.place_limit(
+            except Exception as exc:
+                logger.error("Failed to place TP order: %s", exc)
+                raise
+        elif hasattr(exchange, "place_entry_limit"):
+            try:  # pragma: no cover - generic fallback
+                exchange.place_entry_limit(
                     symbol,
                     exit_side,
                     tp,
                     qty_final,
                     cid_tp,
                     timeInForce="GTC",
+                    reduceOnly=True,
                 )
-        except Exception:
-            pass
+            except Exception as exc:
+                logger.error("Failed to place TP order: %s", exc)
+                raise
+        else:
+            err = "exchange adapter lacks place_tp_reduce_only/place_entry_limit"
+            logger.error(err)
+            raise AttributeError(err)
         _log(
             "bracket_placed",
             side=side,
