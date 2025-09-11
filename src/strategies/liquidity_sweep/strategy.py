@@ -757,13 +757,24 @@ def do_tick(
         )
         sl = float(bracket.get("sl", 0.0))
         tp = float(bracket.get("tp", 0.0))
+        # Normalize symbol before loading filters to avoid precision errors
+        if hasattr(exchange, "normalize_symbol"):
+            try:
+                symbol_n = exchange.normalize_symbol(symbol)
+            except Exception:
+                symbol_n = symbol.replace("/", "")
+        else:
+            symbol_n = symbol.replace("/", "") if "/" in symbol else symbol
+
         try:
-            filters = exchange.get_symbol_filters(symbol)
+            filters = exchange.get_symbol_filters(symbol_n)
         except Exception:  # pragma: no cover - helper not available
             filters = {}
         lot = filters.get("LOT_SIZE", {})
         min_qty = float(lot.get("minQty", 0.0))
         step = float(lot.get("stepSize", 0.0))
+        price_filter = filters.get("PRICE_FILTER", {})
+        tick = float(price_filter.get("tickSize", 0.0))
         min_notional = float(
             filters.get("MIN_NOTIONAL", {}).get("notional")
             or filters.get("MIN_NOTIONAL", {}).get("minNotional", 0.0)
@@ -792,7 +803,7 @@ def do_tick(
                 diff = abs(entry - sl)
                 qty_from_risk = (risk_pct * balance) / diff if diff else 0.0
             if hasattr(exchange, "round_qty_to_step"):
-                qty_budget = exchange.round_qty_to_step(symbol, qty_from_risk)
+                qty_budget = exchange.round_qty_to_step(symbol_n, qty_from_risk)
             else:
                 qty_budget = _floor_step(qty_from_risk)
 
@@ -807,31 +818,80 @@ def do_tick(
 
         qty_final = max(qty_budget, qty_min)
 
+        # Snap stop and quantity to exchange precision
+        sl_prev = sl
+        qty_prev = qty_final
+        if hasattr(exchange, "round_price_to_tick"):
+            sl_final = exchange.round_price_to_tick(symbol_n, sl_prev)
+        else:
+            sl_final = sl_prev
+        if hasattr(exchange, "round_qty_to_step"):
+            qty_final = exchange.round_qty_to_step(symbol_n, qty_prev)
+        else:
+            qty_final = qty_prev
+
+        logger.info(
+            json.dumps(
+                {
+                    "action": "sl_precision",
+                    "symbol": symbol_n,
+                    "tickSize": tick,
+                    "stepSize": step,
+                    "sl_prev": sl_prev,
+                    "sl_final": sl_final,
+                    "qty_prev": qty_prev,
+                    "qty_final": qty_final,
+                }
+            )
+        )
+
         exit_side = "SELL" if is_long else "BUY"
 
-        if hasattr(exchange, "place_stop_reduce_only"):
-            try:
-                exchange.place_stop_reduce_only(symbol, exit_side, sl, qty_final, cid_sl)
-            except Exception as exc:
-                logger.error("Failed to place SL order: %s", exc)
-                raise
-        elif hasattr(exchange, "place_stop"):
-            try:  # pragma: no cover - generic fallback
-                exchange.place_stop(
-                    symbol,
+        def _place_sl(sym: str, stop_price: float, qty: float) -> None:
+            if hasattr(exchange, "place_stop_reduce_only"):
+                exchange.place_stop_reduce_only(
+                    sym,
                     exit_side,
-                    sl,
-                    qty_final,
-                    cid_sl,
+                    stopPrice=stop_price,
+                    qty=qty,
+                    clientOrderId=cid_sl,
+                )
+            elif hasattr(exchange, "place_stop"):
+                exchange.place_stop(
+                    sym,
+                    exit_side,
+                    stopPrice=stop_price,
+                    qty=qty,
+                    clientOrderId=cid_sl,
                     reduceOnly=True,
                 )
-            except Exception as exc:
+            else:
+                err = "exchange adapter lacks place_stop_reduce_only/place_stop"
+                logger.error(err)
+                raise AttributeError(err)
+
+        try:
+            _place_sl(symbol_n, sl_final, qty_final)
+        except Exception as exc:
+            if "-1111" in str(exc):
+                sl_final = (
+                    exchange.round_price_to_tick(symbol_n, sl_final)
+                    if hasattr(exchange, "round_price_to_tick")
+                    else sl_final
+                )
+                qty_final = (
+                    exchange.round_qty_to_step(symbol_n, qty_final)
+                    if hasattr(exchange, "round_qty_to_step")
+                    else qty_final
+                )
+                try:
+                    _place_sl(symbol_n, sl_final, qty_final)
+                except Exception as exc2:
+                    logger.error("Failed to place SL order: %s", exc2)
+                    raise
+            else:
                 logger.error("Failed to place SL order: %s", exc)
                 raise
-        else:
-            err = "exchange adapter lacks place_stop_reduce_only/place_stop"
-            logger.error(err)
-            raise AttributeError(err)
 
         if hasattr(exchange, "place_tp_reduce_only"):
             try:
