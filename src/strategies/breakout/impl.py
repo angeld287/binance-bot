@@ -11,9 +11,11 @@ from datetime import datetime
 from typing import Any
 import logging
 import json
+import os
+from zoneinfo import ZoneInfo
 from math import ceil
 
-from common.utils import sanitize_client_order_id
+from common.utils import sanitize_client_order_id, is_in_blackout
 from core.domain.models.Signal import Signal
 from core.ports.broker import BrokerPort
 from core.ports.market_data import MarketDataPort
@@ -124,6 +126,25 @@ class BreakoutStrategy(Strategy):
         settings = settings or self._settings
         market_data = market_data or self._market_data
         now = now_utc or datetime.utcnow()
+
+        tz = os.getenv("BLACKOUT_TZ", "America/New_York")
+        windows = os.getenv("BLACKOUT_WINDOWS", "")
+        if is_in_blackout(now, tz, windows):
+            local_time = (
+                now if now.tzinfo else now.replace(tzinfo=ZoneInfo("UTC"))
+            ).astimezone(ZoneInfo(tz)).strftime("%H:%M")
+            logger.info(
+                json.dumps(
+                    {
+                        "status": "skipped_blackout",
+                        "strategy": "breakout",
+                        "tz": tz,
+                        "local_time": local_time,
+                        "windows": windows,
+                    }
+                )
+            )
+            return {"status": "skipped_blackout"}
 
         signal = self.generate_signal(now)
         if signal is None:
