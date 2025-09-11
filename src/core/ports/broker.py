@@ -25,7 +25,7 @@ class BrokerPort(Protocol):
 
         ...
 
-    def place_limit(
+    def place_entry_limit(
         self,
         symbol: str,
         side: str,
@@ -34,7 +34,18 @@ class BrokerPort(Protocol):
         clientOrderId: str,
         timeInForce: str = "GTC",
     ) -> dict[str, Any]:
-        """Place a limit order."""
+        """Place a limit entry order."""
+
+        ...
+
+    def place_entry_market(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        clientOrderId: str,
+    ) -> dict[str, Any]:
+        """Place a market entry order."""
 
         ...
 
@@ -48,7 +59,7 @@ class BrokerPort(Protocol):
 
         ...
 
-    def place_sl_reduce_only(
+    def place_stop_reduce_only(
         self,
         symbol: str,
         side: str,
