@@ -212,6 +212,48 @@ class BreakoutStrategy(Strategy):
                 }
             )
         )
+        tol_bps = float(os.getenv("BREAKOUT_PRICE_TOL_BPS") or 5.0)
+        price_tol = price_norm * (tol_bps / 10000)
+
+        existing: list[dict[str, Any]] = []
+        try:
+            existing = exch.open_orders(symbol)
+        except Exception:
+            existing = []
+
+        working: list[dict[str, Any]] = []
+        for o in existing:
+            try:
+                existing_price = float(o.get("price", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if (
+                o.get("side") == signal.action
+                and o.get("type") == "LIMIT"
+                and o.get("status") in {"NEW", "PARTIALLY_FILLED"}
+                and not o.get("reduceOnly", False)
+                and abs(existing_price - price_norm) <= price_tol
+            ):
+                working.append(o)
+
+        if working:
+            if len(working) > 1:
+                logger.info("found_multiple_working_orders")
+            existing_price = float(working[0].get("price", 0.0))
+            logger.info(
+                "skip_place: existing working limit order | %s",
+                json.dumps(
+                    {
+                        "symbol": symbol,
+                        "side": signal.action,
+                        "phase": "entry",
+                        "price_target": price_norm,
+                        "existing_price": existing_price,
+                        "tol_bps": tol_bps,
+                    }
+                ),
+            )
+            return {"status": "skipped_existing_order"}
 
         cid = sanitize_client_order_id(f"breakout-{int(now.timestamp())}")
 
