@@ -728,21 +728,49 @@ def do_tick(
             pass
 
         # Extract levels from the event
-        def _ev(name: str, default: float = 0.0) -> float:
+        def _ev(name: str) -> float | None:
             if isinstance(event, Mapping):
-                return float(event.get(name, default))
-            return float(getattr(event, name, default))
+                val = event.get(name)
+            else:
+                val = getattr(event, name, None)
+            try:
+                return float(val) if val is not None else None
+            except Exception:  # pragma: no cover - casting failures
+                return None
 
         S = _ev("S")
         R = _ev("R")
-        micro = _ev("microbuffer")
-        buffer_sl = _ev("buffer_sl")
-        atr1m = _ev("atr1m")
+        micro = _ev("microbuffer") or 0.0
+        buffer_sl = _ev("buffer_sl") or 0.0
+        atr1m = _ev("atr1m") or 0.0
         tp_policy = None
         if isinstance(event, Mapping):
             tp_policy = event.get("tp_policy")
         else:
             tp_policy = getattr(event, "tp_policy", None)
+
+        # Attempt to derive missing levels from ``market_data``
+        if S is None or R is None:
+            candles = None
+            lookback = getattr(settings, "MAX_LOOKBACK_MIN", 60)
+            try:
+                if market_data and hasattr(market_data, "fetch_ohlcv"):
+                    candles = market_data.fetch_ohlcv(symbol, timeframe="1m", limit=lookback)
+                elif market_data and hasattr(market_data, "get_klines"):
+                    candles = market_data.get_klines(symbol=symbol, interval="1m", lookback_min=lookback)
+            except Exception:  # pragma: no cover - network failures
+                candles = None
+            if candles:
+                levels = compute_levels(candles, settings=settings) or {}
+                S = levels.get("S", S)
+                R = levels.get("R", R)
+                micro = levels.get("microbuffer", micro)
+                buffer_sl = levels.get("buffer_sl", buffer_sl)
+                atr1m = levels.get("atr1m", atr1m)
+
+        if S is None or R is None:
+            logger.info(json.dumps({"action": "skip_sl_missing_S/R"}))
+            return {"status": "done", "reason": "skip_sl_missing_S/R"}
 
         bracket = build_bracket(
             "BUY" if is_long else "SELL",
@@ -755,8 +783,46 @@ def do_tick(
             tp_policy=tp_policy,
             settings=settings,
         )
-        sl = float(bracket.get("sl", 0.0))
         tp = float(bracket.get("tp", 0.0))
+
+        # ------------------------------------------------------------------
+        # Buffer rules and guards
+        buffer_raw = float(buffer_sl)
+        max_pct = float(getattr(settings, "MAX_SL_BUFFER_PCT", 0.8))
+        nivel = S if is_long else R
+        buffer_eff = min(buffer_raw, abs(nivel) * max_pct) if nivel is not None else buffer_raw
+        sl_prev = (S - buffer_eff) if is_long else (R + buffer_eff)
+        rule_applied = "raw"
+        if buffer_eff != buffer_raw:
+            rule_applied = "cap"
+        if sl_prev <= 0:
+            dist_pct = float(getattr(settings, "MAX_SL_DIST_PCT", 0.02))
+            sl_prev = entry * (1 - dist_pct if is_long else 1 + dist_pct)
+            rule_applied = "dist_fallback"
+        logger.info(
+            json.dumps(
+                {
+                    "action": "sl_buffer_rules",
+                    "buffer_raw": buffer_raw,
+                    "buffer_eff": buffer_eff,
+                    "rule_applied": rule_applied,
+                }
+            )
+        )
+
+        # Coherence guards before touching exchange
+        if sl_prev is None or sl_prev <= 0:
+            logger.info(json.dumps({"action": "skip_sl_invalid"}))
+            return {"status": "done", "reason": "skip_sl_invalid"}
+        if is_long and not sl_prev < entry:
+            logger.info(json.dumps({"action": "skip_sl_side_mismatch"}))
+            return {"status": "done", "reason": "skip_sl_side_mismatch"}
+        if not is_long and not sl_prev > entry:
+            logger.info(json.dumps({"action": "skip_sl_side_mismatch"}))
+            return {"status": "done", "reason": "skip_sl_side_mismatch"}
+
+        # ``sl_prev`` is the stop before precision snapping; reuse for risk calcs
+        sl = sl_prev
         # Normalize symbol before loading filters to avoid precision errors
         if hasattr(exchange, "normalize_symbol"):
             try:
@@ -818,13 +884,18 @@ def do_tick(
 
         qty_final = max(qty_budget, qty_min)
 
-        # Snap stop and quantity to exchange precision
-        sl_prev = sl
+        # Snap stop to tick directionally and quantity to step
         qty_prev = qty_final
-        if hasattr(exchange, "round_price_to_tick"):
-            sl_final = exchange.round_price_to_tick(symbol_n, sl_prev)
+        if tick:
+            if is_long:
+                sl_final = floor(sl_prev / tick) * tick
+            else:
+                sl_final = ceil(sl_prev / tick) * tick
         else:
             sl_final = sl_prev
+        if sl_final <= 0:
+            logger.info(json.dumps({"action": "skip_sl_after_snap_zero"}))
+            return {"status": "done", "reason": "skip_sl_after_snap_zero"}
         if hasattr(exchange, "round_qty_to_step"):
             qty_final = exchange.round_qty_to_step(symbol_n, qty_prev)
         else:
@@ -848,7 +919,17 @@ def do_tick(
         exit_side = "SELL" if is_long else "BUY"
 
         def _place_sl(sym: str, stop_price: float, qty: float) -> None:
-            if hasattr(exchange, "place_stop_reduce_only"):
+            working_type = getattr(settings, "SL_WORKING_TYPE", "MARK_PRICE")
+            if hasattr(exchange, "place_stop_market"):
+                exchange.place_stop_market(
+                    sym,
+                    exit_side,
+                    stopPrice=stop_price,
+                    closePosition=True,
+                    workingType=working_type,
+                    clientOrderId=cid_sl,
+                )
+            elif hasattr(exchange, "place_stop_reduce_only"):
                 exchange.place_stop_reduce_only(
                     sym,
                     exit_side,
@@ -866,32 +947,15 @@ def do_tick(
                     reduceOnly=True,
                 )
             else:
-                err = "exchange adapter lacks place_stop_reduce_only/place_stop"
+                err = "exchange adapter lacks place_stop_market/place_stop_reduce_only/place_stop"
                 logger.error(err)
                 raise AttributeError(err)
 
         try:
             _place_sl(symbol_n, sl_final, qty_final)
         except Exception as exc:
-            if "-1111" in str(exc):
-                sl_final = (
-                    exchange.round_price_to_tick(symbol_n, sl_final)
-                    if hasattr(exchange, "round_price_to_tick")
-                    else sl_final
-                )
-                qty_final = (
-                    exchange.round_qty_to_step(symbol_n, qty_final)
-                    if hasattr(exchange, "round_qty_to_step")
-                    else qty_final
-                )
-                try:
-                    _place_sl(symbol_n, sl_final, qty_final)
-                except Exception as exc2:
-                    logger.error("Failed to place SL order: %s", exc2)
-                    raise
-            else:
-                logger.error("Failed to place SL order: %s", exc)
-                raise
+            logger.error("Failed to place SL order: %s", exc)
+            raise
 
         if hasattr(exchange, "place_tp_reduce_only"):
             try:
