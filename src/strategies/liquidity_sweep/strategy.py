@@ -15,6 +15,8 @@ import json
 import logging
 from decimal import Decimal
 
+from common.symbols import normalize_symbol
+
 
 TIMEOUT_NO_FILL_MIN = 5  # minutes after NY open to keep processing ticks
 
@@ -317,12 +319,13 @@ def _has_position_or_active_orders(exchange: Any, symbol: str) -> tuple[bool, li
 
     qty = 0.0
     try:
+        symbol_n = normalize_symbol(symbol)
         if hasattr(exchange, "position_information"):
-            info = exchange.position_information(symbol)
+            info = exchange.position_information(symbol_n)
         elif hasattr(exchange, "futures_position_information"):
-            info = exchange.futures_position_information(symbol)
+            info = exchange.futures_position_information(symbol_n)
         elif hasattr(exchange, "get_position"):
-            info = exchange.get_position(symbol)
+            info = exchange.get_position(symbol_n)
         else:
             info = None
 
@@ -828,9 +831,9 @@ def do_tick(
             try:
                 symbol_n = exchange.normalize_symbol(symbol)
             except Exception:
-                symbol_n = symbol.replace("/", "")
+                symbol_n = normalize_symbol(symbol)
         else:
-            symbol_n = symbol.replace("/", "") if "/" in symbol else symbol
+            symbol_n = normalize_symbol(symbol)
 
         try:
             filters = exchange.get_symbol_filters(symbol_n)
