@@ -9,6 +9,7 @@ from adapters.brokers.binance import make_broker
 from adapters.data_providers.binance import make_market_data
 from config.settings import load_settings, Settings
 from strategies import STRATEGY_REGISTRY
+from core.ports.settings import get_symbol
 
 logger = logging.getLogger("bot.exec")
 
@@ -42,6 +43,8 @@ def run_iteration(event_in: dict | None = None, now: datetime | None = None) -> 
             "INTERVAL": settings.INTERVAL,
         },
     )
+    symbol = get_symbol(settings)
+    logger.info("sym_norm=%s", symbol)
 
     market_data = _resolve_market_data(settings)
     try:
@@ -61,8 +64,8 @@ def run_iteration(event_in: dict | None = None, now: datetime | None = None) -> 
     except Exception as exc:  # pragma: no cover - network failures or unsupported
         logger.debug("Unable to compute timing drift: %s", exc)
     try:
-        price = market_data.get_price(settings.SYMBOL)
-        logger.info("Current price for %s: %f", settings.SYMBOL, price)
+        price = market_data.get_price(symbol)
+        logger.info("Current price for %s: %f", symbol, price)
     except Exception as exc:  # pragma: no cover - network failures
         logger.warning("Failed to fetch current price: %s", exc)
     broker = _resolve_broker(settings)

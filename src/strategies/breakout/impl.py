@@ -16,7 +16,6 @@ from zoneinfo import ZoneInfo
 from math import ceil
 
 from common.utils import sanitize_client_order_id, is_in_blackout
-from common.symbols import normalize_symbol
 from core.domain.models.Signal import Signal
 from core.ports.broker import BrokerPort
 from core.ports.market_data import MarketDataPort
@@ -141,13 +140,12 @@ class BreakoutStrategy(Strategy):
         entry_price = 0.0
         try:
             info: Any | None
-            symbol_n = normalize_symbol(symbol)
             if hasattr(exch, "position_information"):
-                info = exch.position_information(symbol_n)
+                info = exch.position_information(symbol)
             elif hasattr(exch, "futures_position_information"):
-                info = exch.futures_position_information(symbol_n)
+                info = exch.futures_position_information(symbol)
             elif hasattr(exch, "get_position"):
-                info = exch.get_position(symbol_n)
+                info = exch.get_position(symbol)
             else:
                 info = None
             if info is not None:
@@ -281,8 +279,6 @@ class BreakoutStrategy(Strategy):
         signal = self.generate_signal(now)
         if signal is None:
             return {"status": "no_signal"}
-
-        symbol = get_symbol(settings)
 
         price_prev = signal.price
         price_norm = exch.round_price_to_tick(symbol, price_prev)

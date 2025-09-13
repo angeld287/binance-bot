@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Protocol
+from common.symbols import normalize_symbol
 
 
 class SettingsProvider(Protocol):
@@ -15,7 +16,15 @@ class SettingsProvider(Protocol):
 
 
 def get_symbol(settings: SettingsProvider) -> str:
-    return settings.get("SYMBOL", "BTCUSDT")
+    """Return the trading symbol normalized for exchange consumption."""
+    raw = settings.get("SYMBOL", "BTCUSDT")
+    normalized = normalize_symbol(str(raw))
+    return normalized or "BTCUSDT"
+
+
+def get_symbol_raw(settings: SettingsProvider) -> str:
+    """Return the raw trading symbol without any normalization."""
+    return str(settings.get("SYMBOL", "BTCUSDT"))
 
 
 def get_risk_pct(settings: SettingsProvider) -> float:
