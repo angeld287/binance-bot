@@ -159,6 +159,7 @@ class BreakoutStrategy(Strategy):
                 symbol,
                 err,
             )
+        logger.info("position_amt: %s", position_amt)
         if abs(position_amt) > 0:
             side = "BUY" if position_amt > 0 else "SELL"
             logger.info(
