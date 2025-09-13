@@ -127,6 +127,54 @@ class BreakoutStrategy(Strategy):
         market_data = market_data or self._market_data
         now = now_utc or datetime.utcnow()
 
+        symbol = get_symbol(settings)
+        try:
+            open_orders = exch.open_orders(symbol)
+            working = [
+                o
+                for o in open_orders
+                if o.get("type") == "LIMIT"
+                and o.get("status") in {"NEW", "PARTIALLY_FILLED"}
+                and not o.get("reduceOnly")
+            ]
+            buys: list[float] = []
+            sells: list[float] = []
+            for o in working:
+                try:
+                    price = float(o.get("price", 0.0))
+                except (TypeError, ValueError):
+                    continue
+                if o.get("side") == "BUY":
+                    buys.append(price)
+                elif o.get("side") == "SELL":
+                    sells.append(price)
+            buy_prices = sorted(buys)[:5]
+            sell_prices = sorted(sells)[:5]
+            n_buy = len(buys)
+            n_sell = len(sells)
+            total = len(working)
+            if total:
+                logger.info(
+                    "ordercheck.pre: OPEN {symbol=%s, buys=%s, buy_prices=%s, sells=%s, sell_prices=%s, total=%s}",
+                    symbol,
+                    n_buy,
+                    buy_prices,
+                    n_sell,
+                    sell_prices,
+                    total,
+                )
+            else:
+                logger.info(
+                    "ordercheck.pre: NONE {symbol=%s, total=0}",
+                    symbol,
+                )
+        except Exception as err:
+            logger.warning(
+                "ordercheck.pre: ERROR {symbol=%s, error=%s}",
+                symbol,
+                err,
+            )
+
         tz = os.getenv("BLACKOUT_TZ", "America/New_York")
         windows = os.getenv("BLACKOUT_WINDOWS", "")
         if is_in_blackout(now, tz, windows):
