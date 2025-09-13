@@ -15,7 +15,7 @@ import json
 import logging
 from decimal import Decimal
 
-from common.symbols import normalize_symbol
+from core.ports.settings import get_symbol
 
 
 TIMEOUT_NO_FILL_MIN = 5  # minutes after NY open to keep processing ticks
@@ -319,7 +319,7 @@ def _has_position_or_active_orders(exchange: Any, symbol: str) -> tuple[bool, li
 
     qty = 0.0
     try:
-        symbol_n = normalize_symbol(symbol)
+        symbol_n = symbol
         if hasattr(exchange, "position_information"):
             info = exchange.position_information(symbol_n)
         elif hasattr(exchange, "futures_position_information"):
@@ -371,6 +371,7 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
         ``trade_id`` used for idempotency.
     """
 
+    symbol = get_symbol(settings)
     lookback = getattr(settings, "MAX_LOOKBACK_MIN", 60)
 
     should_skip, open_orders = _has_position_or_active_orders(exchange, symbol)
@@ -634,8 +635,10 @@ def do_tick(
     # Basic fallback for legacy calls using the old signature.  ``run`` may
     # still call :func:`do_tick` with ``now_utc`` and ``event`` only; in that
     # scenario we simply return an empty result to avoid unexpected failures.
-    if settings is None or not isinstance(symbol, str):  # pragma: no cover - legacy
+    if settings is None:  # pragma: no cover - legacy
         return {}
+
+    symbol = get_symbol(settings)
 
     # ------------------------------------------------------------------
     # Build identifiers and timing helpers
@@ -826,14 +829,7 @@ def do_tick(
 
         # ``sl_prev`` is the stop before precision snapping; reuse for risk calcs
         sl = sl_prev
-        # Normalize symbol before loading filters to avoid precision errors
-        if hasattr(exchange, "normalize_symbol"):
-            try:
-                symbol_n = exchange.normalize_symbol(symbol)
-            except Exception:
-                symbol_n = normalize_symbol(symbol)
-        else:
-            symbol_n = normalize_symbol(symbol)
+        symbol_n = get_symbol(settings)
 
         try:
             filters = exchange.get_symbol_filters(symbol_n)
@@ -1063,7 +1059,7 @@ class LiquiditySweepStrategy:
 
         open_at_epoch_ms = None
         force_phase = None
-        symbol = getattr(settings, "SYMBOL", None)
+        symbol = get_symbol(settings) if settings else None
         if isinstance(event, Mapping):
             open_at_epoch_ms = event.get("open_at_epoch_ms")
             force_phase = event.get("force_phase")
