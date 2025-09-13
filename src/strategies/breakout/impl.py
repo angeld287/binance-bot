@@ -236,6 +236,32 @@ class BreakoutStrategy(Strategy):
             ):
                 working.append(o)
 
+        if symbol == "SOLUSDT":
+            all_open_count = len(existing)
+            matched_prices = [float(o.get("price", 0.0)) for o in working]
+            if working:
+                logger.info(
+                    "order_check: OPEN {symbol=%s, side=%s, phase=%s, price_target=%s, tol_bps=%s, matched_count=%s, matched_prices=%s, all_open_count=%s}",
+                    symbol,
+                    signal.action,
+                    "entry",
+                    price_norm,
+                    tol_bps,
+                    len(working),
+                    matched_prices,
+                    all_open_count,
+                )
+            else:
+                logger.info(
+                    "order_check: NONE {symbol=%s, side=%s, phase=%s, price_target=%s, tol_bps=%s, all_open_count=%s}",
+                    symbol,
+                    signal.action,
+                    "entry",
+                    price_norm,
+                    tol_bps,
+                    all_open_count,
+                )
+
         if working:
             if len(working) > 1:
                 logger.info("found_multiple_working_orders")
