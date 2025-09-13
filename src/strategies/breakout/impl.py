@@ -163,6 +163,22 @@ class BreakoutStrategy(Strategy):
                     sell_prices,
                     total,
                 )
+                logger.info(
+                    "skip: existing working order {symbol=%s, buys=%s, buy_prices=%s, sells=%s, sell_prices=%s, total=%s}",
+                    symbol,
+                    n_buy,
+                    buy_prices,
+                    n_sell,
+                    sell_prices,
+                    total,
+                )
+                return {
+                    "status": "skipped_existing_order",
+                    "symbol": symbol,
+                    "open_orders_total": total,
+                    "open_orders_buys": n_buy,
+                    "open_orders_sells": n_sell,
+                }
             else:
                 logger.info(
                     "ordercheck.pre: NONE {symbol=%s, total=0}",
@@ -260,74 +276,6 @@ class BreakoutStrategy(Strategy):
                 }
             )
         )
-        tol_bps = float(os.getenv("BREAKOUT_PRICE_TOL_BPS") or 5.0)
-        price_tol = price_norm * (tol_bps / 10000)
-
-        existing: list[dict[str, Any]] = []
-        try:
-            existing = exch.open_orders(symbol)
-        except Exception:
-            existing = []
-
-        working: list[dict[str, Any]] = []
-        for o in existing:
-            try:
-                existing_price = float(o.get("price", 0.0))
-            except (TypeError, ValueError):
-                continue
-            if (
-                o.get("side") == signal.action
-                and o.get("type") == "LIMIT"
-                and o.get("status") in {"NEW", "PARTIALLY_FILLED"}
-                and not o.get("reduceOnly", False)
-                and abs(existing_price - price_norm) <= price_tol
-            ):
-                working.append(o)
-
-        if symbol == "SOLUSDT":
-            all_open_count = len(existing)
-            matched_prices = [float(o.get("price", 0.0)) for o in working]
-            if working:
-                logger.info(
-                    "order_check: OPEN {symbol=%s, side=%s, phase=%s, price_target=%s, tol_bps=%s, matched_count=%s, matched_prices=%s, all_open_count=%s}",
-                    symbol,
-                    signal.action,
-                    "entry",
-                    price_norm,
-                    tol_bps,
-                    len(working),
-                    matched_prices,
-                    all_open_count,
-                )
-            else:
-                logger.info(
-                    "order_check: NONE {symbol=%s, side=%s, phase=%s, price_target=%s, tol_bps=%s, all_open_count=%s}",
-                    symbol,
-                    signal.action,
-                    "entry",
-                    price_norm,
-                    tol_bps,
-                    all_open_count,
-                )
-
-        if working:
-            if len(working) > 1:
-                logger.info("found_multiple_working_orders")
-            existing_price = float(working[0].get("price", 0.0))
-            logger.info(
-                "skip_place: existing working limit order | %s",
-                json.dumps(
-                    {
-                        "symbol": symbol,
-                        "side": signal.action,
-                        "phase": "entry",
-                        "price_target": price_norm,
-                        "existing_price": existing_price,
-                        "tol_bps": tol_bps,
-                    }
-                ),
-            )
-            return {"status": "skipped_existing_order"}
 
         cid = sanitize_client_order_id(f"breakout-{int(now.timestamp())}")
 
