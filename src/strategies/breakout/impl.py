@@ -141,6 +141,10 @@ class BreakoutStrategy(Strategy):
         try:
             info: Any | None
             logger.info("hasattr(exch, position_information) = %s", hasattr(exch, "position_information"))
+            logger.info("type(exch)=%s", type(exch).__name__)
+            logger.info("hasattr(futures_position_information)=%s", hasattr(exch,"futures_position_information"))
+            logger.info("hasattr(get_position)=%s", hasattr(exch,"get_position"))
+
             if hasattr(exch, "position_information"):
                 info = exch.position_information(symbol)
             elif hasattr(exch, "futures_position_information"):
