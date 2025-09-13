@@ -136,6 +136,13 @@ class BreakoutStrategy(Strategy):
             "now": now,
         }
 
+        logger.info(
+            "settings: SYMBOL(raw)=%s | STOP_LOSS_PCT=%s | TAKE_PROFIT_PCT=%s",
+            settings.get("SYMBOL"),
+            settings.get("STOP_LOSS_PCT"),
+            settings.get("TAKE_PROFIT_PCT"),
+        )
+
         position_amt = 0.0
         entry_price = 0.0
         try:
