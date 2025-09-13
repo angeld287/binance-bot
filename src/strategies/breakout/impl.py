@@ -21,6 +21,7 @@ from core.ports.broker import BrokerPort
 from core.ports.market_data import MarketDataPort
 from core.ports.strategy import Strategy
 from core.ports.settings import SettingsProvider, get_symbol
+from .cr_hook import run_cr_on_open_position
 
 logger = logging.getLogger("bot.strategy.breakout")
 
@@ -128,6 +129,12 @@ class BreakoutStrategy(Strategy):
         now = now_utc or datetime.utcnow()
 
         symbol = get_symbol(settings)
+        ctx = {
+            "exchange": exch,
+            "settings": settings,
+            "market_data": market_data,
+            "now": now,
+        }
 
         position_amt = 0.0
         entry_price = 0.0
@@ -160,6 +167,20 @@ class BreakoutStrategy(Strategy):
                 side,
                 position_amt,
                 entry_price,
+            )
+            logger.info(
+                "breakout: posición abierta detectada; ejecutando CR hook antes de retornar"
+            )
+            current_position = {
+                "positionAmt": position_amt,
+                "entryPrice": entry_price,
+                "side": side,
+            }
+            run_cr_on_open_position(
+                ctx=ctx,
+                symbol=symbol,
+                position=current_position,
+                logger=logger,
             )
             return {
                 "status": "skipped_existing_position",
