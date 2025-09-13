@@ -140,6 +140,7 @@ class BreakoutStrategy(Strategy):
         entry_price = 0.0
         try:
             info: Any | None
+            logger.info("hasattr(exch, position_information) = %s", hasattr(exch, "position_information"))
             if hasattr(exch, "position_information"):
                 info = exch.position_information(symbol)
             elif hasattr(exch, "futures_position_information"):
