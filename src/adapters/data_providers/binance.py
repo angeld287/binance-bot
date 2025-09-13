@@ -12,6 +12,7 @@ from binance.client import Client
 
 from config.settings import Settings
 from core.ports.market_data import MarketDataPort
+from common.symbols import normalize_symbol
 
 if TYPE_CHECKING:  # pragma: no cover - domain models are not yet implemented
     from core.domain.models.Candle import Candle
@@ -48,7 +49,7 @@ class BinanceMarketData(MarketDataPort):
     def get_klines(self, symbol: str, interval: str, lookback_min: int) -> list["Candle"]:
         """Return OHLC candles for a symbol over ``lookback_min`` minutes."""
 
-        sym = symbol.replace("/", "")
+        sym = normalize_symbol(symbol)
         minutes = _interval_to_minutes(interval)
         limit = max(1, lookback_min // minutes)
         # TODO: replace with shared retry helper
@@ -68,7 +69,7 @@ class BinanceMarketData(MarketDataPort):
         normalized to ``[ms, open, high, low, close, volume]``.
         """
 
-        sym = symbol.replace("/", "")
+        sym = normalize_symbol(symbol)
         for attempt in range(3):
             try:
                 data = self._client.get_klines(symbol=sym, interval=timeframe, limit=limit)
@@ -90,7 +91,7 @@ class BinanceMarketData(MarketDataPort):
         raise RuntimeError("Failed to fetch klines after retries")
 
     def get_price(self, symbol: str) -> float:
-        sym = symbol.replace("/", "")
+        sym = normalize_symbol(symbol)
         for attempt in range(3):
             try:
                 ticker = self._client.get_symbol_ticker(symbol=sym)

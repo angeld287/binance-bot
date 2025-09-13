@@ -14,12 +14,13 @@ from requests import Session
 from config.settings import Settings
 from core.ports.broker import BrokerPort
 from common.utils import sanitize_client_order_id
+from common.symbols import normalize_symbol as _normalize_symbol
 
 logger = logging.getLogger(__name__)
 
 
 def _to_binance_symbol(sym: str) -> str:
-    return sym.replace("/", "")
+    return _normalize_symbol(sym)
 
 
 def _calc_drift_ms(client: Client) -> int:
@@ -100,7 +101,7 @@ class BinanceBroker(BrokerPort):
             testnet=settings.BINANCE_TESTNET,
             requests_params=requests_params,
         )
-        
+
         # Cache for symbol filters to avoid repeated ``exchangeInfo`` calls
         self._filters_cache: Dict[str, Dict[str, Any]] = {}
 
@@ -109,6 +110,10 @@ class BinanceBroker(BrokerPort):
             return "<empty>"
         s = str(s)
         return s[:6] + "…" + s[-4:]
+
+    def normalize_symbol(self, symbol: str) -> str:
+        """Return ``symbol`` uppercased without the ``/`` character."""
+        return _normalize_symbol(symbol)
 
     # ------------------------------------------------------------------
     # Orders
