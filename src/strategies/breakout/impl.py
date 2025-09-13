@@ -139,23 +139,10 @@ class BreakoutStrategy(Strategy):
         position_amt = 0.0
         entry_price = 0.0
         try:
-            info: Any | None
-            logger.info("hasattr(exch, position_information) = %s", hasattr(exch, "position_information"))
-            logger.info("type(exch)=%s", type(exch).__name__)
-            logger.info("hasattr(futures_position_information)=%s", hasattr(exch,"futures_position_information"))
-            logger.info("hasattr(get_position)=%s", hasattr(exch,"get_position"))
-
-            if hasattr(exch, "position_information"):
-                info = exch.position_information(symbol)
-            elif hasattr(exch, "futures_position_information"):
-                info = exch.futures_position_information(symbol)
-            elif hasattr(exch, "get_position"):
-                info = exch.get_position(symbol)
+            info = exch.get_position(symbol)
+            if info is None:
+                logger.info("get_position: no data for %s", symbol)
             else:
-                info = None
-            if info is not None:
-                if isinstance(info, list):
-                    info = info[0] if info else {}
                 position_amt = float(info.get("positionAmt", 0.0))
                 entry_price = float(info.get("entryPrice", 0.0))
         except Exception as err:  # pragma: no cover - defensive

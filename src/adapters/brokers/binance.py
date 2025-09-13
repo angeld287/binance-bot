@@ -116,6 +116,51 @@ class BinanceBroker(BrokerPort):
         return _normalize_symbol(symbol)
 
     # ------------------------------------------------------------------
+    # Positions
+    def get_position(self, symbol: str) -> dict[str, Any] | None:
+        """Return position information for ``symbol`` or ``None``.
+
+        The method queries Binance USDT-M futures using the existing client
+        and returns a simplified dictionary with at least ``positionAmt`` and
+        ``entryPrice``. If no position is found for the symbol, ``None`` is
+        returned and an ``INFO`` log is emitted. The ``symbol`` passed in is
+        assumed to be already normalised.
+        """
+
+        try:
+            data = self._client.futures_position_information(symbol=symbol)
+        except Exception as exc:  # pragma: no cover - network failures
+            logger.error("Failed to fetch position information: %s", exc)
+            raise
+
+        positions = data if isinstance(data, list) else [data]
+        positions = [p for p in positions if p.get("symbol") == symbol]
+        if not positions:
+            logger.info("No position data for %s", symbol)
+            return None
+
+        if len(positions) > 1:
+            net_amt = sum(float(p.get("positionAmt", 0.0)) for p in positions)
+            total_qty = sum(abs(float(p.get("positionAmt", 0.0))) for p in positions)
+            entry_price = (
+                sum(
+                    float(p.get("entryPrice", 0.0))
+                    * abs(float(p.get("positionAmt", 0.0)))
+                    for p in positions
+                )
+                / total_qty
+                if total_qty
+                else 0.0
+            )
+            return {"positionAmt": str(net_amt), "entryPrice": str(entry_price)}
+
+        pos = positions[0]
+        return {
+            "positionAmt": pos.get("positionAmt", "0"),
+            "entryPrice": pos.get("entryPrice", "0"),
+        }
+
+    # ------------------------------------------------------------------
     # Orders
     def open_orders(self, symbol: str) -> list[Any]:
         try:
