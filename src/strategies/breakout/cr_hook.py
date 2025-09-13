@@ -2,6 +2,7 @@ import logging
 from uuid import uuid4
 
 from common.utils import sanitize_client_order_id
+from config.settings import get_stop_loss_pct, get_take_profit_pct
 
 
 def run_cr_on_open_position(ctx, symbol: str, position: dict, logger=None) -> None:
@@ -13,17 +14,10 @@ def run_cr_on_open_position(ctx, symbol: str, position: dict, logger=None) -> No
     settings = ctx.get("settings") if ctx else None
     market_data = ctx.get("market_data") if ctx else None
 
-    logger.info(
-    "settings: SYMBOL(raw)=%s | STOP_LOSS_PCT=%s | TAKE_PROFIT_PCT=%s",
-        settings.get("SYMBOL"),
-        settings.get("STOP_LOSS_PCT"),
-        settings.get("TAKE_PROFIT_PCT"),
-    )
-
-    sl_pct = float(settings.get("STOP_LOSS_PCT", 0) or 0) if settings else 0.0
-    tp_pct = float(settings.get("TAKE_PROFIT_PCT", 0) or 0) if settings else 0.0
-    logger.info("breakout.cr: pct_params {sl_pct=%s, tp_pct=%s}", sl_pct, tp_pct)
-    if sl_pct <= 0 or tp_pct <= 0:
+    sl_pct = get_stop_loss_pct(settings) if settings else None
+    tp_pct = get_take_profit_pct(settings) if settings else None
+    logger.info("breakout.cr: pct_read {sl=%s, tp=%s}", sl_pct, tp_pct)
+    if sl_pct is None or tp_pct is None:
         logger.info("breakout.cr: bracket_skipped {reason=pct_missing}")
         return None
 
