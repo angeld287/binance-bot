@@ -128,6 +128,51 @@ class BreakoutStrategy(Strategy):
         now = now_utc or datetime.utcnow()
 
         symbol = get_symbol(settings)
+
+        position_amt = 0.0
+        entry_price = 0.0
+        try:
+            info: Any | None
+            if hasattr(exch, "position_information"):
+                info = exch.position_information(symbol)
+            elif hasattr(exch, "futures_position_information"):
+                info = exch.futures_position_information(symbol)
+            elif hasattr(exch, "get_position"):
+                info = exch.get_position(symbol)
+            else:
+                info = None
+            if info is not None:
+                if isinstance(info, list):
+                    info = info[0] if info else {}
+                position_amt = float(info.get("positionAmt", 0.0))
+                entry_price = float(info.get("entryPrice", 0.0))
+        except Exception as err:  # pragma: no cover - defensive
+            logger.warning(
+                "positioncheck.pre: ERROR {symbol=%s, error=%s}",
+                symbol,
+                err,
+            )
+        if abs(position_amt) > 0:
+            side = "BUY" if position_amt > 0 else "SELL"
+            logger.info(
+                "positioncheck.pre: OPEN {symbol=%s, side=%s, qty=%s, entry=%s}",
+                symbol,
+                side,
+                position_amt,
+                entry_price,
+            )
+            return {
+                "status": "skipped_existing_position",
+                "symbol": symbol,
+                "positionAmt": position_amt,
+                "entryPrice": entry_price,
+            }
+        else:
+            logger.info(
+                "positioncheck.pre: NONE {symbol=%s}",
+                symbol,
+            )
+
         try:
             open_orders = exch.open_orders(symbol)
             working = [
