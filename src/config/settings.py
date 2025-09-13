@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     MICROBUFFER_ATR1M_MULT: float = 0.25
     BUFFER_SL_PCT_MIN: float = 0.0005
     BUFFER_SL_ATR1M_MULT: float = 0.5
+    STOP_LOSS_PCT: float | None = None
+    TAKE_PROFIT_PCT: float | None = None
     TP_POLICY: str = "STRUCTURAL_OR_1_8R"
     MAX_LOOKBACK_MIN: int = 60
     INTERVAL: str = "1h"
@@ -46,7 +48,12 @@ class Settings(BaseSettings):
 
 @lru_cache
 def load_settings() -> Settings:
-    """Factory function to load settings from environment or .env file."""
+    """Factory function to load settings from environment or .env file.
+
+    Note: This function is cached. In AWS Lambda, environment variable
+    changes are picked up only on a cold start (new deployment or
+    container restart).
+    """
     settings = Settings()
 
     # Fallback: map legacy PAPER_TRADING to BINANCE_TESTNET if the new variable
@@ -63,3 +70,27 @@ def load_settings() -> Settings:
     )
 
     return settings
+
+
+def get_stop_loss_pct(settings: Settings) -> float | None:
+    """Return STOP_LOSS_PCT if set and positive."""
+    val = getattr(settings, "STOP_LOSS_PCT", None)
+    if val is None and hasattr(settings, "get"):
+        val = settings.get("STOP_LOSS_PCT")
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
+
+def get_take_profit_pct(settings: Settings) -> float | None:
+    """Return TAKE_PROFIT_PCT if set and positive."""
+    val = getattr(settings, "TAKE_PROFIT_PCT", None)
+    if val is None and hasattr(settings, "get"):
+        val = settings.get("TAKE_PROFIT_PCT")
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
