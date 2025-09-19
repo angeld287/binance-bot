@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - feature/refactor-project-to-hexagonal-architecture
 
 jobs:
   deploy:
@@ -60,5 +59,12 @@ jobs:
         run: |
           aws lambda update-function-code \
             --function-name bot-breakout-sol \
+            --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
+            --s3-key trading-bot.zip
+      
+      - name: Update Lambda function "breakout-doge" from S3
+        run: |
+          aws lambda update-function-code \
+            --function-name trading-bot-breakout \
             --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
             --s3-key trading-bot.zip
