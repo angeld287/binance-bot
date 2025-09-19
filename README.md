@@ -35,7 +35,7 @@ src/
    - `BINANCE_API_SECRET`
    - `SYMBOL` (ej. DOGEUSDT)
    - `SR_TIMEFRAME` (ej. 4h)
-   - `STRATEGY` (ej. breakout)
+   - `STRATEGY_NAME` (alias: `STRATEGY`, ej. breakout)
 3. Instalar dependencias:
    ```bash
    pip install -r requirements.txt

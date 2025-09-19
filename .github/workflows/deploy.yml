@@ -39,11 +39,7 @@ jobs:
 
       - name: Inject latest source files into package
         run: |
-          cp -r src/execution.py ./package/
-          cp -r src/core/        ./package/core/
-          cp -r src/analysis/    ./package/analysis/
-          cp -r src/strategies/  ./package/strategies/
-          cp -r src/config/      ./package/config/
+          rsync -a src/ package/
           # Si tienes más archivos, agrégalos aquí
           cd package
           zip -r ../deployment.zip .
@@ -52,9 +48,23 @@ jobs:
         run: |
           aws s3 cp deployment.zip s3://lambda-functions-dev-serverlessdeploymentbucket-irlanda/trading-bot.zip
 
-      - name: Update Lambda function from S3
+      - name: Update Lambda function "liquidity-sweep" from S3
         run: |
           aws lambda update-function-code \
             --function-name trading-bot-liquidity-sweep \
+            --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
+            --s3-key trading-bot.zip
+
+      - name: Update Lambda function "breakout-sol" from S3
+        run: |
+          aws lambda update-function-code \
+            --function-name bot-breakout-sol \
+            --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
+            --s3-key trading-bot.zip
+      
+      - name: Update Lambda function "breakout-doge" from S3
+        run: |
+          aws lambda update-function-code \
+            --function-name trading-bot-breakout \
             --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
             --s3-key trading-bot.zip
