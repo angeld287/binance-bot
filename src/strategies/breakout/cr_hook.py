@@ -1,6 +1,8 @@
 import logging
 from uuid import uuid4
 
+from binance.exceptions import BinanceAPIException
+
 from common.utils import sanitize_client_order_id
 from config.settings import get_stop_loss_pct, get_take_profit_pct
 
@@ -103,7 +105,17 @@ def run_cr_on_open_position(ctx, symbol: str, position: dict, logger=None) -> No
                 )
         else:  # TP
             if hasattr(exchange, "place_tp_reduce_only"):
-                exchange.place_tp_reduce_only(symbol, exit_side, price, qty_abs, cid)
+                try:
+                    exchange.place_tp_reduce_only(
+                        symbol, exit_side, price, qty_abs, cid
+                    )
+                except BinanceAPIException as e:
+                    if e.code == -2022:
+                        logger.info(
+                            "breakout.cr: tp_skip_no_remaining (ReduceOnly -2022)"
+                        )
+                        return
+                    raise
             else:  # pragma: no cover - generic fallback
                 exchange._client.futures_create_order(  # type: ignore[attr-defined]
                     symbol=symbol,
