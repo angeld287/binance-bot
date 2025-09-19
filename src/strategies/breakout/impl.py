@@ -22,6 +22,11 @@ from core.ports.market_data import MarketDataPort
 from core.ports.strategy import Strategy
 from core.ports.settings import SettingsProvider, get_symbol
 from .cr_hook import run_cr_on_open_position
+from .validators import (
+    BREAKOUT_FBV_ENABLED,
+    get_false_breakout_settings,
+    validate_false_breakout,
+)
 
 logger = logging.getLogger("bot.strategy.breakout")
 
@@ -279,6 +284,85 @@ class BreakoutStrategy(Strategy):
         signal = self.generate_signal(now)
         if signal is None:
             return {"status": "no_signal"}
+
+        if BREAKOUT_FBV_ENABLED:
+            fbv_settings = get_false_breakout_settings()
+            interval = settings.get("INTERVAL", "1h")
+            interval_min = _interval_to_minutes(interval)
+
+            bars_for_level = fbv_settings.level_lookback + fbv_settings.retest_wait + 5
+            bars_for_metrics = fbv_settings.vol_ma_n + fbv_settings.atr_period + 5
+            lookback_bars = max(bars_for_level, bars_for_metrics)
+            lookback_min = max(interval_min * lookback_bars, interval_min * 2)
+
+            try:
+                fbv_klines = market_data.get_klines(
+                    symbol=symbol,
+                    interval=interval,
+                    lookback_min=lookback_min,
+                )
+            except Exception as err:  # pragma: no cover - defensive
+                logger.warning("fbv.fetch_error {error=%s}", err)
+                fbv_klines = []
+
+            def _extract_level(kline: Any) -> float | None:
+                if isinstance(kline, dict):
+                    if signal.action == "BUY":
+                        price = kline.get("high", kline.get("h"))
+                    else:
+                        price = kline.get("low", kline.get("l"))
+                else:
+                    try:
+                        price = kline[2] if signal.action == "BUY" else kline[3]
+                    except (IndexError, TypeError):
+                        price = None
+                if price is None:
+                    return None
+                try:
+                    return float(price)
+                except (TypeError, ValueError):
+                    return None
+
+            level_price: float | None = None
+            if len(fbv_klines) >= 2:
+                level_price = _extract_level(fbv_klines[-2])
+
+            if level_price is not None:
+                allowed, reason, details = validate_false_breakout(
+                    ctx=ctx,
+                    side=signal.action,
+                    level=level_price,
+                    timeframe=interval,
+                    klines=fbv_klines,
+                    now=now,
+                    params=fbv_settings,
+                )
+                if not allowed:
+                    logger.info(
+                        json.dumps(
+                            {
+                                "status": "skipped_fbv",
+                                "reason": reason,
+                                "details": details,
+                            }
+                        )
+                    )
+                    return {
+                        "status": "skipped_fbv",
+                        "reason": reason,
+                        "details": details,
+                    }
+            else:
+                logger.info(
+                    "fbv.result %s",
+                    {
+                        "allowed": True,
+                        "reason": "missing_level",
+                        "level": None,
+                        "touch_age": None,
+                        "metrics": {"missing_level": True},
+                    },
+                )
 
         price_prev = signal.price
         price_norm = exch.round_price_to_tick(symbol, price_prev)
