@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .breakout import BreakoutStrategy
-from .breakout_dual_tf import BreakoutDualTFStrategy
+from .breakout_dual_tf import BreakoutDualTFStrategy, factory as BreakoutDualTFFactory
 from .liquidity_sweep import LiquiditySweepStrategy
 
 STRATEGY_REGISTRY: dict[str, type] = {}
@@ -13,5 +13,6 @@ __all__ = [
     "STRATEGY_REGISTRY",
     "BreakoutStrategy",
     "BreakoutDualTFStrategy",
+    "BreakoutDualTFFactory",
     "LiquiditySweepStrategy",
 ]

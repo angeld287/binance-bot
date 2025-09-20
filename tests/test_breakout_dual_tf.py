@@ -1,4 +1,4 @@
-import importlib.util
+import importlib
 from pathlib import Path
 import sys
 from typing import Any
@@ -25,12 +25,7 @@ stub_config.settings = stub_settings
 sys.modules.setdefault("config", stub_config)
 sys.modules.setdefault("config.settings", stub_settings)
 
-MODULE_PATH = ROOT / "src" / "strategies" / "breakout_dual_tf.py"
-spec = importlib.util.spec_from_file_location("breakout_dual_tf", MODULE_PATH)
-assert spec and spec.loader  # defensive
-breakout_dual_tf = importlib.util.module_from_spec(spec)
-sys.modules["breakout_dual_tf"] = breakout_dual_tf
-spec.loader.exec_module(breakout_dual_tf)
+breakout_dual_tf = importlib.import_module("strategies.breakout_dual_tf")
 
 BreakoutDualTFStrategy = breakout_dual_tf.BreakoutDualTFStrategy
 Level = breakout_dual_tf.Level
