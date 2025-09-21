@@ -23,7 +23,7 @@ from config.settings import get_stop_loss_pct, get_take_profit_pct
 from core.domain.models.Signal import Signal
 from core.ports.broker import BrokerPort
 from core.ports.market_data import MarketDataPort
-from core.ports.settings import SettingsProvider, get_symbol
+from core.ports.settings import SettingsProvider, get_debug_mode, get_symbol
 from core.ports.strategy import Strategy
 
 logger = logging.getLogger("bot.strategy.breakout_dual_tf")
@@ -268,31 +268,32 @@ class BreakoutDualTFStrategy(Strategy):
         if exchange is None:
             return None
 
-        settings_obj = getattr(self, "_settings", None)
+        if not hasattr(self, "_logger"):
+            self._logger = logger
 
-        def _get_setting(key: str, default: Any | None = None) -> Any:
-            if settings_obj is None:
-                return default
-            getter = getattr(settings_obj, "get", None)
-            if callable(getter):
-                try:
-                    return getter(key, default)
-                except TypeError:  # pragma: no cover - defensive fallback
-                    return getter(key)
-            return getattr(settings_obj, key, default)
+        settings_obj: SettingsProvider | None = getattr(self, "_settings", None)
+        debug_mode = get_debug_mode(settings_obj) if settings_obj is not None else False
 
-        debug_raw = _get_setting("DEBUG_MODE")
-        logger.info("debug_raw: %s", debug_raw)
-        debug_mode = True #str(debug_raw) in {"1", "true", "TRUE", "True"}
-        log = getattr(self, "_logger", logger)
+        self._logger.info("debug_mode: %s", debug_mode)
+        
         if debug_mode:
-            log.debug(
+            testnet = (
+                settings_obj.get("BINANCE_TESTNET", None)
+                if settings_obj is not None
+                else None
+            )
+            trading_mode = (
+                settings_obj.get("TRADING_MODE", None)
+                if settings_obj is not None
+                else None
+            )
+            self._logger.debug(
                 "bdtf.poscheck.entry %s",
                 {
                     "symbol_in": symbol,
                     "side_in": side,
-                    "testnet": _get_setting("BINANCE_TESTNET"),
-                    "trading_mode": _get_setting("TRADING_MODE"),
+                    "testnet": testnet,
+                    "trading_mode": trading_mode,
                 },
             )
 
@@ -305,7 +306,7 @@ class BreakoutDualTFStrategy(Strategy):
                 broker_symbol = norm_symbol
 
         if debug_mode:
-            log.debug("bdtf.poscheck.symbol %s", {"symbol_norm": broker_symbol})
+            self._logger.debug("bdtf.poscheck.symbol %s", {"symbol_norm": broker_symbol})
 
         side_norm = str(side or "").strip().upper()
         side_norm = {"LONG": "BUY", "SHORT": "SELL"}.get(side_norm, side_norm)
@@ -389,7 +390,7 @@ class BreakoutDualTFStrategy(Strategy):
                         position_entry_price = entry_price
                         break
         except Exception as err:  # pragma: no cover - defensive
-            logger.warning(
+            self._logger.warning(
                 "positioncheck.error %s",
                 {
                     "strategy": "breakout_dual_tf",
@@ -400,7 +401,7 @@ class BreakoutDualTFStrategy(Strategy):
             )
 
         if debug_mode:
-            log.debug(
+            self._logger.debug(
                 "bdtf.poscheck.position %s",
                 {
                     "position_amt": position_amt,
@@ -421,9 +422,9 @@ class BreakoutDualTFStrategy(Strategy):
                 payload["positionSide"] = position_side_raw
             if side_norm != position_side:
                 payload["requested_side"] = side_norm
-            logger.info(json.dumps(payload))
+            self._logger.info(json.dumps(payload))
             if debug_mode:
-                log.debug(
+                self._logger.debug(
                     "bdtf.poscheck.summary %s",
                     {
                         "matched_entry_orders": matched_entry_orders,
@@ -462,7 +463,7 @@ class BreakoutDualTFStrategy(Strategy):
                 except TypeError:
                     open_orders = method(symbol=broker_symbol)
                 except Exception as err:  # pragma: no cover - defensive
-                    logger.warning(
+                    self._logger.warning(
                         "ordercheck.error %s",
                         {
                             "strategy": "breakout_dual_tf",
@@ -483,7 +484,7 @@ class BreakoutDualTFStrategy(Strategy):
             setattr(self, "_order_check_cache", cache)
         else:
             if debug_mode:
-                log.debug(
+                self._logger.debug(
                     "bdtf.poscheck.cache %s",
                     {"source": "reuse", "symbol": broker_symbol, "side": side_norm},
                 )
@@ -536,7 +537,7 @@ class BreakoutDualTFStrategy(Strategy):
                 or order.get("qty")
             )
             if debug_mode:
-                log.debug(
+                self._logger.debug(
                     "bdtf.poscheck.order %s",
                     {
                         "id": order_id,
@@ -550,7 +551,7 @@ class BreakoutDualTFStrategy(Strategy):
                 )
             if status not in active_statuses:
                 if debug_mode:
-                    log.debug(
+                    self._logger.debug(
                         "bdtf.poscheck.filter %s",
                         {"filter": "status_invalid", "orderId": order_id},
                     )
@@ -566,28 +567,28 @@ class BreakoutDualTFStrategy(Strategy):
             )
             if order_symbol_norm and order_symbol_norm != broker_symbol:
                 if debug_mode:
-                    log.debug(
+                    self._logger.debug(
                         "bdtf.poscheck.filter %s",
                         {"filter": "symbol_mismatch", "orderId": order_id},
                     )
                 continue
             if order_side != side_norm:
                 if debug_mode:
-                    log.debug(
+                    self._logger.debug(
                         "bdtf.poscheck.filter %s",
                         {"filter": "side_mismatch", "orderId": order_id},
                     )
                 continue
             if effective_reduce_only:
                 if debug_mode:
-                    log.debug(
+                    self._logger.debug(
                         "bdtf.poscheck.filter %s",
                         {"filter": "reduce_only", "orderId": order_id},
                     )
                 continue
             if client_id and not client_id.lower().startswith("bdtf-"):
                 if debug_mode:
-                    log.debug(
+                    self._logger.debug(
                         "bdtf.poscheck.filter %s",
                         {"filter": "prefix_mismatch", "orderId": order_id},
                     )
@@ -616,9 +617,9 @@ class BreakoutDualTFStrategy(Strategy):
                 )
                 for order in working_orders
             ]
-            logger.info(json.dumps(payload))
+            self._logger.info(json.dumps(payload))
             if debug_mode:
-                log.debug(
+                self._logger.debug(
                     "bdtf.poscheck.summary %s",
                     {
                         "matched_entry_orders": matched_entry_orders,
@@ -629,7 +630,7 @@ class BreakoutDualTFStrategy(Strategy):
             return payload
 
         if debug_mode:
-            log.debug(
+            self._logger.debug(
                 "bdtf.poscheck.summary %s",
                 {
                     "matched_entry_orders": matched_entry_orders,

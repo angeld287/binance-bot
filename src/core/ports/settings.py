@@ -27,6 +27,15 @@ def get_symbol_raw(settings: SettingsProvider) -> str:
     return str(settings.get("SYMBOL", "BTCUSDT"))
 
 
+def get_debug_mode(settings: SettingsProvider) -> bool:
+    """Return whether debug mode is enabled for the application."""
+
+    value = settings.get("DEBUG_MODE", False)
+    if value is None:
+        return False
+    return str(value).strip() in {"1", "true", "TRUE", "True"}
+
+
 def get_risk_pct(settings: SettingsProvider) -> float:
     return float(settings.get("RISK_PCT", 0.003))
 
