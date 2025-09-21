@@ -1024,7 +1024,9 @@ class BreakoutDualTFStrategy(Strategy):
 
         now = now_utc or datetime.utcnow()
         symbol = get_symbol(self._settings)
+        logger.info("generate_signal")
         signal = self.generate_signal(now)
+        logger.info("signal %s", signal)
         if signal is None or self._last_payload is None:
             return {"status": "no_signal", "strategy": "breakout_dual_tf"}
 
