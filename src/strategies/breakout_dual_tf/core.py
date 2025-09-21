@@ -282,6 +282,7 @@ class BreakoutDualTFStrategy(Strategy):
             return getattr(settings_obj, key, default)
 
         debug_raw = _get_setting("DEBUG_MODE")
+        logger.info("debug_raw: %s", debug_raw)
         debug_mode = str(debug_raw) in {"1", "true", "TRUE", "True"}
         log = getattr(self, "_logger", logger)
         if debug_mode:
