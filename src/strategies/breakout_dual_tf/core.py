@@ -274,6 +274,8 @@ class BreakoutDualTFStrategy(Strategy):
         settings_obj: SettingsProvider | None = getattr(self, "_settings", None)
         debug_mode = get_debug_mode(settings_obj) if settings_obj is not None else False
 
+        self._logger.info("debug_mode: %s", debug_mode)
+        
         if debug_mode:
             testnet = (
                 settings_obj.get("BINANCE_TESTNET", None)
