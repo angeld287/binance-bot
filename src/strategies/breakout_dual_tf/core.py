@@ -23,7 +23,7 @@ from config.settings import get_stop_loss_pct, get_take_profit_pct
 from core.domain.models.Signal import Signal
 from core.ports.broker import BrokerPort
 from core.ports.market_data import MarketDataPort
-from core.ports.settings import SettingsProvider, get_debug_mode, get_symbol
+from core.ports.settings import SettingsProvider, get_symbol
 from core.ports.strategy import Strategy
 
 logger = logging.getLogger("bot.strategy.breakout_dual_tf")
@@ -272,30 +272,26 @@ class BreakoutDualTFStrategy(Strategy):
             self._logger = logger
 
         settings_obj: SettingsProvider | None = getattr(self, "_settings", None)
-        debug_mode = get_debug_mode(settings_obj) if settings_obj is not None else False
+        testnet = None
+        trading_mode = None
+        if settings_obj is not None:
+            getter = getattr(settings_obj, "get", None)
+            if callable(getter):
+                testnet = getter("BINANCE_TESTNET", None)
+                trading_mode = getter("TRADING_MODE", None)
+            else:
+                testnet = getattr(settings_obj, "BINANCE_TESTNET", None)
+                trading_mode = getattr(settings_obj, "TRADING_MODE", None)
 
-        self._logger.info("debug_mode: %s", debug_mode)
-        
-        if debug_mode:
-            testnet = (
-                settings_obj.get("BINANCE_TESTNET", None)
-                if settings_obj is not None
-                else None
-            )
-            trading_mode = (
-                settings_obj.get("TRADING_MODE", None)
-                if settings_obj is not None
-                else None
-            )
-            self._logger.debug(
-                "bdtf.poscheck.entry %s",
-                {
-                    "symbol_in": symbol,
-                    "side_in": side,
-                    "testnet": testnet,
-                    "trading_mode": trading_mode,
-                },
-            )
+        self._logger.info(
+            "bdtf.poscheck.entry %s",
+            {
+                "symbol_in": symbol,
+                "side_in": side,
+                "testnet": testnet,
+                "trading_mode": trading_mode,
+            },
+        )
 
         norm_symbol = normalize_symbol(symbol)
         broker_symbol = norm_symbol
@@ -305,8 +301,7 @@ class BreakoutDualTFStrategy(Strategy):
             except Exception:  # pragma: no cover - best effort fallback
                 broker_symbol = norm_symbol
 
-        if debug_mode:
-            self._logger.debug("bdtf.poscheck.symbol %s", {"symbol_norm": broker_symbol})
+        self._logger.info("bdtf.poscheck.symbol %s", {"symbol_norm": broker_symbol})
 
         side_norm = str(side or "").strip().upper()
         side_norm = {"LONG": "BUY", "SHORT": "SELL"}.get(side_norm, side_norm)
@@ -400,14 +395,13 @@ class BreakoutDualTFStrategy(Strategy):
                 },
             )
 
-        if debug_mode:
-            self._logger.debug(
-                "bdtf.poscheck.position %s",
-                {
-                    "position_amt": position_amt,
-                    "entryPrice": position_entry_price,
-                },
-            )
+        self._logger.info(
+            "bdtf.poscheck.position %s",
+            {
+                "position_amt": position_amt,
+                "entryPrice": position_entry_price,
+            },
+        )
 
         if position_side is not None and not math.isclose(position_amt, 0.0, abs_tol=1e-12):
             has_position = True
@@ -423,15 +417,14 @@ class BreakoutDualTFStrategy(Strategy):
             if side_norm != position_side:
                 payload["requested_side"] = side_norm
             self._logger.info(json.dumps(payload))
-            if debug_mode:
-                self._logger.debug(
-                    "bdtf.poscheck.summary %s",
-                    {
-                        "matched_entry_orders": matched_entry_orders,
-                        "has_position": has_position,
-                        "result": "skip_position",
-                    },
-                )
+            self._logger.info(
+                "bdtf.poscheck.summary %s",
+                {
+                    "matched_entry_orders": matched_entry_orders,
+                    "has_position": has_position,
+                    "result": "skip_position",
+                },
+            )
             return payload
 
         cache_key = (broker_symbol, side_norm)
@@ -483,11 +476,10 @@ class BreakoutDualTFStrategy(Strategy):
             cache[cache_key] = (now_ts, list(open_orders_list))
             setattr(self, "_order_check_cache", cache)
         else:
-            if debug_mode:
-                self._logger.debug(
-                    "bdtf.poscheck.cache %s",
-                    {"source": "reuse", "symbol": broker_symbol, "side": side_norm},
-                )
+            self._logger.info(
+                "bdtf.poscheck.cache %s",
+                {"source": "reuse", "symbol": broker_symbol, "side": side_norm},
+            )
 
         active_statuses = {"NEW", "PARTIALLY_FILLED", "PENDING_NEW", "ACCEPTED", "WORKING"}
         working_orders: list[Any] = []
@@ -536,25 +528,23 @@ class BreakoutDualTFStrategy(Strategy):
                 or order.get("quantity")
                 or order.get("qty")
             )
-            if debug_mode:
-                self._logger.debug(
-                    "bdtf.poscheck.order %s",
-                    {
-                        "id": order_id,
-                        "clientId": client_id,
-                        "side": order_side,
-                        "status": status,
-                        "price": order.get("price"),
-                        "qty": qty_val,
-                        "reduceOnly": effective_reduce_only,
-                    },
-                )
+            self._logger.info(
+                "bdtf.poscheck.order %s",
+                {
+                    "id": order_id,
+                    "clientId": client_id,
+                    "side": order_side,
+                    "status": status,
+                    "price": order.get("price"),
+                    "qty": qty_val,
+                    "reduceOnly": effective_reduce_only,
+                },
+            )
             if status not in active_statuses:
-                if debug_mode:
-                    self._logger.debug(
-                        "bdtf.poscheck.filter %s",
-                        {"filter": "status_invalid", "orderId": order_id},
-                    )
+                self._logger.info(
+                    "bdtf.poscheck.filter %s",
+                    {"filter": "status_invalid", "orderId": order_id},
+                )
                 continue
             order_symbol_raw = (
                 order.get("symbol")
@@ -566,32 +556,28 @@ class BreakoutDualTFStrategy(Strategy):
                 normalize_symbol(str(order_symbol_raw)) if order_symbol_raw else ""
             )
             if order_symbol_norm and order_symbol_norm != broker_symbol:
-                if debug_mode:
-                    self._logger.debug(
-                        "bdtf.poscheck.filter %s",
-                        {"filter": "symbol_mismatch", "orderId": order_id},
-                    )
+                self._logger.info(
+                    "bdtf.poscheck.filter %s",
+                    {"filter": "symbol_mismatch", "orderId": order_id},
+                )
                 continue
             if order_side != side_norm:
-                if debug_mode:
-                    self._logger.debug(
-                        "bdtf.poscheck.filter %s",
-                        {"filter": "side_mismatch", "orderId": order_id},
-                    )
+                self._logger.info(
+                    "bdtf.poscheck.filter %s",
+                    {"filter": "side_mismatch", "orderId": order_id},
+                )
                 continue
             if effective_reduce_only:
-                if debug_mode:
-                    self._logger.debug(
-                        "bdtf.poscheck.filter %s",
-                        {"filter": "reduce_only", "orderId": order_id},
-                    )
+                self._logger.info(
+                    "bdtf.poscheck.filter %s",
+                    {"filter": "reduce_only", "orderId": order_id},
+                )
                 continue
             if client_id and not client_id.lower().startswith("bdtf-"):
-                if debug_mode:
-                    self._logger.debug(
-                        "bdtf.poscheck.filter %s",
-                        {"filter": "prefix_mismatch", "orderId": order_id},
-                    )
+                self._logger.info(
+                    "bdtf.poscheck.filter %s",
+                    {"filter": "prefix_mismatch", "orderId": order_id},
+                )
                 continue
 
             working_orders.append(order)
@@ -618,26 +604,24 @@ class BreakoutDualTFStrategy(Strategy):
                 for order in working_orders
             ]
             self._logger.info(json.dumps(payload))
-            if debug_mode:
-                self._logger.debug(
-                    "bdtf.poscheck.summary %s",
-                    {
-                        "matched_entry_orders": matched_entry_orders,
-                        "has_position": has_position,
-                        "result": "skip_entry_orders",
-                    },
-                )
-            return payload
-
-        if debug_mode:
-            self._logger.debug(
+            self._logger.info(
                 "bdtf.poscheck.summary %s",
                 {
                     "matched_entry_orders": matched_entry_orders,
                     "has_position": has_position,
-                    "result": "none",
+                    "result": "skip_entry_orders",
                 },
             )
+            return payload
+
+        self._logger.info(
+            "bdtf.poscheck.summary %s",
+            {
+                "matched_entry_orders": matched_entry_orders,
+                "has_position": has_position,
+                "result": "none",
+            },
+        )
         return None
 
     # ------------------------------------------------------------------
