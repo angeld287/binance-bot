@@ -319,6 +319,7 @@ class BreakoutDualTFStrategy(Strategy):
         position_entry_price: float | None = None
         matched_entry_orders = 0
         has_position = False
+        open_orders_total = 0
         try:
             info: Any | None
             if hasattr(exchange, "get_position"):
@@ -378,12 +379,11 @@ class BreakoutDualTFStrategy(Strategy):
                     else:
                         entry_side = "BUY" if amt > 0 else "SELL"
 
-                    if entry_side == side_norm:
-                        position_amt = amt
-                        position_side = entry_side
-                        position_side_raw = entry_side_raw or entry_side
-                        position_entry_price = entry_price
-                        break
+                    position_amt = amt
+                    position_side = entry_side
+                    position_side_raw = entry_side_raw or entry_side
+                    position_entry_price = entry_price
+                    break
         except Exception as err:  # pragma: no cover - defensive
             self._logger.warning(
                 "positioncheck.error %s",
@@ -410,6 +410,7 @@ class BreakoutDualTFStrategy(Strategy):
                 "strategy": "breakout_dual_tf",
                 "symbol": broker_symbol,
                 "side": position_side,
+                "position_amt": position_amt,
                 "positionAmt": position_amt,
             }
             if position_side_raw and position_side_raw != position_side:
@@ -420,8 +421,9 @@ class BreakoutDualTFStrategy(Strategy):
             self._logger.info(
                 "bdtf.poscheck.summary %s",
                 {
-                    "matched_entry_orders": matched_entry_orders,
-                    "has_position": has_position,
+                    "open_orders": open_orders_total,
+                    "matched_entries": matched_entry_orders,
+                    "position_amt": position_amt,
                     "result": "skip_position",
                 },
             )
@@ -481,11 +483,12 @@ class BreakoutDualTFStrategy(Strategy):
                 {"source": "reuse", "symbol": broker_symbol, "side": side_norm},
             )
 
-        active_statuses = {"NEW", "PARTIALLY_FILLED", "PENDING_NEW", "ACCEPTED", "WORKING"}
+        active_statuses = {"NEW", "PARTIALLY_FILLED", "PENDING_NEW"}
         working_orders: list[Any] = []
         for order in open_orders_list or []:
             if not isinstance(order, dict):
                 continue
+            open_orders_total += 1
             order_id_val = (
                 order.get("orderId")
                 or order.get("order_id")
@@ -561,22 +564,10 @@ class BreakoutDualTFStrategy(Strategy):
                     {"filter": "symbol_mismatch", "orderId": order_id},
                 )
                 continue
-            if order_side != side_norm:
-                self._logger.info(
-                    "bdtf.poscheck.filter %s",
-                    {"filter": "side_mismatch", "orderId": order_id},
-                )
-                continue
             if effective_reduce_only:
                 self._logger.info(
                     "bdtf.poscheck.filter %s",
                     {"filter": "reduce_only", "orderId": order_id},
-                )
-                continue
-            if client_id and not client_id.lower().startswith("bdtf-"):
-                self._logger.info(
-                    "bdtf.poscheck.filter %s",
-                    {"filter": "prefix_mismatch", "orderId": order_id},
                 )
                 continue
 
@@ -588,7 +579,6 @@ class BreakoutDualTFStrategy(Strategy):
                 "status": "skipped_existing_entry_orders",
                 "strategy": "breakout_dual_tf",
                 "symbol": broker_symbol,
-                "side": side_norm,
                 "count": len(working_orders),
             }
             payload["client_order_ids"] = [
@@ -607,8 +597,9 @@ class BreakoutDualTFStrategy(Strategy):
             self._logger.info(
                 "bdtf.poscheck.summary %s",
                 {
-                    "matched_entry_orders": matched_entry_orders,
-                    "has_position": has_position,
+                    "open_orders": open_orders_total,
+                    "matched_entries": matched_entry_orders,
+                    "position_amt": position_amt,
                     "result": "skip_entry_orders",
                 },
             )
@@ -617,8 +608,9 @@ class BreakoutDualTFStrategy(Strategy):
         self._logger.info(
             "bdtf.poscheck.summary %s",
             {
-                "matched_entry_orders": matched_entry_orders,
-                "has_position": has_position,
+                "open_orders": open_orders_total,
+                "matched_entries": matched_entry_orders,
+                "position_amt": position_amt,
                 "result": "none",
             },
         )

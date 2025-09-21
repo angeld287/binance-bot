@@ -248,6 +248,7 @@ def test_run_skips_when_position_is_open(monkeypatch, caplog):
     assert result["strategy"] == "breakout_dual_tf"
     assert result["symbol"] == "BTCUSDT"
     assert result["side"] == "BUY"
+    assert result["position_amt"] == 0.75
     assert any("skipped_existing_position" in record.message for record in caplog.records)
     assert place_called["count"] == 0
 
@@ -305,13 +306,12 @@ def test_run_skips_when_entry_order_exists(caplog):
     with caplog.at_level("INFO", logger="bot.strategy.breakout_dual_tf"):
         result = strategy.run()
 
-    assert broker.open_orders_calls == 2
+    assert broker.open_orders_calls == 1
     assert result["status"] == "skipped_existing_entry_orders"
     assert result["strategy"] == "breakout_dual_tf"
     assert result["symbol"] == "BTCUSDT"
-    assert result["side"] == "BUY"
-    assert result["count"] == 1
-    assert result["client_order_ids"] == ["bdtf-123-entry"]
+    assert result["count"] == 2
+    assert result["client_order_ids"] == ["bdtf-123-entry", "manual-hedge"]
     assert any("skipped_existing_entry_orders" in record.message for record in caplog.records)
     assert place_called["count"] == 0
 
@@ -369,7 +369,7 @@ def test_run_allows_signal_when_no_duplicates(caplog):
     with caplog.at_level("INFO", logger="bot.strategy.breakout_dual_tf"):
         result = strategy.run()
 
-    assert broker.open_orders_calls == 2
+    assert broker.open_orders_calls == 1
     assert result["status"] == "signal"
     assert result["strategy"] == "breakout_dual_tf"
     assert result["symbol"] == "BTCUSDT"
@@ -409,10 +409,11 @@ def test_has_active_orders_normalizes_symbol_and_side_mapping():
     assert result["status"] == "skipped_existing_position"
     assert result["symbol"] == "SOLUSDT"
     assert result["side"] == "SELL"
+    assert result["position_amt"] == -0.5
     assert result.get("positionSide") == "SHORT"
 
 
-def test_has_active_orders_filters_non_strategy_entries():
+def test_has_active_orders_detects_manual_entry_orders():
     settings = DummySettings({"INTERVAL": "1h", "SYMBOL": "BTC/USDT"})
 
     class BrokerStub:
@@ -429,22 +430,9 @@ def test_has_active_orders_filters_non_strategy_entries():
             return [
                 {
                     "status": "NEW",
-                    "side": "BUY",
-                    "reduceOnly": False,
-                    "clientOrderId": "manual-order",
-                },
-                {
-                    "status": "NEW",
-                    "side": "BUY",
-                    "reduceOnly": "false",
-                    "closePosition": "true",
-                    "clientOrderId": "bdtf-should-skip-exit",
-                },
-                {
-                    "status": "NEW",
                     "side": "SELL",
                     "reduceOnly": False,
-                    "clientOrderId": "bdtf-sell-entry",
+                    "clientOrderId": "web_coin_123",
                 },
                 {
                     "status": "PENDING_NEW",
@@ -464,6 +452,70 @@ def test_has_active_orders_filters_non_strategy_entries():
     assert result is not None
     assert result["status"] == "skipped_existing_entry_orders"
     assert result["symbol"] == "BTCUSDT"
-    assert result["side"] == "BUY"
-    assert result["count"] == 1
-    assert result["client_order_ids"] == ["bdtf-abc-entry"]
+    assert result["count"] == 2
+    assert result["client_order_ids"] == ["web_coin_123", "bdtf-abc-entry"]
+
+
+def test_has_active_orders_ignores_reduce_only_orders():
+    settings = DummySettings({"INTERVAL": "1h", "SYMBOL": "BTC/USDT"})
+
+    class BrokerStub:
+        def __init__(self):
+            self.position_calls: list[str] = []
+            self.order_calls: list[str] = []
+
+        def get_position(self, symbol: str):
+            self.position_calls.append(symbol)
+            return {"positionAmt": "0"}
+
+        def open_orders(self, symbol: str):
+            self.order_calls.append(symbol)
+            return [
+                {
+                    "status": "NEW",
+                    "side": "BUY",
+                    "reduceOnly": True,
+                    "clientOrderId": "bdtf-should-ignore",
+                },
+                {
+                    "status": "PARTIALLY_FILLED",
+                    "side": "SELL",
+                    "closePosition": "true",
+                    "clientOrderId": "web_coin_exit",
+                },
+            ]
+
+    broker = BrokerStub()
+    strategy = BreakoutDualTFStrategy(None, broker, settings)
+
+    result = strategy._has_active_position_or_orders("BTC/USDT", "SELL")
+
+    assert broker.position_calls == ["BTCUSDT"]
+    assert broker.order_calls == ["BTCUSDT"]
+    assert result is None
+
+
+def test_has_active_orders_returns_none_without_orders_or_position():
+    settings = DummySettings({"INTERVAL": "1h", "SYMBOL": "ETH/USDT"})
+
+    class BrokerStub:
+        def __init__(self):
+            self.position_calls: list[str] = []
+            self.order_calls: list[str] = []
+
+        def get_position(self, symbol: str):
+            self.position_calls.append(symbol)
+            return {"positionAmt": "0"}
+
+        def open_orders(self, symbol: str):
+            self.order_calls.append(symbol)
+            return []
+
+    broker = BrokerStub()
+    strategy = BreakoutDualTFStrategy(None, broker, settings)
+
+    result = strategy._has_active_position_or_orders("ETH/USDT", "BUY")
+
+    assert broker.position_calls == ["ETHUSDT"]
+    assert broker.order_calls == ["ETHUSDT"]
+    assert result is None
