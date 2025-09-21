@@ -27,8 +27,11 @@ sys.modules.setdefault("config.settings", stub_settings)
 
 breakout_dual_tf = importlib.import_module("strategies.breakout_dual_tf")
 
+from core.domain.models.Signal import Signal
+
 BreakoutDualTFStrategy = breakout_dual_tf.BreakoutDualTFStrategy
 Level = breakout_dual_tf.Level
+BreakoutSignalPayload = breakout_dual_tf.BreakoutSignalPayload
 
 
 class DummySettings:
@@ -175,4 +178,196 @@ def test_breakout_dual_tf_cooldown_blocks_reentry():
     context = {"symbol": "BTCUSDT", "exec_tf": "15m", "exec_candles": candles}
     result = strategy.should_trigger_breakout(far_candle, [level], context)
     assert result is not None
+
+
+def _make_payload(action: str = "BUY") -> BreakoutSignalPayload:
+    level_type = "R" if action == "BUY" else "S"
+    level = Level(price=100.0, level_type=level_type, timestamp=1, score=1.0)
+    direction = "LONG" if action == "BUY" else "SHORT"
+    return BreakoutSignalPayload(
+        symbol="BTCUSDT",
+        action=action,
+        direction=direction,
+        level=level,
+        entry_price=101.0,
+        sl=99.0,
+        tp1=102.0,
+        tp2=103.0,
+        rr=2.0,
+        atr=1.0,
+        volume_rel=1.5,
+        ema_fast=100.5,
+        ema_slow=100.0,
+        exec_tf="15m",
+        candle=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        swing=99.5,
+    )
+
+
+def test_run_skips_when_position_is_open(monkeypatch, caplog):
+    settings = DummySettings({"INTERVAL": "1h", "SYMBOL": "BTCUSDT"})
+
+    class BrokerStub:
+        def __init__(self):
+            self.open_orders_calls = 0
+
+        def get_position(self, symbol: str):
+            return {"symbol": symbol, "positionAmt": 0.75}
+
+        def open_orders(self, symbol: str):  # pragma: no cover - guarded by skip
+            self.open_orders_calls += 1
+            return []
+
+    broker = BrokerStub()
+    strategy = BreakoutDualTFStrategy(None, broker, settings)
+    payload = _make_payload("BUY")
+    strategy._last_payload = payload
+
+    def fake_generate_signal(self, now):
+        return Signal(action="BUY", price=payload.entry_price, time=now)
+
+    strategy.generate_signal = types.MethodType(fake_generate_signal, strategy)
+
+    def fail_compute_orders(self, payload, *, context=None):  # pragma: no cover - defensive
+        raise AssertionError("compute_orders should not run when skipping")
+
+    strategy.compute_orders = types.MethodType(fail_compute_orders, strategy)
+
+    place_called = {"count": 0}
+
+    def fail_place_orders(self, orders, *, exchange=None):  # pragma: no cover - defensive
+        place_called["count"] += 1
+        raise AssertionError("place_orders should not run when skipping")
+
+    strategy.place_orders = types.MethodType(fail_place_orders, strategy)
+
+    with caplog.at_level("INFO", logger="bot.strategy.breakout_dual_tf"):
+        result = strategy.run()
+
+    assert result["status"] == "skipped_existing_position"
+    assert result["strategy"] == "breakout_dual_tf"
+    assert result["symbol"] == "BTCUSDT"
+    assert result["side"] == "BUY"
+    assert any("skipped_existing_position" in record.message for record in caplog.records)
+    assert place_called["count"] == 0
+
+
+def test_run_skips_when_entry_order_exists(caplog):
+    settings = DummySettings({"INTERVAL": "1h", "SYMBOL": "BTCUSDT"})
+
+    class BrokerStub:
+        def __init__(self):
+            self.open_orders_calls = 0
+
+        def get_position(self, symbol: str):
+            return {"symbol": symbol, "positionAmt": "0"}
+
+        def open_orders(self, symbol: str):
+            self.open_orders_calls += 1
+            return [
+                {"status": "NEW", "side": "BUY", "reduceOnly": False},
+                {"status": "NEW", "side": "SELL", "reduceOnly": False},
+            ]
+
+    broker = BrokerStub()
+    strategy = BreakoutDualTFStrategy(None, broker, settings)
+    payload = _make_payload("BUY")
+    strategy._last_payload = payload
+
+    def fake_generate_signal(self, now):
+        return Signal(action="BUY", price=payload.entry_price, time=now)
+
+    strategy.generate_signal = types.MethodType(fake_generate_signal, strategy)
+
+    def fail_compute_orders(self, payload, *, context=None):  # pragma: no cover - defensive
+        raise AssertionError("compute_orders should not run when skipping")
+
+    strategy.compute_orders = types.MethodType(fail_compute_orders, strategy)
+
+    place_called = {"count": 0}
+
+    def fail_place_orders(self, orders, *, exchange=None):  # pragma: no cover - defensive
+        place_called["count"] += 1
+        raise AssertionError("place_orders should not run when skipping")
+
+    strategy.place_orders = types.MethodType(fail_place_orders, strategy)
+
+    with caplog.at_level("INFO", logger="bot.strategy.breakout_dual_tf"):
+        result = strategy.run()
+
+    assert broker.open_orders_calls == 1
+    assert result["status"] == "skipped_existing_entry_orders"
+    assert result["strategy"] == "breakout_dual_tf"
+    assert result["symbol"] == "BTCUSDT"
+    assert result["side"] == "BUY"
+    assert any("skipped_existing_entry_orders" in record.message for record in caplog.records)
+    assert place_called["count"] == 0
+
+
+def test_run_allows_signal_when_no_duplicates(caplog):
+    settings = DummySettings({"INTERVAL": "1h", "SYMBOL": "BTCUSDT"})
+
+    class BrokerStub:
+        def __init__(self):
+            self.open_orders_calls = 0
+
+        def get_position(self, symbol: str):
+            return {"symbol": symbol, "positionAmt": 0}
+
+        def open_orders(self, symbol: str):
+            self.open_orders_calls += 1
+            return [
+                {"status": "CANCELED", "side": "BUY", "reduceOnly": False},
+                {"status": "NEW", "side": "BUY", "reduceOnly": True},
+            ]
+
+    broker = BrokerStub()
+    strategy = BreakoutDualTFStrategy(None, broker, settings)
+    payload = _make_payload("BUY")
+    strategy._last_payload = payload
+
+    def fake_generate_signal(self, now):
+        return Signal(action="BUY", price=payload.entry_price, time=now)
+
+    strategy.generate_signal = types.MethodType(fake_generate_signal, strategy)
+
+    def fake_compute_orders(self, payload, *, context=None):
+        return {
+            "symbol": payload.symbol,
+            "side": payload.action,
+            "entry": payload.entry_price,
+            "stop_loss": payload.sl,
+            "take_profit_1": payload.tp1,
+            "take_profit_2": payload.tp2,
+            "qty": 1.0,
+            "qty_tp1": 0.5,
+            "qty_tp2": 0.5,
+        }
+
+    strategy.compute_orders = types.MethodType(fake_compute_orders, strategy)
+
+    place_calls: list[dict[str, Any]] = []
+
+    def fake_place_orders(self, orders, *, exchange=None):
+        place_calls.append({"orders": orders, "exchange": exchange})
+        return {"status": "orders_placed"}
+
+    strategy.place_orders = types.MethodType(fake_place_orders, strategy)
+
+    with caplog.at_level("INFO", logger="bot.strategy.breakout_dual_tf"):
+        result = strategy.run()
+
+    assert broker.open_orders_calls == 2
+    assert result["status"] == "signal"
+    assert result["strategy"] == "breakout_dual_tf"
+    assert result["symbol"] == "BTCUSDT"
+    assert result["side"] == "BUY"
+    assert result["orders"]["entry"] == payload.entry_price
+    assert result["orders"]["qty_tp1"] == 0.5
+    assert result["orders"]["qty_tp2"] == 0.5
+    assert result["placement"] == {"status": "orders_placed"}
+    assert len(place_calls) == 1
+    assert place_calls[0]["exchange"] is broker
+    assert place_calls[0]["orders"] == result["orders"]
+    assert not any("skipped_existing_" in record.message for record in caplog.records)
 

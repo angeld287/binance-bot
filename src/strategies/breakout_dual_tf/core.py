@@ -12,10 +12,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Sequence
+from uuid import uuid4
 import json
 import logging
 import math
 
+from common.utils import sanitize_client_order_id
 from config.settings import get_stop_loss_pct, get_take_profit_pct
 from core.domain.models.Signal import Signal
 from core.ports.broker import BrokerPort
@@ -254,6 +256,95 @@ class BreakoutDualTFStrategy(Strategy):
         self._last_payload: BreakoutSignalPayload | None = None
         self._exec_tf: str = downscale_interval(getattr(settings, "INTERVAL", "1h"))
         self._bar_ms: int = _interval_to_minutes(self._exec_tf) * 60_000
+
+    # ------------------------------------------------------------------
+    def _has_active_position_or_orders(
+        self, symbol: str, side: str
+    ) -> dict[str, Any] | None:
+        """Return skip payload when there's an active position/order."""
+
+        exchange = self._broker
+        if exchange is None:
+            return None
+
+        position_amt = 0.0
+        try:
+            info: Any | None
+            if hasattr(exchange, "position_information"):
+                info = exchange.position_information(symbol)
+            elif hasattr(exchange, "futures_position_information"):
+                info = exchange.futures_position_information(symbol)
+            elif hasattr(exchange, "get_position"):
+                info = exchange.get_position(symbol)
+            else:
+                info = None
+
+            if info is not None:
+                if isinstance(info, list):
+                    info = info[0] if info else {}
+                position_amt = float(info.get("positionAmt", 0.0))
+        except Exception as err:  # pragma: no cover - defensive
+            logger.warning(
+                "positioncheck.error %s",
+                {
+                    "strategy": "breakout_dual_tf",
+                    "symbol": symbol,
+                    "side": side,
+                    "error": str(err),
+                },
+            )
+
+        if abs(position_amt) > 0:
+            payload = {
+                "status": "skipped_existing_position",
+                "strategy": "breakout_dual_tf",
+                "symbol": symbol,
+                "side": side,
+                "positionAmt": position_amt,
+            }
+            logger.info(json.dumps(payload))
+            return payload
+
+        open_orders: list[Any] = []
+        try:
+            open_orders = exchange.open_orders(symbol)
+        except Exception as err:  # pragma: no cover - defensive
+            logger.warning(
+                "ordercheck.error %s",
+                {
+                    "strategy": "breakout_dual_tf",
+                    "symbol": symbol,
+                    "side": side,
+                    "error": str(err),
+                },
+            )
+            open_orders = []
+
+        working_orders = []
+        side_up = side.upper()
+        for order in open_orders:
+            status = str(order.get("status", "")).upper()
+            if status not in {"NEW", "PARTIALLY_FILLED", "PENDING_NEW"}:
+                continue
+            order_side = str(order.get("side", "")).upper()
+            if order_side != side_up:
+                continue
+            if bool(order.get("reduceOnly")):
+                continue
+            working_orders.append(order)
+
+        if working_orders:
+            payload = {
+                "status": "skipped_existing_entry_orders",
+                "strategy": "breakout_dual_tf",
+                "symbol": symbol,
+                "side": side,
+                "open_orders_total": len(working_orders),
+            }
+            logger.info(json.dumps(payload))
+            return payload
+
+        return None
 
     # ------------------------------------------------------------------
     def _fetch_candles(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
@@ -639,39 +730,95 @@ class BreakoutDualTFStrategy(Strategy):
         return sl, tp1, tp2
 
     # ------------------------------------------------------------------
-    def compute_orders(self, signal: BreakoutSignalPayload) -> dict[str, Any]:
-        broker = self._broker
+    def _build_order_context(
+        self, exchange: BrokerPort | None, symbol: str
+    ) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "tick_size": 0.0,
+            "step_size": 0.0,
+            "min_qty": 0.0,
+            "min_notional": 0.0,
+            "available_balance_usdt": 0.0,
+        }
+        if exchange is None:
+            return context
+
+        filters: dict[str, Any] | None = None
+        if hasattr(exchange, "get_symbol_filters"):
+            try:
+                filters = exchange.get_symbol_filters(symbol)
+            except Exception as err:  # pragma: no cover - defensive logging
+                logger.warning(
+                    "order_context.filters_error %s",
+                    {
+                        "strategy": "breakout_dual_tf",
+                        "symbol": symbol,
+                        "error": str(err),
+                    },
+                )
+                filters = None
+
+        if isinstance(filters, dict):
+            lot = filters.get("LOT_SIZE", {}) or {}
+            context["min_qty"] = float(lot.get("minQty", lot.get("min_qty", 0.0)) or 0.0)
+            context["step_size"] = float(lot.get("stepSize", lot.get("step_size", 0.0)) or 0.0)
+
+            price_filter = filters.get("PRICE_FILTER", {}) or {}
+            context["tick_size"] = float(
+                price_filter.get("tickSize", price_filter.get("tick_size", 0.0)) or 0.0
+            )
+
+            min_notional_filter = filters.get("MIN_NOTIONAL", {}) or {}
+            context["min_notional"] = float(
+                min_notional_filter.get("notional")
+                or min_notional_filter.get("minNotional")
+                or min_notional_filter.get("min_notional", 0.0)
+                or 0.0
+            )
+
+        if hasattr(exchange, "get_available_balance_usdt"):
+            try:
+                context["available_balance_usdt"] = float(
+                    exchange.get_available_balance_usdt()
+                )
+            except Exception as err:  # pragma: no cover - defensive logging
+                logger.warning(
+                    "order_context.balance_error %s",
+                    {
+                        "strategy": "breakout_dual_tf",
+                        "symbol": symbol,
+                        "error": str(err),
+                    },
+                )
+
+        return context
+
+    # ------------------------------------------------------------------
+    def compute_orders(
+        self,
+        signal: BreakoutSignalPayload,
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         symbol = signal.symbol
         entry = signal.entry_price
         sl = signal.sl
         tp1 = signal.tp1
         tp2 = signal.tp2
         qty_target_src = "NONE"
-        filters: dict[str, Any] = {}
-        tick = 0.0
-        step = 0.0
-        min_qty = 0.0
-        min_notional = 0.0
-        if broker is not None:
-            try:
-                filters = broker.get_symbol_filters(symbol)
-            except Exception:  # pragma: no cover - adapter compatibility
-                filters = {}
-        if filters:
-            lot = filters.get("LOT_SIZE", {})
-            min_qty = float(lot.get("minQty", 0.0))
-            step = float(lot.get("stepSize", 0.0))
-            price_filter = filters.get("PRICE_FILTER", {})
-            tick = float(price_filter.get("tickSize", 0.0))
-            min_notional = float(
-                filters.get("MIN_NOTIONAL", {}).get("notional")
-                or filters.get("MIN_NOTIONAL", {}).get("minNotional", 0.0)
-            )
 
-        entry_rounded = broker.round_price_to_tick(symbol, entry) if broker and tick else _snap_price(entry, tick, side=signal.action)
-        sl_rounded = broker.round_price_to_tick(symbol, sl) if broker and tick else _snap_price(sl, tick, side="SELL" if signal.direction == "LONG" else "BUY")
-        tp1_rounded = broker.round_price_to_tick(symbol, tp1) if broker and tick else _snap_price(tp1, tick, side=signal.action)
-        tp2_rounded = broker.round_price_to_tick(symbol, tp2) if broker and tick else _snap_price(tp2, tick, side=signal.action)
+        ctx = context or {}
+        tick = float(ctx.get("tick_size", 0.0) or 0.0)
+        step = float(ctx.get("step_size", 0.0) or 0.0)
+        min_qty = float(ctx.get("min_qty", 0.0) or 0.0)
+        min_notional = float(ctx.get("min_notional", 0.0) or 0.0)
+        balance_usdt = float(ctx.get("available_balance_usdt", 0.0) or 0.0)
+
+        entry_rounded = _snap_price(entry, tick, side=signal.action)
+        sl_side = "SELL" if signal.direction == "LONG" else "BUY"
+        sl_rounded = _snap_price(sl, tick, side=sl_side)
+        tp1_rounded = _snap_price(tp1, tick, side=signal.action)
+        tp2_rounded = _snap_price(tp2, tick, side=signal.action)
 
         risk_distance = abs(entry_rounded - sl_rounded)
         risk_notional = float(getattr(self._settings, "RISK_NOTIONAL_USDT", 0.0) or 0.0)
@@ -683,15 +830,9 @@ class BreakoutDualTFStrategy(Strategy):
             qty_target = risk_notional / entry_rounded
             qty_target_src = "NOTIONAL"
         else:
-            balance = 0.0
-            try:
-                if broker is not None:
-                    balance = float(broker.get_available_balance_usdt())
-            except Exception:  # pragma: no cover - adapter compatibility
-                balance = 0.0
             risk_pct = float(getattr(self._settings, "RISK_PCT", 0.0) or 0.0)
-            if risk_pct > 0 and balance > 0 and risk_distance > 0:
-                qty_target = (balance * risk_pct) / risk_distance
+            if risk_pct > 0 and balance_usdt > 0 and risk_distance > 0:
+                qty_target = (balance_usdt * risk_pct) / risk_distance
                 qty_target_src = "PCT_RISK"
 
         if step > 0:
@@ -703,6 +844,21 @@ class BreakoutDualTFStrategy(Strategy):
                 required_qty = math.ceil(required_qty / step) * step
             qty_target = max(qty_target, required_qty)
 
+        qty_tp1 = 0.0
+        qty_tp2 = 0.0
+        if qty_target > 0:
+            if step > 0:
+                steps_total = max(int(round(qty_target / step)), 1)
+                steps_tp1 = steps_total // 2
+                qty_tp1 = steps_tp1 * step
+                qty_tp1 = min(qty_tp1, qty_target)
+                qty_tp2 = qty_target - qty_tp1
+            else:
+                qty_tp1 = qty_target / 2
+                qty_tp2 = qty_target - qty_tp1
+            qty_tp1 = round(qty_tp1, 10)
+            qty_tp2 = round(qty_tp2, 10)
+
         orders = {
             "symbol": symbol,
             "side": signal.action,
@@ -711,6 +867,8 @@ class BreakoutDualTFStrategy(Strategy):
             "take_profit_1": tp1_rounded,
             "take_profit_2": tp2_rounded,
             "qty": qty_target,
+            "qty_tp1": qty_tp1,
+            "qty_tp2": qty_tp2,
             "rr": signal.rr,
             "breakeven_on_tp1": True,
             "qty_target_src": qty_target_src,
@@ -731,6 +889,90 @@ class BreakoutDualTFStrategy(Strategy):
             )
         )
         return orders
+
+    # ------------------------------------------------------------------
+    def place_orders(
+        self,
+        orders: dict[str, Any],
+        *,
+        exchange: BrokerPort | None = None,
+    ) -> dict[str, Any]:
+        broker = exchange or self._broker
+        if broker is None:
+            raise ValueError("Exchange not configured for order placement")
+
+        symbol = str(orders.get("symbol") or get_symbol(self._settings))
+        side = str(orders.get("side", "")).upper() or "BUY"
+        qty = float(orders.get("qty", 0.0) or 0.0)
+        entry_price = float(orders.get("entry", 0.0) or 0.0)
+        stop_loss = float(orders.get("stop_loss", 0.0) or 0.0)
+        tp1 = float(orders.get("take_profit_1", 0.0) or 0.0)
+        tp2 = float(orders.get("take_profit_2", 0.0) or 0.0)
+        qty_tp1 = float(orders.get("qty_tp1", 0.0) or 0.0)
+        qty_tp2 = float(orders.get("qty_tp2", 0.0) or 0.0)
+
+        exit_side = "SELL" if side == "BUY" else "BUY"
+        remainder = max(qty - max(qty_tp1, 0.0), 0.0)
+        if qty_tp1 <= 0.0 and qty_tp2 <= 0.0:
+            qty_tp2 = qty
+        else:
+            qty_tp2 = min(max(qty_tp2, 0.0), remainder)
+
+        trade_tag = f"bdtf-{uuid4().hex[:8]}"
+        entry_cid = sanitize_client_order_id(f"{trade_tag}-entry")
+        sl_cid = sanitize_client_order_id(f"{trade_tag}-sl")
+        tp1_cid = sanitize_client_order_id(f"{trade_tag}-tp1")
+        tp2_cid = sanitize_client_order_id(f"{trade_tag}-tp2")
+
+        try:
+            entry_resp = broker.place_entry_limit(
+                symbol,
+                side,
+                entry_price,
+                qty,
+                entry_cid,
+                timeInForce="GTC",
+            )
+        except TypeError:  # pragma: no cover - legacy brokers without timeInForce
+            entry_resp = broker.place_entry_limit(symbol, side, entry_price, qty, entry_cid)
+
+        stop_resp = broker.place_stop_reduce_only(
+            symbol,
+            exit_side,
+            stop_loss,
+            qty,
+            sl_cid,
+        )
+
+        tp_orders: list[dict[str, Any]] = []
+        if qty_tp1 > 0:
+            tp1_resp = broker.place_tp_reduce_only(
+                symbol,
+                exit_side,
+                tp1,
+                qty_tp1,
+                tp1_cid,
+            )
+            tp_orders.append({"clientOrderId": tp1_cid, "order": tp1_resp})
+        if qty_tp2 > 0:
+            tp2_resp = broker.place_tp_reduce_only(
+                symbol,
+                exit_side,
+                tp2,
+                qty_tp2,
+                tp2_cid,
+            )
+            tp_orders.append({"clientOrderId": tp2_cid, "order": tp2_resp})
+
+        placement = {
+            "status": "orders_placed",
+            "symbol": symbol,
+            "side": side,
+            "entry": {"clientOrderId": entry_cid, "order": entry_resp},
+            "stop": {"clientOrderId": sl_cid, "order": stop_resp},
+            "take_profits": tp_orders,
+        }
+        return placement
 
     # ------------------------------------------------------------------
     def generate_signal(self, now: datetime) -> Signal | None:
@@ -781,16 +1023,65 @@ class BreakoutDualTFStrategy(Strategy):
             self._settings = settings
 
         now = now_utc or datetime.utcnow()
+        symbol = get_symbol(self._settings)
         signal = self.generate_signal(now)
         if signal is None or self._last_payload is None:
             return {"status": "no_signal", "strategy": "breakout_dual_tf"}
-        orders = self.compute_orders(self._last_payload)
-        return {
+
+        side = str(signal.action).upper()
+        logger.info(
+            "pre-compute guard %s",
+            {"strategy": "breakout_dual_tf", "symbol": symbol, "side": side},
+        )
+        skip_payload = self._has_active_position_or_orders(symbol, side)
+        if skip_payload is not None:
+            return skip_payload
+
+        broker = self._broker
+        order_context = self._build_order_context(broker, symbol)
+        orders = self.compute_orders(self._last_payload, context=order_context)
+
+        logger.info(
+            "post-compute guard %s",
+            {"strategy": "breakout_dual_tf", "symbol": symbol, "side": side},
+        )
+        skip_payload = self._has_active_position_or_orders(symbol, side)
+        if skip_payload is not None:
+            return skip_payload
+
+        result = {
             "status": "signal",
             "strategy": "breakout_dual_tf",
+            "symbol": symbol,
+            "side": side,
             "signal": signal,
             "orders": orders,
         }
+
+        if broker is None:
+            logger.info(
+                "placing orders %s",
+                {
+                    "strategy": "breakout_dual_tf",
+                    "symbol": symbol,
+                    "side": side,
+                    "status": "skipped_no_exchange",
+                },
+            )
+            return result
+
+        logger.info(
+            "placing orders %s",
+            {
+                "strategy": "breakout_dual_tf",
+                "symbol": symbol,
+                "side": side,
+                "qty": orders.get("qty"),
+            },
+        )
+        placement = self.place_orders(orders, exchange=broker)
+        result["placement"] = placement
+        return result
 
 
 __all__ = ["BreakoutDualTFStrategy", "downscale_interval", "Level"]
