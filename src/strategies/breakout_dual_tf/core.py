@@ -1025,14 +1025,20 @@ class BreakoutDualTFStrategy(Strategy):
         now = now_utc or datetime.utcnow()
         symbol = get_symbol(self._settings)
         signal = self.generate_signal(now)
-        side = str(signal.action).upper()
 
-        skip_payload = self._has_active_position_or_orders(symbol, side)
+        side = "SELL"     
+        skip_payload = self._has_active_position_or_orders(symbol, signal)
         if skip_payload is not None:
             return skip_payload
 
         if signal is None or self._last_payload is None:
             return {"status": "no_signal", "strategy": "breakout_dual_tf"}
+
+        side = str(signal.action).upper()
+
+        skip_payload = self._has_active_position_or_orders(symbol, side)
+        if skip_payload is not None:
+            return skip_payload
 
         logger.info(
             "pre-compute guard %s",
