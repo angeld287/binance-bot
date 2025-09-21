@@ -17,6 +17,7 @@ import json
 import logging
 import math
 
+from common.symbols import normalize_symbol
 from common.utils import sanitize_client_order_id
 from config.settings import get_stop_loss_pct, get_take_profit_pct
 from core.domain.models.Signal import Signal
@@ -267,80 +268,206 @@ class BreakoutDualTFStrategy(Strategy):
         if exchange is None:
             return None
 
+        norm_symbol = normalize_symbol(symbol)
+        broker_symbol = norm_symbol
+        if hasattr(exchange, "normalize_symbol"):
+            try:
+                broker_symbol = exchange.normalize_symbol(norm_symbol)
+            except Exception:  # pragma: no cover - best effort fallback
+                broker_symbol = norm_symbol
+
+        side_norm = str(side or "").strip().upper()
+        side_norm = {"LONG": "BUY", "SHORT": "SELL"}.get(side_norm, side_norm)
+        if side_norm not in {"BUY", "SELL"}:
+            side_norm = "SELL" if side_norm.startswith("S") else "BUY"
+
+        def _coerce_bool(value: Any) -> bool:
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "t", "yes", "y"}
+            return bool(value)
+
         position_amt = 0.0
+        position_side = None
+        position_side_raw: str | None = None
         try:
             info: Any | None
-            if hasattr(exchange, "position_information"):
-                info = exchange.position_information(symbol)
+            if hasattr(exchange, "get_position"):
+                info = exchange.get_position(broker_symbol)
             elif hasattr(exchange, "futures_position_information"):
-                info = exchange.futures_position_information(symbol)
-            elif hasattr(exchange, "get_position"):
-                info = exchange.get_position(symbol)
+                info = exchange.futures_position_information(broker_symbol)
+            elif hasattr(exchange, "position_information"):
+                info = exchange.position_information(broker_symbol)
             else:
                 info = None
 
-            if info is not None:
-                if isinstance(info, list):
-                    info = info[0] if info else {}
-                position_amt = float(info.get("positionAmt", 0.0))
+            if info:
+                entries: Iterable[dict[str, Any]]
+                if isinstance(info, dict):
+                    entries = [info]
+                else:
+                    entries = list(info)
+
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_symbol = normalize_symbol(str(entry.get("symbol", broker_symbol)))
+                    if entry_symbol and entry_symbol != broker_symbol:
+                        continue
+                    raw_amt = (
+                        entry.get("positionAmt")
+                        or entry.get("position_amt")
+                        or entry.get("position_amount")
+                        or entry.get("qty")
+                        or entry.get("quantity")
+                    )
+                    try:
+                        amt = float(raw_amt)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isclose(amt, 0.0, abs_tol=1e-12):
+                        continue
+                    entry_side_raw = str(entry.get("positionSide", "")).upper()
+                    if entry_side_raw in {"LONG", "SHORT"}:
+                        entry_side = "BUY" if entry_side_raw == "LONG" else "SELL"
+                    elif entry_side_raw == "BOTH":
+                        entry_side = "BUY" if amt > 0 else "SELL"
+                    elif entry_side_raw:
+                        entry_side = entry_side_raw
+                        if entry_side not in {"BUY", "SELL"}:
+                            entry_side = "BUY" if amt > 0 else "SELL"
+                    else:
+                        entry_side = "BUY" if amt > 0 else "SELL"
+
+                    if entry_side == side_norm:
+                        position_amt = amt
+                        position_side = entry_side
+                        position_side_raw = entry_side_raw or entry_side
+                        break
         except Exception as err:  # pragma: no cover - defensive
             logger.warning(
                 "positioncheck.error %s",
                 {
                     "strategy": "breakout_dual_tf",
-                    "symbol": symbol,
-                    "side": side,
+                    "symbol": broker_symbol,
+                    "side": side_norm,
                     "error": str(err),
                 },
             )
 
-        if abs(position_amt) > 0:
+        if position_side is not None and not math.isclose(position_amt, 0.0, abs_tol=1e-12):
             payload = {
                 "status": "skipped_existing_position",
                 "strategy": "breakout_dual_tf",
-                "symbol": symbol,
-                "side": side,
+                "symbol": broker_symbol,
+                "side": position_side,
                 "positionAmt": position_amt,
             }
+            if position_side_raw and position_side_raw != position_side:
+                payload["positionSide"] = position_side_raw
+            if side_norm != position_side:
+                payload["requested_side"] = side_norm
             logger.info(json.dumps(payload))
             return payload
 
-        open_orders: list[Any] = []
-        try:
-            open_orders = exchange.open_orders(symbol)
-        except Exception as err:  # pragma: no cover - defensive
-            logger.warning(
-                "ordercheck.error %s",
-                {
-                    "strategy": "breakout_dual_tf",
-                    "symbol": symbol,
-                    "side": side,
-                    "error": str(err),
-                },
-            )
+        open_orders: Iterable[Any] = []
+        fetch_methods = (
+            "open_orders_perpetual",
+            "futures_open_orders",
+            "futures_get_open_orders",
+            "open_orders",
+        )
+        for attr in fetch_methods:
+            method = getattr(exchange, attr, None)
+            if not callable(method):
+                continue
+            try:
+                open_orders = method(broker_symbol)
+            except TypeError:
+                open_orders = method(symbol=broker_symbol)
+            except Exception as err:  # pragma: no cover - defensive
+                logger.warning(
+                    "ordercheck.error %s",
+                    {
+                        "strategy": "breakout_dual_tf",
+                        "symbol": broker_symbol,
+                        "side": side_norm,
+                        "endpoint": attr,
+                        "error": str(err),
+                    },
+                )
+                continue
+            else:
+                break
+        else:
             open_orders = []
 
-        working_orders = []
-        side_up = side.upper()
-        for order in open_orders:
-            status = str(order.get("status", "")).upper()
-            if status not in {"NEW", "PARTIALLY_FILLED", "PENDING_NEW"}:
+        active_statuses = {"NEW", "PARTIALLY_FILLED", "PENDING_NEW", "ACCEPTED", "WORKING"}
+        working_orders: list[Any] = []
+        for order in open_orders or []:
+            if not isinstance(order, dict):
                 continue
-            order_side = str(order.get("side", "")).upper()
-            if order_side != side_up:
+            status = str(
+                order.get("status")
+                or order.get("orderStatus")
+                or order.get("state")
+                or ""
+            ).upper()
+            if status not in active_statuses:
                 continue
-            if bool(order.get("reduceOnly")):
+            order_side = str(order.get("side") or "").upper()
+            order_side = {"LONG": "BUY", "SHORT": "SELL"}.get(order_side, order_side)
+            if not order_side and order.get("positionSide"):
+                pos_side = str(order.get("positionSide") or "").upper()
+                order_side = "BUY" if pos_side == "LONG" else "SELL" if pos_side == "SHORT" else order_side
+            if order_side != side_norm:
                 continue
+
+            reduce_only = _coerce_bool(order.get("reduceOnly")) or _coerce_bool(
+                order.get("reduce_only")
+            )
+            if reduce_only:
+                continue
+            if _coerce_bool(order.get("closePosition")):
+                continue
+
+            client_id = ""
+            for key in (
+                "clientOrderId",
+                "client_order_id",
+                "origClientOrderId",
+                "orig_client_order_id",
+                "clientId",
+                "client_id",
+            ):
+                value = order.get(key)
+                if value:
+                    client_id = str(value)
+                    break
+            if client_id and not client_id.lower().startswith("bdtf-"):
+                continue
+
             working_orders.append(order)
 
         if working_orders:
             payload = {
                 "status": "skipped_existing_entry_orders",
                 "strategy": "breakout_dual_tf",
-                "symbol": symbol,
-                "side": side,
-                "open_orders_total": len(working_orders),
+                "symbol": broker_symbol,
+                "side": side_norm,
+                "count": len(working_orders),
             }
+            payload["client_order_ids"] = [
+                str(
+                    order.get("clientOrderId")
+                    or order.get("client_order_id")
+                    or order.get("origClientOrderId")
+                    or order.get("orig_client_order_id")
+                    or order.get("clientId")
+                    or order.get("client_id")
+                    or ""
+                )
+                for order in working_orders
+            ]
             logger.info(json.dumps(payload))
             return payload
 
