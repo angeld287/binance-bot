@@ -268,6 +268,33 @@ class BreakoutDualTFStrategy(Strategy):
         if exchange is None:
             return None
 
+        settings_obj = getattr(self, "_settings", None)
+
+        def _get_setting(key: str, default: Any | None = None) -> Any:
+            if settings_obj is None:
+                return default
+            getter = getattr(settings_obj, "get", None)
+            if callable(getter):
+                try:
+                    return getter(key, default)
+                except TypeError:  # pragma: no cover - defensive fallback
+                    return getter(key)
+            return getattr(settings_obj, key, default)
+
+        debug_raw = _get_setting("DEBUG_MODE")
+        debug_mode = str(debug_raw) in {"1", "true", "TRUE", "True"}
+        log = getattr(self, "_logger", logger)
+        if debug_mode:
+            log.debug(
+                "bdtf.poscheck.entry %s",
+                {
+                    "symbol_in": symbol,
+                    "side_in": side,
+                    "testnet": _get_setting("BINANCE_TESTNET"),
+                    "trading_mode": _get_setting("TRADING_MODE"),
+                },
+            )
+
         norm_symbol = normalize_symbol(symbol)
         broker_symbol = norm_symbol
         if hasattr(exchange, "normalize_symbol"):
@@ -275,6 +302,9 @@ class BreakoutDualTFStrategy(Strategy):
                 broker_symbol = exchange.normalize_symbol(norm_symbol)
             except Exception:  # pragma: no cover - best effort fallback
                 broker_symbol = norm_symbol
+
+        if debug_mode:
+            log.debug("bdtf.poscheck.symbol %s", {"symbol_norm": broker_symbol})
 
         side_norm = str(side or "").strip().upper()
         side_norm = {"LONG": "BUY", "SHORT": "SELL"}.get(side_norm, side_norm)
@@ -289,6 +319,9 @@ class BreakoutDualTFStrategy(Strategy):
         position_amt = 0.0
         position_side = None
         position_side_raw: str | None = None
+        position_entry_price: float | None = None
+        matched_entry_orders = 0
+        has_position = False
         try:
             info: Any | None
             if hasattr(exchange, "get_position"):
@@ -326,6 +359,16 @@ class BreakoutDualTFStrategy(Strategy):
                         continue
                     if math.isclose(amt, 0.0, abs_tol=1e-12):
                         continue
+                    raw_entry_price = (
+                        entry.get("entryPrice")
+                        or entry.get("avgEntryPrice")
+                        or entry.get("avgPrice")
+                        or entry.get("price")
+                    )
+                    try:
+                        entry_price = float(raw_entry_price)
+                    except (TypeError, ValueError):
+                        entry_price = None
                     entry_side_raw = str(entry.get("positionSide", "")).upper()
                     if entry_side_raw in {"LONG", "SHORT"}:
                         entry_side = "BUY" if entry_side_raw == "LONG" else "SELL"
@@ -342,6 +385,7 @@ class BreakoutDualTFStrategy(Strategy):
                         position_amt = amt
                         position_side = entry_side
                         position_side_raw = entry_side_raw or entry_side
+                        position_entry_price = entry_price
                         break
         except Exception as err:  # pragma: no cover - defensive
             logger.warning(
@@ -354,7 +398,17 @@ class BreakoutDualTFStrategy(Strategy):
                 },
             )
 
+        if debug_mode:
+            log.debug(
+                "bdtf.poscheck.position %s",
+                {
+                    "position_amt": position_amt,
+                    "entryPrice": position_entry_price,
+                },
+            )
+
         if position_side is not None and not math.isclose(position_amt, 0.0, abs_tol=1e-12):
+            has_position = True
             payload = {
                 "status": "skipped_existing_position",
                 "strategy": "breakout_dual_tf",
@@ -367,69 +421,84 @@ class BreakoutDualTFStrategy(Strategy):
             if side_norm != position_side:
                 payload["requested_side"] = side_norm
             logger.info(json.dumps(payload))
-            return payload
-
-        open_orders: Iterable[Any] = []
-        fetch_methods = (
-            "open_orders_perpetual",
-            "futures_open_orders",
-            "futures_get_open_orders",
-            "open_orders",
-        )
-        for attr in fetch_methods:
-            method = getattr(exchange, attr, None)
-            if not callable(method):
-                continue
-            try:
-                open_orders = method(broker_symbol)
-            except TypeError:
-                open_orders = method(symbol=broker_symbol)
-            except Exception as err:  # pragma: no cover - defensive
-                logger.warning(
-                    "ordercheck.error %s",
+            if debug_mode:
+                log.debug(
+                    "bdtf.poscheck.summary %s",
                     {
-                        "strategy": "breakout_dual_tf",
-                        "symbol": broker_symbol,
-                        "side": side_norm,
-                        "endpoint": attr,
-                        "error": str(err),
+                        "matched_entry_orders": matched_entry_orders,
+                        "has_position": has_position,
+                        "result": "skip_position",
                     },
                 )
-                continue
+            return payload
+
+        cache_key = (broker_symbol, side_norm)
+        cache: dict[tuple[str, str], tuple[float, list[Any]]] | None = getattr(
+            self, "_order_check_cache", None
+        )
+        now_ts = datetime.utcnow().timestamp()
+        open_orders_list: list[Any] | None = None
+        if cache:
+            cached_entry = cache.get(cache_key)
+            if cached_entry:
+                cached_ts, cached_orders = cached_entry
+                if now_ts - cached_ts <= 1.0:
+                    open_orders_list = list(cached_orders)
+        if open_orders_list is None:
+            open_orders: Iterable[Any] = []
+            fetch_methods = (
+                "open_orders_perpetual",
+                "futures_open_orders",
+                "futures_get_open_orders",
+                "open_orders",
+            )
+            for attr in fetch_methods:
+                method = getattr(exchange, attr, None)
+                if not callable(method):
+                    continue
+                try:
+                    open_orders = method(broker_symbol)
+                except TypeError:
+                    open_orders = method(symbol=broker_symbol)
+                except Exception as err:  # pragma: no cover - defensive
+                    logger.warning(
+                        "ordercheck.error %s",
+                        {
+                            "strategy": "breakout_dual_tf",
+                            "symbol": broker_symbol,
+                            "side": side_norm,
+                            "endpoint": attr,
+                            "error": str(err),
+                        },
+                    )
+                    continue
+                else:
+                    break
             else:
-                break
+                open_orders = []
+            open_orders_list = list(open_orders or [])
+            cache = cache or {}
+            cache[cache_key] = (now_ts, list(open_orders_list))
+            setattr(self, "_order_check_cache", cache)
         else:
-            open_orders = []
+            if debug_mode:
+                log.debug(
+                    "bdtf.poscheck.cache %s",
+                    {"source": "reuse", "symbol": broker_symbol, "side": side_norm},
+                )
 
         active_statuses = {"NEW", "PARTIALLY_FILLED", "PENDING_NEW", "ACCEPTED", "WORKING"}
         working_orders: list[Any] = []
-        for order in open_orders or []:
+        for order in open_orders_list or []:
             if not isinstance(order, dict):
                 continue
-            status = str(
-                order.get("status")
-                or order.get("orderStatus")
-                or order.get("state")
+            order_id_val = (
+                order.get("orderId")
+                or order.get("order_id")
+                or order.get("id")
                 or ""
-            ).upper()
-            if status not in active_statuses:
-                continue
-            order_side = str(order.get("side") or "").upper()
-            order_side = {"LONG": "BUY", "SHORT": "SELL"}.get(order_side, order_side)
-            if not order_side and order.get("positionSide"):
-                pos_side = str(order.get("positionSide") or "").upper()
-                order_side = "BUY" if pos_side == "LONG" else "SELL" if pos_side == "SHORT" else order_side
-            if order_side != side_norm:
-                continue
-
-            reduce_only = _coerce_bool(order.get("reduceOnly")) or _coerce_bool(
-                order.get("reduce_only")
             )
-            if reduce_only:
-                continue
-            if _coerce_bool(order.get("closePosition")):
-                continue
-
+            order_id = str(order_id_val) if order_id_val is not None else ""
             client_id = ""
             for key in (
                 "clientOrderId",
@@ -443,11 +512,89 @@ class BreakoutDualTFStrategy(Strategy):
                 if value:
                     client_id = str(value)
                     break
+            status = str(
+                order.get("status")
+                or order.get("orderStatus")
+                or order.get("state")
+                or ""
+            ).upper()
+            order_side = str(order.get("side") or "").upper()
+            order_side = {"LONG": "BUY", "SHORT": "SELL"}.get(order_side, order_side)
+            if not order_side and order.get("positionSide"):
+                pos_side = str(order.get("positionSide") or "").upper()
+                order_side = "BUY" if pos_side == "LONG" else "SELL" if pos_side == "SHORT" else order_side
+            reduce_only_flag = _coerce_bool(order.get("reduceOnly")) or _coerce_bool(
+                order.get("reduce_only")
+            )
+            close_position_flag = _coerce_bool(order.get("closePosition"))
+            effective_reduce_only = reduce_only_flag or close_position_flag
+            qty_val = (
+                order.get("origQty")
+                or order.get("orig_qty")
+                or order.get("quantity")
+                or order.get("qty")
+            )
+            if debug_mode:
+                log.debug(
+                    "bdtf.poscheck.order %s",
+                    {
+                        "id": order_id,
+                        "clientId": client_id,
+                        "side": order_side,
+                        "status": status,
+                        "price": order.get("price"),
+                        "qty": qty_val,
+                        "reduceOnly": effective_reduce_only,
+                    },
+                )
+            if status not in active_statuses:
+                if debug_mode:
+                    log.debug(
+                        "bdtf.poscheck.filter %s",
+                        {"filter": "status_invalid", "orderId": order_id},
+                    )
+                continue
+            order_symbol_raw = (
+                order.get("symbol")
+                or order.get("symbolNormalized")
+                or order.get("s")
+                or ""
+            )
+            order_symbol_norm = (
+                normalize_symbol(str(order_symbol_raw)) if order_symbol_raw else ""
+            )
+            if order_symbol_norm and order_symbol_norm != broker_symbol:
+                if debug_mode:
+                    log.debug(
+                        "bdtf.poscheck.filter %s",
+                        {"filter": "symbol_mismatch", "orderId": order_id},
+                    )
+                continue
+            if order_side != side_norm:
+                if debug_mode:
+                    log.debug(
+                        "bdtf.poscheck.filter %s",
+                        {"filter": "side_mismatch", "orderId": order_id},
+                    )
+                continue
+            if effective_reduce_only:
+                if debug_mode:
+                    log.debug(
+                        "bdtf.poscheck.filter %s",
+                        {"filter": "reduce_only", "orderId": order_id},
+                    )
+                continue
             if client_id and not client_id.lower().startswith("bdtf-"):
+                if debug_mode:
+                    log.debug(
+                        "bdtf.poscheck.filter %s",
+                        {"filter": "prefix_mismatch", "orderId": order_id},
+                    )
                 continue
 
             working_orders.append(order)
 
+        matched_entry_orders = len(working_orders)
         if working_orders:
             payload = {
                 "status": "skipped_existing_entry_orders",
@@ -469,8 +616,26 @@ class BreakoutDualTFStrategy(Strategy):
                 for order in working_orders
             ]
             logger.info(json.dumps(payload))
+            if debug_mode:
+                log.debug(
+                    "bdtf.poscheck.summary %s",
+                    {
+                        "matched_entry_orders": matched_entry_orders,
+                        "has_position": has_position,
+                        "result": "skip_entry_orders",
+                    },
+                )
             return payload
 
+        if debug_mode:
+            log.debug(
+                "bdtf.poscheck.summary %s",
+                {
+                    "matched_entry_orders": matched_entry_orders,
+                    "has_position": has_position,
+                    "result": "none",
+                },
+            )
         return None
 
     # ------------------------------------------------------------------
