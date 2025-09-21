@@ -1027,7 +1027,7 @@ class BreakoutDualTFStrategy(Strategy):
         signal = self.generate_signal(now)
 
         side = "SELL"     
-        skip_payload = self._has_active_position_or_orders(symbol, signal)
+        skip_payload = self._has_active_position_or_orders(symbol, side)
         if skip_payload is not None:
             return skip_payload
 
