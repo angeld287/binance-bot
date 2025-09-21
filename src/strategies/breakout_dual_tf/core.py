@@ -1034,6 +1034,8 @@ class BreakoutDualTFStrategy(Strategy):
             {"strategy": "breakout_dual_tf", "symbol": symbol, "side": side},
         )
         skip_payload = self._has_active_position_or_orders(symbol, side)
+
+        logger.info("skip_payload %s", skip_payload)
         if skip_payload is not None:
             return skip_payload
 
