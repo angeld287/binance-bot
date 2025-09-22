@@ -808,8 +808,8 @@ class BreakoutDualTFStrategy(Strategy):
         retest_timeout = int(self._config["RETEST_TIMEOUT"])
 
         for level in sorted_levels:
-            direction = "LONG" if level.level_type == "R" else "SHORT"
-            action = "BUY" if direction == "LONG" else "SELL"
+            direction = "SHORT" if level.level_type == "R" else "LONG"
+            action = "SELL" if direction == "SHORT" else "BUY"
             k_atr = float(self._config["K_ATR"])
             breakout_ok = close >= level.price + k_atr * atr_exec if direction == "LONG" else close <= level.price - k_atr * atr_exec
             ema_ok = ema_fast > ema_slow if direction == "LONG" else ema_fast < ema_slow
