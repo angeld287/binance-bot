@@ -8,12 +8,12 @@ starting point for a more complete implementation.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from math import ceil, floor
+from math import ceil, floor, isclose
 from typing import Any, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 import json
 import logging
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 from core.ports.settings import get_symbol
 
@@ -57,6 +57,7 @@ def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: 
     """
 
     settings = kwargs.get("settings")
+    include_candidates = bool(kwargs.get("include_candidates", False))
     if not candles_m1:
         return {}
 
@@ -126,14 +127,20 @@ def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: 
             candidates.append({"type": "S", "price": l})
 
     if not candidates:
-        return {
-            "S": _round_to_tick(price_now - microbuffer),
-            "R": _round_to_tick(price_now + microbuffer),
+        S_fallback = _round_to_tick(price_now - microbuffer)
+        R_fallback = _round_to_tick(price_now + microbuffer)
+        result: dict[str, Any] = {
+            "S": S_fallback,
+            "R": R_fallback,
             "atr1m": atr1m,
             "atr15m": atr15m,
             "microbuffer": _round_to_tick(microbuffer),
             "buffer_sl": _round_to_tick(buffer_sl),
         }
+        if include_candidates:
+            result["supports_candidates"] = [S_fallback]
+            result["resistances_candidates"] = [R_fallback]
+        return result
 
     last15_high = float(candles_15m[-1][2]) if candles_15m else highs[-1]
     last15_low = float(candles_15m[-1][3]) if candles_15m else lows[-1]
@@ -169,6 +176,9 @@ def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: 
     supports.sort(key=lambda c: c["score"], reverse=True)
     resistances.sort(key=lambda c: c["score"], reverse=True)
 
+    supports_sorted = sorted({float(c["price"]) for c in supports}, reverse=True)
+    resistances_sorted = sorted({float(c["price"]) for c in resistances})
+
     atr_min = 0.5 * atr15m
     atr_max = 1.5 * atr15m
 
@@ -190,7 +200,7 @@ def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: 
     microbuffer = _round_to_tick(microbuffer)
     buffer_sl = _round_to_tick(buffer_sl)
 
-    return {
+    result = {
         "S": S,
         "R": R,
         "atr1m": atr1m,
@@ -198,6 +208,18 @@ def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: 
         "microbuffer": microbuffer,
         "buffer_sl": buffer_sl,
     }
+    if include_candidates:
+        result["supports_candidates"] = supports_sorted or [S]
+        result["resistances_candidates"] = resistances_sorted or [R]
+        result["supports_candidates"] = [
+            _round_to_tick(val, tick=float(getattr(settings, "TICK_SIZE", 0.0)) if settings else 0.0)
+            for val in result["supports_candidates"]
+        ]
+        result["resistances_candidates"] = [
+            _round_to_tick(val, tick=float(getattr(settings, "TICK_SIZE", 0.0)) if settings else 0.0)
+            for val in result["resistances_candidates"]
+        ]
+    return result
 
 def _round_to_tick(value: float, tick: float) -> float:
     """Round ``value`` to the closest ``tick`` size."""
@@ -662,6 +684,16 @@ def do_tick(
     cid_sl = f"{trade_id}:sl"
     cid_tp = f"{trade_id}:tp"
 
+    state: dict[str, Any] = {}
+    if isinstance(event, Mapping):
+        state_val = event.get("state")
+        if isinstance(state_val, Mapping):
+            state = dict(state_val)
+    else:
+        state_attr = getattr(event, "state", None)
+        if isinstance(state_attr, Mapping):
+            state = dict(state_attr)
+
     def _log(
         status: str,
         *,
@@ -717,6 +749,7 @@ def do_tick(
 
     # Helper executing the bracket placement once a side filled
     def _place_bracket(filled_cid: str, info: Mapping[str, Any]) -> dict:
+        nonlocal state, open_orders
         is_long = filled_cid == cid_buy
         side = "LONG" if is_long else "SHORT"
 
@@ -726,14 +759,69 @@ def do_tick(
         except Exception:
             entry = 0.0
 
-        # Cancel opposite order if still active
+        def _to_float(value: Any) -> float | None:
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except Exception:  # pragma: no cover - casting failures
+                return None
+
+        def _to_float_list(values: Any) -> list[float]:
+            if isinstance(values, (list, tuple, set)):
+                out: list[float] = []
+                for item in values:
+                    num = _to_float(item)
+                    if num is not None:
+                        out.append(num)
+                return out
+            return []
+
+        if not isinstance(state, dict):
+            state = dict(state) if isinstance(state, Mapping) else {}
+
+        supports_candidates_local = _to_float_list(state.get("supports_candidates"))
+        resistances_candidates_local = _to_float_list(state.get("resistances_candidates"))
+
         other_cid = cid_sell if is_long else cid_buy
+        opposite_open = next((o for o in open_orders if o.get("clientOrderId") == other_cid), None)
+        opposite_info = opposite_open or _fetch(other_cid)
+        opposite_price = None
+        if opposite_info:
+            opposite_price = _to_float(
+                opposite_info.get("price")
+                or opposite_info.get("avgPrice")
+                or opposite_info.get("stopPrice")
+            )
+
         try:
             exchange.cancel_order(symbol, clientOrderId=other_cid)
         except Exception:
             pass
 
-        # Extract levels from the event
+        entry_state_raw = state.get("entry")
+        entry_state = dict(entry_state_raw) if isinstance(entry_state_raw, Mapping) else {}
+        entry_state["fill_price"] = entry
+        state["entry"] = entry_state
+        state["side"] = side
+
+        opposite_state_raw = state.get("opposite_canceled")
+        opposite_state = dict(opposite_state_raw) if isinstance(opposite_state_raw, Mapping) else {}
+        opposite_state.setdefault("side", "SHORT" if is_long else "LONG")
+        opposite_state["clientOrderId"] = other_cid
+        if opposite_price is not None:
+            opposite_state["price"] = opposite_price
+        state["opposite_canceled"] = opposite_state
+
+        def _update_candidates_from_levels(levels: Mapping[str, Any]) -> None:
+            nonlocal supports_candidates_local, resistances_candidates_local
+            sup = _to_float_list(levels.get("supports_candidates"))
+            res = _to_float_list(levels.get("resistances_candidates"))
+            if sup:
+                supports_candidates_local = sup
+            if res:
+                resistances_candidates_local = res
+
         def _ev(name: str) -> float | None:
             if isinstance(event, Mapping):
                 val = event.get(name)
@@ -752,31 +840,50 @@ def do_tick(
         tp_policy = None
         if isinstance(event, Mapping):
             tp_policy = event.get("tp_policy")
+            _update_candidates_from_levels(event)
         else:
             tp_policy = getattr(event, "tp_policy", None)
 
-        # Attempt to derive missing levels from ``market_data``
-        if S is None or R is None:
-            candles = None
+        def _load_levels_with_candidates() -> Mapping[str, Any]:
+            candles_local: Sequence[Sequence[float]] | None = None
             lookback = getattr(settings, "MAX_LOOKBACK_MIN", 60)
             try:
                 if market_data and hasattr(market_data, "fetch_ohlcv"):
-                    candles = market_data.fetch_ohlcv(symbol, timeframe="1m", limit=lookback)
+                    candles_local = market_data.fetch_ohlcv(symbol, timeframe="1m", limit=lookback)
                 elif market_data and hasattr(market_data, "get_klines"):
-                    candles = market_data.get_klines(symbol=symbol, interval="1m", lookback_min=lookback)
+                    candles_local = market_data.get_klines(symbol=symbol, interval="1m", lookback_min=lookback)
             except Exception:  # pragma: no cover - network failures
-                candles = None
-            if candles:
-                levels = compute_levels(candles, settings=settings) or {}
-                S = levels.get("S", S)
-                R = levels.get("R", R)
-                micro = levels.get("microbuffer", micro)
-                buffer_sl = levels.get("buffer_sl", buffer_sl)
-                atr1m = levels.get("atr1m", atr1m)
+                candles_local = None
+            if candles_local:
+                levels_local = compute_levels(
+                    candles_local, settings=settings, include_candidates=True
+                ) or {}
+                _update_candidates_from_levels(levels_local)
+                return levels_local
+            return {}
+
+        if S is None or R is None:
+            levels = _load_levels_with_candidates()
+            if levels:
+                S_val = _to_float(levels.get("S"))
+                R_val = _to_float(levels.get("R"))
+                micro_val = _to_float(levels.get("microbuffer"))
+                buffer_val = _to_float(levels.get("buffer_sl"))
+                atr_val = _to_float(levels.get("atr1m"))
+                if S_val is not None:
+                    S = S_val
+                if R_val is not None:
+                    R = R_val
+                if micro_val is not None:
+                    micro = micro_val
+                if buffer_val is not None:
+                    buffer_sl = buffer_val
+                if atr_val is not None:
+                    atr1m = atr_val
 
         if S is None or R is None:
             logger.info(json.dumps({"action": "skip_sl_missing_S/R"}))
-            return {"status": "done", "reason": "skip_sl_missing_S/R"}
+            return {"status": "done", "reason": "skip_sl_missing_S/R", "state": state}
 
         bracket = build_bracket(
             "BUY" if is_long else "SELL",
@@ -789,7 +896,7 @@ def do_tick(
             tp_policy=tp_policy,
             settings=settings,
         )
-        tp = float(bracket.get("tp", 0.0))
+        tp_default = float(bracket.get("tp", 0.0))
 
         # ------------------------------------------------------------------
         # Buffer rules and guards
@@ -819,13 +926,13 @@ def do_tick(
         # Coherence guards before touching exchange
         if sl_prev is None or sl_prev <= 0:
             logger.info(json.dumps({"action": "skip_sl_invalid"}))
-            return {"status": "done", "reason": "skip_sl_invalid"}
+            return {"status": "done", "reason": "skip_sl_invalid", "state": state}
         if is_long and not sl_prev < entry:
             logger.info(json.dumps({"action": "skip_sl_side_mismatch"}))
-            return {"status": "done", "reason": "skip_sl_side_mismatch"}
+            return {"status": "done", "reason": "skip_sl_side_mismatch", "state": state}
         if not is_long and not sl_prev > entry:
             logger.info(json.dumps({"action": "skip_sl_side_mismatch"}))
-            return {"status": "done", "reason": "skip_sl_side_mismatch"}
+            return {"status": "done", "reason": "skip_sl_side_mismatch", "state": state}
 
         # ``sl_prev`` is the stop before precision snapping; reuse for risk calcs
         sl = sl_prev
@@ -894,7 +1001,7 @@ def do_tick(
             sl_final = sl_prev
         if sl_final <= 0:
             logger.info(json.dumps({"action": "skip_sl_after_snap_zero"}))
-            return {"status": "done", "reason": "skip_sl_after_snap_zero"}
+            return {"status": "done", "reason": "skip_sl_after_snap_zero", "state": state}
         if hasattr(exchange, "round_qty_to_step"):
             qty_final = exchange.round_qty_to_step(symbol_n, qty_prev)
         else:
@@ -914,6 +1021,123 @@ def do_tick(
                 }
             )
         )
+
+        def _valid_for_side(price: float | None) -> bool:
+            if price is None:
+                return False
+            return price > entry if is_long else price < entry
+
+        use_opposite_flag = getattr(settings, "TP_USE_OPPOSITE_CANCELED_FIRST", True)
+        if isinstance(use_opposite_flag, str):
+            use_opposite_first = use_opposite_flag.strip().lower() not in {"0", "false", "no"}
+        else:
+            use_opposite_first = bool(use_opposite_flag) if use_opposite_flag is not None else True
+
+        tp_source: str | None = None
+        tp_before_round: float | None = None
+
+        opp_state_val = state.get("opposite_canceled")
+        opp_state_price = _to_float(opp_state_val.get("price")) if isinstance(opp_state_val, Mapping) else None
+
+        candidate_opposite = None
+        if use_opposite_first:
+            if _valid_for_side(opposite_price):
+                candidate_opposite = opposite_price
+            elif _valid_for_side(opp_state_price):
+                candidate_opposite = opp_state_price
+        if candidate_opposite is not None:
+            tp_before_round = candidate_opposite
+            tp_source = "opposite_cancelled"
+
+        if tp_before_round is None:
+            if is_long:
+                candidate = _to_float(R)
+                if _valid_for_side(candidate):
+                    tp_before_round = candidate
+                    tp_source = "nearest_R"
+                else:
+                    if not resistances_candidates_local:
+                        levels_extra = _load_levels_with_candidates()
+                        candidate_extra = _to_float(levels_extra.get("R")) if levels_extra else None
+                        if _valid_for_side(candidate_extra):
+                            tp_before_round = candidate_extra
+                            tp_source = "nearest_R"
+                    if tp_before_round is None:
+                        if not resistances_candidates_local and candidate is not None:
+                            resistances_candidates_local = [candidate]
+                        candidate_from_list = next(
+                            (lvl for lvl in resistances_candidates_local if _valid_for_side(lvl)),
+                            None,
+                        )
+                        if candidate_from_list is not None:
+                            tp_before_round = candidate_from_list
+                            tp_source = "nearest_R"
+            else:
+                candidate = _to_float(S)
+                if _valid_for_side(candidate):
+                    tp_before_round = candidate
+                    tp_source = "nearest_S"
+                else:
+                    if not supports_candidates_local:
+                        levels_extra = _load_levels_with_candidates()
+                        candidate_extra = _to_float(levels_extra.get("S")) if levels_extra else None
+                        if _valid_for_side(candidate_extra):
+                            tp_before_round = candidate_extra
+                            tp_source = "nearest_S"
+                    if tp_before_round is None:
+                        if not supports_candidates_local and candidate is not None:
+                            supports_candidates_local = [candidate]
+                        candidate_from_list = next(
+                            (lvl for lvl in supports_candidates_local if _valid_for_side(lvl)),
+                            None,
+                        )
+                        if candidate_from_list is not None:
+                            tp_before_round = candidate_from_list
+                            tp_source = "nearest_S"
+
+        if tp_before_round is None:
+            logger.warning(
+                json.dumps(
+                    {
+                        "action": "tp_missing_levels",
+                        "side": side,
+                        "entry": entry,
+                        "reason": "no_directional_level",
+                    }
+                )
+            )
+            tp_source = "fallback_bracket"
+            tp_before_round = tp_default if tp_default else entry
+
+        def _snap_price_to_tick(value: float, tick_size: float, long: bool) -> float:
+            if not tick_size:
+                return value
+            quant = Decimal(str(tick_size))
+            dec_value = Decimal(str(value))
+            rounding = ROUND_FLOOR if long else ROUND_CEILING
+            snapped = (dec_value / quant).to_integral_value(rounding=rounding) * quant
+            return float(snapped)
+
+        tp = _snap_price_to_tick(tp_before_round, tick, is_long)
+
+        logger.info(
+            json.dumps(
+                {
+                    "action": "tp_decision",
+                    "tp.source": tp_source,
+                    "tp.before_round": tp_before_round,
+                    "tp.after_round": tp,
+                    "tickSize": tick,
+                    "side": side,
+                    "entry": entry,
+                }
+            )
+        )
+
+        if supports_candidates_local:
+            state["supports_candidates"] = supports_candidates_local
+        if resistances_candidates_local:
+            state["resistances_candidates"] = resistances_candidates_local
 
         exit_side = "SELL" if is_long else "BUY"
 
@@ -956,30 +1180,50 @@ def do_tick(
             logger.error("Failed to place SL order: %s", exc)
             raise
 
-        if hasattr(exchange, "place_tp_reduce_only"):
+        existing_tp = next((o for o in open_orders if o.get("clientOrderId") == cid_tp), None)
+        place_tp_order = True
+        if existing_tp:
             try:
-                exchange.place_tp_reduce_only(symbol, exit_side, tp, qty_final, cid_tp)
-            except Exception as exc:
-                logger.error("Failed to place TP order: %s", exc)
-                raise
-        elif hasattr(exchange, "place_entry_limit"):
-            try:  # pragma: no cover - generic fallback
-                exchange.place_entry_limit(
-                    symbol,
-                    exit_side,
-                    tp,
-                    qty_final,
-                    cid_tp,
-                    timeInForce="GTC",
-                    reduceOnly=True,
+                current_tp_price = float(
+                    existing_tp.get("price") or existing_tp.get("stopPrice") or 0.0
                 )
-            except Exception as exc:
-                logger.error("Failed to place TP order: %s", exc)
-                raise
-        else:
-            err = "exchange adapter lacks place_tp_reduce_only/place_entry_limit"
-            logger.error(err)
-            raise AttributeError(err)
+            except Exception:
+                current_tp_price = 0.0
+            tolerance = tick if tick else 1e-9
+            if isclose(current_tp_price, tp, rel_tol=0.0, abs_tol=tolerance / 2):
+                place_tp_order = False
+            else:
+                try:
+                    exchange.cancel_order(symbol, clientOrderId=cid_tp)
+                except Exception:
+                    pass
+
+        if place_tp_order:
+            if hasattr(exchange, "place_tp_reduce_only"):
+                try:
+                    exchange.place_tp_reduce_only(symbol, exit_side, tp, qty_final, cid_tp)
+                except Exception as exc:
+                    logger.error("Failed to place TP order: %s", exc)
+                    raise
+            elif hasattr(exchange, "place_entry_limit"):
+                try:  # pragma: no cover - generic fallback
+                    exchange.place_entry_limit(
+                        symbol,
+                        exit_side,
+                        tp,
+                        qty_final,
+                        cid_tp,
+                        timeInForce="GTC",
+                        reduceOnly=True,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to place TP order: %s", exc)
+                    raise
+            else:
+                err = "exchange adapter lacks place_tp_reduce_only/place_entry_limit"
+                logger.error(err)
+                raise AttributeError(err)
+
         _log(
             "bracket_placed",
             side=side,
@@ -996,6 +1240,7 @@ def do_tick(
             "entry": entry,
             "sl": sl,
             "tp": tp,
+            "state": state,
         }
 
     # ------------------------------------------------------------------
