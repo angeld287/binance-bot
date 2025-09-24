@@ -661,6 +661,10 @@ def do_tick(
         return {}
 
     symbol = get_symbol(settings)
+    try:
+        sl_enabled = bool(settings.get_bool("SL_ENABLED", default=False))
+    except AttributeError:
+        sl_enabled = bool(getattr(settings, "SL_ENABLED", False))
 
     # ------------------------------------------------------------------
     # Build identifiers and timing helpers
@@ -752,12 +756,15 @@ def do_tick(
         nonlocal state, open_orders
         is_long = filled_cid == cid_buy
         side = "LONG" if is_long else "SHORT"
+        sl_status = "skipped" if not sl_enabled else "pending"
 
         entry = 0.0
         try:
             entry = float(info.get("avgPrice") or info.get("price") or 0.0)
         except Exception:
             entry = 0.0
+
+        logger.info(json.dumps({"action": "sl_config", "sl.enabled": sl_enabled}))
 
         def _to_float(value: Any) -> float | None:
             try:
@@ -882,8 +889,18 @@ def do_tick(
                     atr1m = atr_val
 
         if S is None or R is None:
-            logger.info(json.dumps({"action": "skip_sl_missing_S/R"}))
-            return {"status": "done", "reason": "skip_sl_missing_S/R", "state": state}
+            if sl_enabled:
+                sl_status = "skipped"
+                logger.info(
+                    json.dumps(
+                        {
+                            "action": "skip_sl_missing_S/R",
+                            "sl.enabled": sl_enabled,
+                            "sl.status": sl_status,
+                        }
+                    )
+                )
+                return {"status": "done", "reason": "skip_sl_missing_S/R", "state": state}
 
         bracket = build_bracket(
             "BUY" if is_long else "SELL",
@@ -925,14 +942,44 @@ def do_tick(
 
         # Coherence guards before touching exchange
         if sl_prev is None or sl_prev <= 0:
-            logger.info(json.dumps({"action": "skip_sl_invalid"}))
-            return {"status": "done", "reason": "skip_sl_invalid", "state": state}
+            if sl_enabled:
+                sl_status = "skipped"
+                logger.info(
+                    json.dumps(
+                        {
+                            "action": "skip_sl_invalid",
+                            "sl.enabled": sl_enabled,
+                            "sl.status": sl_status,
+                        }
+                    )
+                )
+                return {"status": "done", "reason": "skip_sl_invalid", "state": state}
         if is_long and not sl_prev < entry:
-            logger.info(json.dumps({"action": "skip_sl_side_mismatch"}))
-            return {"status": "done", "reason": "skip_sl_side_mismatch", "state": state}
+            if sl_enabled:
+                sl_status = "skipped"
+                logger.info(
+                    json.dumps(
+                        {
+                            "action": "skip_sl_side_mismatch",
+                            "sl.enabled": sl_enabled,
+                            "sl.status": sl_status,
+                        }
+                    )
+                )
+                return {"status": "done", "reason": "skip_sl_side_mismatch", "state": state}
         if not is_long and not sl_prev > entry:
-            logger.info(json.dumps({"action": "skip_sl_side_mismatch"}))
-            return {"status": "done", "reason": "skip_sl_side_mismatch", "state": state}
+            if sl_enabled:
+                sl_status = "skipped"
+                logger.info(
+                    json.dumps(
+                        {
+                            "action": "skip_sl_side_mismatch",
+                            "sl.enabled": sl_enabled,
+                            "sl.status": sl_status,
+                        }
+                    )
+                )
+                return {"status": "done", "reason": "skip_sl_side_mismatch", "state": state}
 
         # ``sl_prev`` is the stop before precision snapping; reuse for risk calcs
         sl = sl_prev
@@ -1000,8 +1047,22 @@ def do_tick(
         else:
             sl_final = sl_prev
         if sl_final <= 0:
-            logger.info(json.dumps({"action": "skip_sl_after_snap_zero"}))
-            return {"status": "done", "reason": "skip_sl_after_snap_zero", "state": state}
+            if sl_enabled:
+                sl_status = "skipped"
+                logger.info(
+                    json.dumps(
+                        {
+                            "action": "skip_sl_after_snap_zero",
+                            "sl.enabled": sl_enabled,
+                            "sl.status": sl_status,
+                        }
+                    )
+                )
+                return {
+                    "status": "done",
+                    "reason": "skip_sl_after_snap_zero",
+                    "state": state,
+                }
         if hasattr(exchange, "round_qty_to_step"):
             qty_final = exchange.round_qty_to_step(symbol_n, qty_prev)
         else:
@@ -1174,11 +1235,27 @@ def do_tick(
                 logger.error(err)
                 raise AttributeError(err)
 
-        try:
-            _place_sl(symbol_n, sl_final, qty_final)
-        except Exception as exc:
-            logger.error("Failed to place SL order: %s", exc)
-            raise
+        if sl_enabled:
+            try:
+                _place_sl(symbol_n, sl_final, qty_final)
+                sl_status = "placed"
+            except Exception as exc:
+                sl_status = "failed"
+                logger.warning(
+                    json.dumps({"action": "sl_failed", "err": str(exc)})
+                )
+        else:
+            sl_status = "skipped"
+
+        logger.info(
+            json.dumps(
+                {
+                    "action": "sl_status",
+                    "sl.enabled": sl_enabled,
+                    "sl.status": sl_status,
+                }
+            )
+        )
 
         existing_tp = next((o for o in open_orders if o.get("clientOrderId") == cid_tp), None)
         place_tp_order = True
@@ -1224,11 +1301,13 @@ def do_tick(
                 logger.error(err)
                 raise AttributeError(err)
 
+        sl_output = sl if sl_enabled and sl_status == "placed" else None
+
         _log(
             "bracket_placed",
             side=side,
             entry=entry,
-            sl=sl,
+            sl=sl_output,
             tp=tp,
             cids={"entry": filled_cid, "sl": cid_sl, "tp": cid_tp},
         )
@@ -1238,7 +1317,7 @@ def do_tick(
             "reason": "bracket_placed",
             "side": side,
             "entry": entry,
-            "sl": sl,
+            "sl": sl_output,
             "tp": tp,
             "state": state,
         }
