@@ -227,14 +227,6 @@ def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: 
         ]
     return result
 
-def _round_to_tick(value: float, tick: float) -> float:
-    """Round ``value`` to the closest ``tick`` size."""
-
-    if tick:
-        return round(value / tick) * tick
-    return value
-
-
 def build_entry_prices(levels: Mapping[str, float], *args: Any, **kwargs: Any) -> Mapping[str, float]:
     """Derive entry prices from previously computed ``levels``.
 
