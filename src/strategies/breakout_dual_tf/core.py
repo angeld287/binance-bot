@@ -366,7 +366,7 @@ class BreakoutDualTFStrategy(Strategy):
                 open_orders_list = self._get_open_orders(broker_symbol, side_norm)
             return open_orders_list
 
-        def _log_tp_close_all_state(
+        def tp_close_all_state(
             *,
             position_qty: float,
             position_side_value: str | None,
@@ -539,7 +539,7 @@ class BreakoutDualTFStrategy(Strategy):
 
         if position_side is not None and not math.isclose(position_amt, 0.0, abs_tol=1e-12):
             orders_for_tp = _ensure_open_orders()
-            _log_tp_close_all_state(
+            tp_close_all_state(
                 position_qty=position_amt,
                 position_side_value=position_side_raw or position_side,
                 entry_price=position_entry_price,
@@ -570,7 +570,7 @@ class BreakoutDualTFStrategy(Strategy):
             )
             return payload
 
-        _log_tp_close_all_state(
+        tp_close_all_state(
             position_qty=position_amt,
             position_side_value=position_side_raw or position_side,
             entry_price=position_entry_price,
