@@ -1428,6 +1428,9 @@ class BreakoutDualTFStrategy(Strategy):
 
         now = now_utc or datetime.utcnow()
         symbol = get_symbol(self._settings)
+        
+        skip_payload = self._has_active_position_or_orders(symbol, "LONG")
+
         signal = self.generate_signal(now)
 
         if signal is None or self._last_payload is None:
