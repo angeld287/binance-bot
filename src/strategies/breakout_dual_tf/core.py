@@ -265,16 +265,16 @@ class BreakoutDualTFStrategy(Strategy):
                     use_retest = False
         self._config["USE_RETEST"] = use_retest
         self._use_retest = use_retest
-        logger.info(
-            json.dumps(
-                {
-                    "action": "config",
-                    "key": "USE_RETEST",
-                    "value": self._config["USE_RETEST"],
-                    "source": "env-dominate",
-                }
-            )
-        )
+        #logger.info(
+        #    json.dumps(
+        #        {
+        #            "action": "config",
+        #            "key": "USE_RETEST",
+        #            "value": self._config["USE_RETEST"],
+        #            "source": "env-dominate",
+        #        }
+        #    )
+        #)
         max_retries_env = getattr(settings, "MAX_RETRIES", None)
         cooldown_env = getattr(settings, "COOLDOWN_BARS", None)
         if max_retries_env is not None:
