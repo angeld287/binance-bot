@@ -9,13 +9,14 @@ other orchestration layers.
 
 from __future__ import annotations
 
+import json
+import logging
+import math
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Sequence
 from uuid import uuid4
-import json
-import logging
-import math
 
 from common.symbols import normalize_symbol
 from common.utils import sanitize_client_order_id
@@ -218,7 +219,7 @@ class BreakoutDualTFStrategy(Strategy):
         "RR_MIN": 1.8,
         "RETEST_TOL_ATR": 0.2,
         "RETEST_TIMEOUT": 6,
-        "USE_RETEST": True,
+        "USE_RETEST": False,
         "COOLDOWN_BARS": 8,
         "MAX_RETRIES": 1,
         "COOLDOWN_BAND_ATR": 0.5,
@@ -237,6 +238,43 @@ class BreakoutDualTFStrategy(Strategy):
         self._config = dict(self.DEFAULT_CONFIG)
         if config:
             self._config.update(config)
+        env_raw = None
+        env_present = False
+        if hasattr(settings, "get"):
+            env_raw = settings.get("USE_RETEST", None)
+            env_present = env_raw is not None
+        if not env_present:
+            env_raw_os = os.getenv("USE_RETEST")
+            if env_raw_os is not None:
+                env_raw = env_raw_os
+                env_present = True
+
+        true_values = {"true", "1", "yes", "on"}
+        false_values = {"false", "0", "no", "off"}
+        use_retest = False
+        if env_present:
+            if isinstance(env_raw, bool):
+                use_retest = env_raw is True
+            else:
+                value_str = str(env_raw).strip().lower()
+                if value_str in true_values:
+                    use_retest = True
+                elif value_str in false_values:
+                    use_retest = False
+                else:
+                    use_retest = False
+        self._config["USE_RETEST"] = use_retest
+        self._use_retest = use_retest
+        logger.info(
+            json.dumps(
+                {
+                    "action": "config",
+                    "key": "USE_RETEST",
+                    "value": self._config["USE_RETEST"],
+                    "source": "env-dominate",
+                }
+            )
+        )
         max_retries_env = getattr(settings, "MAX_RETRIES", None)
         cooldown_env = getattr(settings, "COOLDOWN_BARS", None)
         if max_retries_env is not None:
@@ -803,7 +841,7 @@ class BreakoutDualTFStrategy(Strategy):
         sorted_levels = sorted(levels, key=lambda lv: (-lv.score, abs(close - lv.price)))
 
         max_retries = int(self._config["MAX_RETRIES"])
-        use_retest = bool(self._config.get("USE_RETEST", True))
+        use_retest = bool(self._config.get("USE_RETEST", False))
         retest_tol = float(self._config["RETEST_TOL_ATR"])
         retest_timeout = int(self._config["RETEST_TIMEOUT"])
 
