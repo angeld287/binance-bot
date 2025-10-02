@@ -1214,23 +1214,11 @@ class BreakoutDualTFStrategy(Strategy):
         qty = float(orders.get("qty", 0.0) or 0.0)
         entry_price = float(orders.get("entry", 0.0) or 0.0)
         stop_loss = float(orders.get("stop_loss", 0.0) or 0.0)
-        tp1 = float(orders.get("take_profit_1", 0.0) or 0.0)
-        tp2 = float(orders.get("take_profit_2", 0.0) or 0.0)
-        qty_tp1 = float(orders.get("qty_tp1", 0.0) or 0.0)
-        qty_tp2 = float(orders.get("qty_tp2", 0.0) or 0.0)
-
         exit_side = "SELL" if side == "BUY" else "BUY"
-        remainder = max(qty - max(qty_tp1, 0.0), 0.0)
-        if qty_tp1 <= 0.0 and qty_tp2 <= 0.0:
-            qty_tp2 = qty
-        else:
-            qty_tp2 = min(max(qty_tp2, 0.0), remainder)
 
         trade_tag = f"bdtf-{uuid4().hex[:8]}"
         entry_cid = sanitize_client_order_id(f"{trade_tag}-entry")
         sl_cid = sanitize_client_order_id(f"{trade_tag}-sl")
-        tp1_cid = sanitize_client_order_id(f"{trade_tag}-tp1")
-        tp2_cid = sanitize_client_order_id(f"{trade_tag}-tp2")
 
         try:
             entry_resp = broker.place_entry_limit(
@@ -1252,25 +1240,14 @@ class BreakoutDualTFStrategy(Strategy):
             sl_cid,
         )
 
-        tp_orders: list[dict[str, Any]] = []
-        if qty_tp1 > 0:
-            tp1_resp = broker.place_tp_reduce_only(
-                symbol,
-                exit_side,
-                tp1,
-                qty_tp1,
-                tp1_cid,
-            )
-            tp_orders.append({"clientOrderId": tp1_cid, "order": tp1_resp})
-        if qty_tp2 > 0:
-            tp2_resp = broker.place_tp_reduce_only(
-                symbol,
-                exit_side,
-                tp2,
-                qty_tp2,
-                tp2_cid,
-            )
-            tp_orders.append({"clientOrderId": tp2_cid, "order": tp2_resp})
+        logger.info(
+            "tp_creation_skipped_breakout_dual_tf",
+            extra={
+                "symbol": symbol,
+                "position_side": side,
+                "reason": "disabled_for_flow",
+            },
+        )
 
         placement = {
             "status": "orders_placed",
@@ -1278,7 +1255,7 @@ class BreakoutDualTFStrategy(Strategy):
             "side": side,
             "entry": {"clientOrderId": entry_cid, "order": entry_resp},
             "stop": {"clientOrderId": sl_cid, "order": stop_resp},
-            "take_profits": tp_orders,
+            "take_profits": [],
         }
         return placement
 
