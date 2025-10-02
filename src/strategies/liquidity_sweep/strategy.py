@@ -94,6 +94,11 @@ def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: 
             return round(value / tick) * tick
         return value
 
+    def _round_to_tick_with(value: float, tick: float) -> float:
+        if tick:
+            return round(value / tick) * tick
+        return value
+
     # ------------------------------------------------------------------
     # ATR calculations
     atr1m = _atr(candles_m1)
@@ -208,15 +213,16 @@ def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: 
         "microbuffer": microbuffer,
         "buffer_sl": buffer_sl,
     }
+    tick_size = float(getattr(settings, "TICK_SIZE", 0.0)) if settings else 0.0
     if include_candidates:
         result["supports_candidates"] = supports_sorted or [S]
         result["resistances_candidates"] = resistances_sorted or [R]
         result["supports_candidates"] = [
-            _round_to_tick(val, tick=float(getattr(settings, "TICK_SIZE", 0.0)) if settings else 0.0)
+            _round_to_tick_with(val, tick_size)
             for val in result["supports_candidates"]
         ]
         result["resistances_candidates"] = [
-            _round_to_tick(val, tick=float(getattr(settings, "TICK_SIZE", 0.0)) if settings else 0.0)
+            _round_to_tick_with(val, tick_size)
             for val in result["resistances_candidates"]
         ]
     return result
