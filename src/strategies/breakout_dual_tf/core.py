@@ -547,6 +547,20 @@ class BreakoutDualTFStrategy(Strategy):
                 entry_price=position_entry_price,
                 orders=orders_for_tp,
             )
+            position_side_for_tp = "LONG" if position_side == "BUY" else "SHORT"
+            logger.info(
+                "tp_atr_called_from_state_guard",
+                extra={"symbol": broker_symbol, "position_side": position_side_for_tp},
+            )
+            ensure_tp_limit_reduce_only_by_atr(
+                broker=exchange,
+                symbol=broker_symbol,
+                position_side=position_side_for_tp,
+                entry_price=position_entry_price,
+                k_list=[1.0, 2.0],
+                atr_period=int(getattr(self._settings, "ATR_PERIOD", 14) or 14),
+                timeframe=getattr(self, "_exec_tf", getattr(self._settings, "INTERVAL", "1h")),
+            )
             has_position = True
             payload = {
                 "status": "skipped_existing_position",
@@ -1361,15 +1375,7 @@ class BreakoutDualTFStrategy(Strategy):
             sl_cid,
         )
 
-        ensure_tp_limit_reduce_only_by_atr(
-            broker=broker,
-            symbol=symbol,
-            position_side="LONG" if side == "BUY" else "SHORT",
-            entry_price=entry_price or entry_rounded,
-            k_list=[1.0, 2.0],
-            atr_period=int(getattr(self._settings, "ATR_PERIOD", 14) or 14),
-            timeframe=getattr(self, "_exec_tf", getattr(self._settings, "INTERVAL", "1h")),
-        )
+        logger.debug("tp_atr_call_removed_from_place_orders")
 
         logger.info(
             "tp_creation_skipped_breakout_dual_tf",
