@@ -26,6 +26,7 @@ from core.ports.broker import BrokerPort
 from core.ports.market_data import MarketDataPort
 from core.ports.settings import SettingsProvider, get_symbol
 from core.ports.strategy import Strategy
+from utils.tp_store_s3 import load_tp_value, persist_tp_value
 
 
 logger = logging.getLogger("bot.strategy.breakout_dual_tf")
@@ -455,6 +456,117 @@ class BreakoutDualTFStrategy(Strategy):
                     "note": "no tp_close_all detected",
                 },
             )
+
+            tp_loaded = load_tp_value(broker_symbol)
+            if tp_loaded is None:
+                self._logger.info(
+                    "tp_s3_load.skip %s",
+                    {
+                        "symbol": broker_symbol,
+                        "positionSide": target_side,
+                        "reason": "tp_value_missing",
+                    },
+                )
+                return
+
+            if not hasattr(exchange, "place_tp_reduce_only"):
+                self._logger.info(
+                    "tp_s3_load.skip %s",
+                    {
+                        "symbol": broker_symbol,
+                        "positionSide": target_side,
+                        "reason": "place_tp_reduce_only_unavailable",
+                    },
+                )
+                return
+
+            qty_abs = abs(position_qty)
+            if qty_abs <= 0:
+                self._logger.info(
+                    "tp_s3_load.skip %s",
+                    {
+                        "symbol": broker_symbol,
+                        "positionSide": target_side,
+                        "reason": "invalid_quantity",
+                        "qty": qty_abs,
+                    },
+                )
+                return
+
+            try:
+                qty_final = float(qty_abs)
+            except (TypeError, ValueError):
+                qty_final = 0.0
+
+            if hasattr(exchange, "round_qty_to_step"):
+                try:
+                    qty_final = float(exchange.round_qty_to_step(broker_symbol, qty_final))
+                except Exception:  # pragma: no cover - best effort rounding
+                    pass
+
+            if qty_final <= 0:
+                self._logger.info(
+                    "tp_s3_load.skip %s",
+                    {
+                        "symbol": broker_symbol,
+                        "positionSide": target_side,
+                        "reason": "qty_rounding_zero",
+                    },
+                )
+                return
+
+            tp_price = tp_loaded
+            if hasattr(exchange, "round_price_to_tick"):
+                try:
+                    tp_price = float(exchange.round_price_to_tick(broker_symbol, tp_price))
+                except Exception:  # pragma: no cover - best effort rounding
+                    pass
+
+            if tp_price <= 0:
+                self._logger.info(
+                    "tp_s3_load.skip %s",
+                    {
+                        "symbol": broker_symbol,
+                        "positionSide": target_side,
+                        "reason": "tp_price_invalid",
+                        "value": tp_price,
+                    },
+                )
+                return
+
+            exit_side_order = "SELL" if target_side == "LONG" else "BUY"
+            tp_cid = sanitize_client_order_id(f"bdtf-{uuid4().hex[:8]}-tp")
+
+            try:
+                order_resp = exchange.place_tp_reduce_only(
+                    broker_symbol,
+                    exit_side_order,
+                    tp_price,
+                    qty_final,
+                    tp_cid,
+                )
+            except Exception as err:  # pragma: no cover - defensive logging
+                self._logger.warning(
+                    "tp_s3_load.error %s",
+                    {
+                        "symbol": broker_symbol,
+                        "positionSide": target_side,
+                        "reason": "order_failed",
+                        "error": str(err),
+                    },
+                )
+            else:
+                self._logger.info(
+                    "tp_s3_load.restore %s",
+                    {
+                        "symbol": broker_symbol,
+                        "positionSide": target_side,
+                        "tp_price": tp_price,
+                        "qty": qty_final,
+                        "clientOrderId": tp_cid,
+                        "order": order_resp,
+                    },
+                )
         try:
             info: Any | None
             if hasattr(exchange, "get_position"):
@@ -1361,6 +1473,23 @@ class BreakoutDualTFStrategy(Strategy):
         )
 
         logger.debug("tp_atr_call_removed_from_place_orders")
+
+        tp_close_price = 0.0
+        try:
+            tp_close_price = float(orders.get("take_profit_2", 0.0) or 0.0)
+        except (TypeError, ValueError):  # pragma: no cover - defensive conversion
+            tp_close_price = 0.0
+        if tp_close_price > 0:
+            persist_tp_value(
+                symbol,
+                tp_close_price,
+                int(datetime.utcnow().timestamp()),
+            )
+        else:
+            logger.info(
+                "tp_s3_persist.skip %s",
+                {"symbol": symbol, "reason": "invalid_tp_value", "value": tp_close_price},
+            )
 
         logger.info(
             "tp_creation_skipped_breakout_dual_tf",
