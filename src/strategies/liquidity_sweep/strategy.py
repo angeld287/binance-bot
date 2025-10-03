@@ -23,6 +23,27 @@ TIMEOUT_NO_FILL_MIN = 5  # minutes after NY open to keep processing ticks
 logger = logging.getLogger(__name__)
 
 
+def _round_to_tick(value: float, tick: float | None = None, settings: Any | None = None) -> float:
+    """Round ``value`` to the closest multiple of ``tick``.
+
+    ``tick`` takes precedence when provided explicitly.  When omitted, the
+    function attempts to infer it from ``settings`` (expecting a ``TICK_SIZE``
+    attribute).  A falsy or missing tick leaves the value unchanged.
+    """
+
+    if tick is None:
+        if settings is not None:
+            try:
+                tick = float(getattr(settings, "TICK_SIZE", 0.0))
+            except Exception:
+                tick = 0.0
+        else:
+            tick = 0.0
+    if tick:
+        return round(value / tick) * tick
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Pure helper functions
 
@@ -88,16 +109,7 @@ def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: 
             out.append([ts, 0.0, high, low, close, 0.0])
         return out
 
-    def _round_to_tick(value: float) -> float:
-        tick = getattr(settings, "TICK_SIZE", 0.0) if settings else 0.0
-        if tick:
-            return round(value / tick) * tick
-        return value
-
-    def _round_to_tick_with(value: float, tick: float) -> float:
-        if tick:
-            return round(value / tick) * tick
-        return value
+    tick_size = float(getattr(settings, "TICK_SIZE", 0.0)) if settings else 0.0
 
     # ------------------------------------------------------------------
     # ATR calculations
@@ -132,15 +144,15 @@ def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: 
             candidates.append({"type": "S", "price": l})
 
     if not candidates:
-        S_fallback = _round_to_tick(price_now - microbuffer)
-        R_fallback = _round_to_tick(price_now + microbuffer)
+        S_fallback = _round_to_tick(price_now - microbuffer, tick_size)
+        R_fallback = _round_to_tick(price_now + microbuffer, tick_size)
         result: dict[str, Any] = {
             "S": S_fallback,
             "R": R_fallback,
             "atr1m": atr1m,
             "atr15m": atr15m,
-            "microbuffer": _round_to_tick(microbuffer),
-            "buffer_sl": _round_to_tick(buffer_sl),
+            "microbuffer": _round_to_tick(microbuffer, tick_size),
+            "buffer_sl": _round_to_tick(buffer_sl, tick_size),
         }
         if include_candidates:
             result["supports_candidates"] = [S_fallback]
@@ -200,10 +212,10 @@ def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: 
                     best_score = sc
                     S, R = s["price"], r["price"]
 
-    S = _round_to_tick(S)
-    R = _round_to_tick(R)
-    microbuffer = _round_to_tick(microbuffer)
-    buffer_sl = _round_to_tick(buffer_sl)
+    S = _round_to_tick(S, tick_size)
+    R = _round_to_tick(R, tick_size)
+    microbuffer = _round_to_tick(microbuffer, tick_size)
+    buffer_sl = _round_to_tick(buffer_sl, tick_size)
 
     result = {
         "S": S,
@@ -213,16 +225,15 @@ def compute_levels(candles_m1: Sequence[Sequence[float]], *args: Any, **kwargs: 
         "microbuffer": microbuffer,
         "buffer_sl": buffer_sl,
     }
-    tick_size = float(getattr(settings, "TICK_SIZE", 0.0)) if settings else 0.0
     if include_candidates:
         result["supports_candidates"] = supports_sorted or [S]
         result["resistances_candidates"] = resistances_sorted or [R]
         result["supports_candidates"] = [
-            _round_to_tick_with(val, tick_size)
+            _round_to_tick(val, tick_size)
             for val in result["supports_candidates"]
         ]
         result["resistances_candidates"] = [
-            _round_to_tick_with(val, tick_size)
+            _round_to_tick(val, tick_size)
             for val in result["resistances_candidates"]
         ]
     return result
