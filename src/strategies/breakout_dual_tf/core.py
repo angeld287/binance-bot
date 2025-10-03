@@ -27,6 +27,8 @@ from core.ports.market_data import MarketDataPort
 from core.ports.settings import SettingsProvider, get_symbol
 from core.ports.strategy import Strategy
 
+from .tp_atr import ensure_tp_limit_reduce_only_by_atr
+
 logger = logging.getLogger("bot.strategy.breakout_dual_tf")
 
 
@@ -544,6 +546,20 @@ class BreakoutDualTFStrategy(Strategy):
                 position_side_value=position_side_raw or position_side,
                 entry_price=position_entry_price,
                 orders=orders_for_tp,
+            )
+            position_side_for_tp = "LONG" if position_side == "BUY" else "SHORT"
+            logger.info(
+                "tp_atr_called_from_state_guard",
+                extra={"symbol": broker_symbol, "position_side": position_side_for_tp},
+            )
+            ensure_tp_limit_reduce_only_by_atr(
+                broker=exchange,
+                symbol=broker_symbol,
+                position_side=position_side_for_tp,
+                entry_price=position_entry_price,
+                k_list=[1.0, 2.0],
+                atr_period=int(getattr(self._settings, "ATR_PERIOD", 14) or 14),
+                timeframe=getattr(self, "_exec_tf", getattr(self._settings, "INTERVAL", "1h")),
             )
             has_position = True
             payload = {
@@ -1358,6 +1374,8 @@ class BreakoutDualTFStrategy(Strategy):
             qty,
             sl_cid,
         )
+
+        logger.debug("tp_atr_call_removed_from_place_orders")
 
         logger.info(
             "tp_creation_skipped_breakout_dual_tf",
