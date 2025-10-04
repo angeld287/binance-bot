@@ -24,14 +24,58 @@ stub_settings.get_take_profit_pct = _tp_stub
 stub_config.settings = stub_settings
 sys.modules.setdefault("config", stub_config)
 sys.modules.setdefault("config.settings", stub_settings)
+boto3_stub = types.ModuleType("boto3")
+
+
+class _ClientError(Exception):
+    def __init__(self, error_response=None, operation_name: str | None = None):
+        super().__init__(str(error_response) or "client_error")
+        self.response = error_response or {}
+        self.operation_name = operation_name or ""
+
+
+class _BotoCoreError(Exception):
+    pass
+
+
+class _S3Stub:
+    def __init__(self):
+        self.storage: dict[str, Any] = {}
+
+    def get_object(self, *, Bucket: str, Key: str, **_kwargs):  # pragma: no cover - simple stub
+        raise _ClientError({"Error": {"Code": "NoSuchKey"}}, "get_object")
+
+    def put_object(self, *, Bucket: str, Key: str, Body: bytes, **_kwargs):  # pragma: no cover - simple stub
+        self.storage[Key] = {"Bucket": Bucket, "Body": Body}
+        return {}
+
+
+def _client_factory(*_args, **_kwargs):  # pragma: no cover - used for stubbing
+    return _S3Stub()
+
+
+setattr(boto3_stub, "client", _client_factory)
+sys.modules.setdefault("boto3", boto3_stub)
+
+botocore_stub = types.ModuleType("botocore")
+botocore_exceptions = types.ModuleType("botocore.exceptions")
+setattr(botocore_exceptions, "BotoCoreError", _BotoCoreError)
+setattr(botocore_exceptions, "ClientError", _ClientError)
+sys.modules.setdefault("botocore", botocore_stub)
+sys.modules.setdefault("botocore.exceptions", botocore_exceptions)
 
 breakout_dual_tf = importlib.import_module("strategies.breakout_dual_tf")
+ema_distance_module = importlib.import_module(
+    "strategies.breakout_dual_tf.filters.ema_distance"
+)
 
 from core.domain.models.Signal import Signal
 
 BreakoutDualTFStrategy = breakout_dual_tf.BreakoutDualTFStrategy
 Level = breakout_dual_tf.Level
 BreakoutSignalPayload = breakout_dual_tf.BreakoutSignalPayload
+ema_distance_filter = ema_distance_module.ema_distance_filter
+ema_helper = ema_distance_module.ema
 
 
 class DummySettings:
@@ -59,6 +103,66 @@ def _build_history(base_ts: int, count: int, start: float = 98.0, step: float = 
     return candles
 
 
+def test_ema_distance_filter_blocks_when_far(monkeypatch):
+    monkeypatch.setenv("EMA_DISTANCE_POLICY", "fixed")
+    monkeypatch.setenv("EMA_MAX_DIST_PCT_15M", "0.012")
+
+    candles: list[list[float]] = []
+    ohlc = {"open": 100.0, "high": 101.0, "low": 97.0, "close": 100.5}
+    ctx = {
+        "ohlc": ohlc,
+        "ema7": 100.0,
+        "ema25": 100.0,
+        "candles": candles,
+        "direction": "LONG",
+        "atr": 1.0,
+        "exec_tf": "15m",
+        "use_wick": True,
+    }
+
+    passed, meta = ema_distance_filter(ctx)
+    assert passed is False
+    assert meta["policy"] == "fixed"
+    assert meta["is_far"] is True
+
+
+def test_ema_distance_filter_allows_after_reattach(monkeypatch):
+    monkeypatch.setenv("EMA_DISTANCE_POLICY", "fixed")
+    monkeypatch.setenv("EMA_MAX_DIST_PCT_15M", "0.012")
+    monkeypatch.setenv("EMA_REATTACH_LOOKBACK", "5")
+    monkeypatch.setenv("EMA_REATTACH_MIN_TOUCHES", "2")
+
+    base_ts = 0
+    candles = [
+        _make_candle(base_ts, 100.0, 101.0, 99.5, 100.0, 100.0),
+        _make_candle(base_ts + 60_000, 102.0, 102.5, 101.5, 102.5, 100.0),
+        _make_candle(base_ts + 120_000, 100.0, 100.5, 99.8, 100.05, 100.0),
+        _make_candle(base_ts + 180_000, 100.0, 100.4, 99.7, 99.95, 100.0),
+        _make_candle(base_ts + 240_000, 100.0, 100.3, 99.9, 100.02, 100.0),
+        _make_candle(base_ts + 300_000, 100.0, 100.2, 99.8, 99.98, 100.0),
+    ]
+
+    closes = [c[4] for c in candles]
+    ema7 = ema_helper(closes, 7)
+    ema25 = ema_helper(closes, 25)
+
+    ctx = {
+        "ohlc": {"open": candles[-1][1], "high": candles[-1][2], "low": candles[-1][3], "close": candles[-1][4]},
+        "ema7": ema7,
+        "ema25": ema25,
+        "candles": candles,
+        "direction": "LONG",
+        "atr": 1.0,
+        "exec_tf": "15m",
+        "use_wick": True,
+    }
+
+    passed, meta = ema_distance_filter(ctx)
+    assert passed is True
+    assert meta.get("reattach_pass") is True
+    assert meta.get("touches", 0) >= 2
+
+
 def test_breakout_dual_tf_rejects_low_volume(caplog):
     settings = DummySettings({"INTERVAL": "1h"})
     strategy = BreakoutDualTFStrategy(None, None, settings)
@@ -83,7 +187,8 @@ def test_breakout_dual_tf_rejects_low_volume(caplog):
     assert any("vol_rel" in record.message for record in caplog.records)
 
 
-def test_breakout_dual_tf_retest_flow():
+def test_breakout_dual_tf_retest_flow(monkeypatch):
+    monkeypatch.setenv("EMA_DISTANCE_FILTER_ENABLED", "false")
     settings = DummySettings({"INTERVAL": "1h"})
     strategy = BreakoutDualTFStrategy(
         None,
@@ -136,7 +241,41 @@ def test_breakout_dual_tf_retest_flow():
     assert signal_payload_direct.action == "BUY"
 
 
-def test_breakout_dual_tf_cooldown_blocks_reentry():
+def test_breakout_dual_tf_blocks_when_far_from_ema(monkeypatch):
+    monkeypatch.setenv("EMA_DISTANCE_FILTER_ENABLED", "true")
+    monkeypatch.setenv("EMA_DISTANCE_POLICY", "fixed")
+    monkeypatch.setenv("EMA_MAX_DIST_PCT_15M", "0.012")
+
+    settings = DummySettings({"INTERVAL": "15m"})
+    strategy = BreakoutDualTFStrategy(
+        None,
+        None,
+        settings,
+        config={
+            "USE_RETEST": False,
+            "VOL_REL_MIN": 0.0,
+            "K_ATR": 0.0,
+            "RR_MIN": 0.0,
+            "RR_FILTER_ENABLED": False,
+            "MAX_RETRIES": 3,
+        },
+    )
+
+    candles = _build_history(0, 60, start=100.0, step=0.5)
+    last_close = candles[-1][4] + 1.0
+    last_ts = candles[-1][0] + 60_000
+    last_candle = _make_candle(last_ts, last_close - 0.5, last_close + 0.5, last_close - 15.0, last_close, 500.0)
+    candles.append(last_candle)
+
+    level = Level(price=last_close - 0.2, level_type="S", timestamp=int(last_ts), score=1.0)
+    context = {"symbol": "BTCUSDT", "exec_tf": "15m", "exec_candles": candles}
+
+    payload = strategy.should_trigger_breakout(last_candle, [level], context)
+    assert payload is None
+
+
+def test_breakout_dual_tf_cooldown_blocks_reentry(monkeypatch):
+    monkeypatch.setenv("EMA_DISTANCE_FILTER_ENABLED", "false")
     settings = DummySettings({"INTERVAL": "1h"})
     strategy = BreakoutDualTFStrategy(
         None,
