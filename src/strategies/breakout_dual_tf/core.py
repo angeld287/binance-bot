@@ -27,6 +27,7 @@ from core.ports.market_data import MarketDataPort
 from core.ports.settings import SettingsProvider, get_symbol
 from core.ports.strategy import Strategy
 from utils.tp_store_s3 import load_tp_value, persist_tp_value
+from .filters.ema_distance import ema_distance_filter
 
 
 logger = logging.getLogger("bot.strategy.breakout_dual_tf")
@@ -1083,8 +1084,17 @@ class BreakoutDualTFStrategy(Strategy):
             self._log_reject("atr_unavailable")
             return None
         vol_rel = _compute_relative_volume(exec_candles)
-        ema_fast = _ema([float(c[4]) for c in exec_candles], 15)
-        ema_slow = _ema([float(c[4]) for c in exec_candles], 50)
+        exec_closes = [float(c[4]) for c in exec_candles]
+        ema_fast = _ema(exec_closes, 15)
+        ema_slow = _ema(exec_closes, 50)
+        ema7_exec = context.get("ema7_exec")
+        ema25_exec = context.get("ema25_exec")
+        if ema7_exec is None:
+            ema7_exec = _ema(exec_closes, 7)
+            context["ema7_exec"] = ema7_exec
+        if ema25_exec is None:
+            ema25_exec = _ema(exec_closes, 25)
+            context["ema25_exec"] = ema25_exec
         exec_tf = context.get("exec_tf", self._exec_tf)
         bar_ms = _interval_to_minutes(exec_tf) * 60_000
         self._bar_ms = bar_ms
@@ -1241,6 +1251,78 @@ class BreakoutDualTFStrategy(Strategy):
                     continue
             else:
                 logger.info(json.dumps({"action": "skip", "reason": "rr_filter_disabled"}))
+
+            ema_filter_enabled = (
+                os.getenv("EMA_DISTANCE_FILTER_ENABLED", "true").strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
+            if ema_filter_enabled:
+                filter_ctx = {
+                    "ohlc": {
+                        "open": float(candle_exec[1]),
+                        "high": float(candle_exec[2]),
+                        "low": float(candle_exec[3]),
+                        "close": close,
+                    },
+                    "ema7": ema7_exec,
+                    "ema25": ema25_exec,
+                    "candles": exec_candles,
+                    "direction": direction,
+                    "atr": atr_exec,
+                    "exec_tf": exec_tf,
+                    "use_wick": True,
+                }
+                passed, meta = ema_distance_filter(filter_ctx)
+                if not passed:
+                    result = meta.get("result")
+                    dist = meta.get("dist") or (result.dist_to_nearest_pct if result else 0.0)
+                    max_allowed = meta.get("max_allowed")
+                    tf_label = meta.get("tf_label")
+                    policy = meta.get("policy")
+                    nearest = meta.get("nearest")
+                    if meta.get("reattach_blocked") and meta.get("touches") is not None:
+                        logger.info(
+                            "[EmaDistance] skip: dist=%s max=%s tf=%s reattach: touches=%s/%s lookback=%s",
+                            f"{dist:.4f}" if isinstance(dist, float) else dist,
+                            f"{max_allowed:.4f}" if isinstance(max_allowed, float) else max_allowed,
+                            tf_label,
+                            meta.get("touches"),
+                            meta.get("min_touches"),
+                            meta.get("lookback"),
+                        )
+                    else:
+                        logger.info(
+                            "[EmaDistance] skip: dist=%s max=%s tf=%s policy=%s nearest=%s",
+                            f"{dist:.4f}" if isinstance(dist, float) else dist,
+                            f"{max_allowed:.4f}" if isinstance(max_allowed, float) else max_allowed,
+                            tf_label,
+                            policy,
+                            nearest,
+                        )
+                    continue
+                else:
+                    result = meta.get("result")
+                    dist = meta.get("dist") or (result.dist_to_nearest_pct if result else 0.0)
+                    max_allowed = meta.get("max_allowed")
+                    tf_label = meta.get("tf_label")
+                    policy = meta.get("policy")
+                    nearest = meta.get("nearest")
+                    if meta.get("reattach_pass") and meta.get("touches") is not None:
+                        logger.info(
+                            "[EmaDistance] reattach: touches=%s/%s -> pass",
+                            meta.get("touches"),
+                            meta.get("min_touches"),
+                        )
+                    else:
+                        logger.info(
+                            "[EmaDistance] pass: dist=%s max=%s tf=%s policy=%s nearest=%s use_wick=%s",
+                            f"{dist:.4f}" if isinstance(dist, float) else dist,
+                            f"{max_allowed:.4f}" if isinstance(max_allowed, float) else max_allowed,
+                            tf_label,
+                            policy,
+                            nearest,
+                            True,
+                        )
 
             self._register_attempt(level, direction)
             payload = BreakoutSignalPayload(
