@@ -219,6 +219,7 @@ class BreakoutDualTFStrategy(Strategy):
         "K_ATR": 0.3,
         "VOL_REL_MIN": 1.5,
         "RR_MIN": 1.8,
+        "RR_FILTER_ENABLED": False,
         "RETEST_TOL_ATR": 0.2,
         "RETEST_TIMEOUT": 6,
         "USE_RETEST": False,
@@ -240,6 +241,27 @@ class BreakoutDualTFStrategy(Strategy):
         self._config = dict(self.DEFAULT_CONFIG)
         if config:
             self._config.update(config)
+        rr_true_values = {"1", "true", "yes", "y"}
+        config_has_rr_filter = config is not None and "RR_FILTER_ENABLED" in config
+        if config_has_rr_filter:
+            rr_config_value = config.get("RR_FILTER_ENABLED")
+            if isinstance(rr_config_value, bool):
+                rr_filter_enabled = rr_config_value
+            else:
+                rr_filter_enabled = str(rr_config_value).strip().lower() in rr_true_values
+        else:
+            rr_env_raw = None
+            if hasattr(settings, "get"):
+                rr_env_raw = settings.get("RR_FILTER_ENABLED", None)
+            if rr_env_raw is None:
+                rr_env_raw = os.getenv("RR_FILTER_ENABLED")
+            if isinstance(rr_env_raw, bool):
+                rr_filter_enabled = rr_env_raw
+            elif rr_env_raw is None:
+                rr_filter_enabled = False
+            else:
+                rr_filter_enabled = str(rr_env_raw).strip().lower() in rr_true_values
+        self._config["RR_FILTER_ENABLED"] = rr_filter_enabled
         env_raw = None
         env_present = False
         if hasattr(settings, "get"):
@@ -1211,9 +1233,14 @@ class BreakoutDualTFStrategy(Strategy):
                 self._log_reject("risk_zero", level=level)
                 continue
             rr = reward / risk
-            if rr < rr_min:
-                self._log_reject("rr_filter", level=level, data={"rr": rr, "min": rr_min})
-                continue
+            if self._config.get("RR_FILTER_ENABLED", False):
+                if rr < rr_min:
+                    self._log_reject(
+                        "rr_filter", level=level, data={"rr": rr, "min": rr_min}
+                    )
+                    continue
+            else:
+                logger.info(json.dumps({"action": "skip", "reason": "rr_filter_disabled"}))
 
             self._register_attempt(level, direction)
             payload = BreakoutSignalPayload(
