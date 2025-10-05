@@ -5,7 +5,7 @@ from __future__ import annotations
 import hmac, hashlib, logging, urllib.parse as _url
 import os
 import time
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Any, Dict
 
 from binance.client import Client
@@ -265,11 +265,27 @@ class BinanceBroker(BrokerPort):
     ) -> dict[str, Any]:
         try:
             safe_id = sanitize_client_order_id(clientOrderId)
+            filters = self.get_symbol_filters(symbol)
+            tick = Decimal(filters["PRICE_FILTER"]["tickSize"])
+            precision = max(0, -tick.as_tuple().exponent)
+            requested_decimal = Decimal(str(stopPrice))
+            rounding = ROUND_UP if side.upper() == "SELL" else ROUND_DOWN
+            adjusted_decimal = requested_decimal.quantize(tick, rounding=rounding)
+            adjusted_stop_price = format(adjusted_decimal, f".{precision}f")
+
+            logger.info(
+                "Stop reduce-only price adjust | symbol=%s side=%s requested=%s adjusted=%s tickSize=%s",
+                symbol,
+                side,
+                requested_decimal,
+                adjusted_stop_price,
+                tick,
+            )
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
                 type="STOP_MARKET",
-                stopPrice=stopPrice,
+                stopPrice=adjusted_stop_price,
                 quantity=qty,
                 reduceOnly=True,
                 newClientOrderId=safe_id,
