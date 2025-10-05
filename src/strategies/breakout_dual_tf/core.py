@@ -21,6 +21,7 @@ from uuid import uuid4
 from common.symbols import normalize_symbol
 from common.utils import sanitize_client_order_id
 from config.settings import get_stop_loss_pct, get_take_profit_pct
+from config.utils import parse_bool
 from core.domain.models.Signal import Signal
 from core.ports.broker import BrokerPort
 from core.ports.market_data import MarketDataPort
@@ -242,52 +243,47 @@ class BreakoutDualTFStrategy(Strategy):
         self._config = dict(self.DEFAULT_CONFIG)
         if config:
             self._config.update(config)
-        rr_true_values = {"1", "true", "yes", "y"}
-        config_has_rr_filter = config is not None and "RR_FILTER_ENABLED" in config
-        if config_has_rr_filter:
-            rr_config_value = config.get("RR_FILTER_ENABLED")
-            if isinstance(rr_config_value, bool):
-                rr_filter_enabled = rr_config_value
-            else:
-                rr_filter_enabled = str(rr_config_value).strip().lower() in rr_true_values
-        else:
-            rr_env_raw = None
-            if hasattr(settings, "get"):
-                rr_env_raw = settings.get("RR_FILTER_ENABLED", None)
-            if rr_env_raw is None:
-                rr_env_raw = os.getenv("RR_FILTER_ENABLED")
-            if isinstance(rr_env_raw, bool):
-                rr_filter_enabled = rr_env_raw
-            elif rr_env_raw is None:
-                rr_filter_enabled = False
-            else:
-                rr_filter_enabled = str(rr_env_raw).strip().lower() in rr_true_values
+
+        default_rr_enabled = self.DEFAULT_CONFIG["RR_FILTER_ENABLED"]
+        rr_source: Any = default_rr_enabled
+        settings_rr_value = getattr(settings, "RR_FILTER_ENABLED", None)
+        if settings_rr_value is None and hasattr(settings, "get"):
+            settings_rr_value = settings.get("RR_FILTER_ENABLED", None)
+        if settings_rr_value is not None:
+            rr_source = settings_rr_value
+        if config and "RR_FILTER_ENABLED" in config:
+            rr_source = config["RR_FILTER_ENABLED"]
+        rr_filter_enabled = parse_bool(rr_source, default=default_rr_enabled)
         self._config["RR_FILTER_ENABLED"] = rr_filter_enabled
-        env_raw = None
-        env_present = False
-        if hasattr(settings, "get"):
-            env_raw = settings.get("USE_RETEST", None)
-            env_present = env_raw is not None
-        if not env_present:
+
+        default_rr_min = float(self.DEFAULT_CONFIG["RR_MIN"])
+        rr_min_source: Any = default_rr_min
+        settings_rr_min = getattr(settings, "RR_MIN", None)
+        if settings_rr_min is None and hasattr(settings, "get"):
+            settings_rr_min = settings.get("RR_MIN", None)
+        if settings_rr_min is not None:
+            rr_min_source = settings_rr_min
+        if config and "RR_MIN" in config:
+            rr_min_source = config["RR_MIN"]
+        try:
+            rr_min_value = float(rr_min_source)
+        except (TypeError, ValueError):
+            rr_min_value = default_rr_min
+        self._config["RR_MIN"] = rr_min_value
+
+        use_retest_source: Any = self.DEFAULT_CONFIG["USE_RETEST"]
+        settings_use_retest = getattr(settings, "USE_RETEST", None)
+        if settings_use_retest is None and hasattr(settings, "get"):
+            settings_use_retest = settings.get("USE_RETEST", None)
+        if settings_use_retest is not None:
+            use_retest_source = settings_use_retest
+        else:
             env_raw_os = os.getenv("USE_RETEST")
             if env_raw_os is not None:
-                env_raw = env_raw_os
-                env_present = True
-
-        true_values = {"true", "1", "yes", "on"}
-        false_values = {"false", "0", "no", "off"}
-        use_retest = False
-        if env_present:
-            if isinstance(env_raw, bool):
-                use_retest = env_raw is True
-            else:
-                value_str = str(env_raw).strip().lower()
-                if value_str in true_values:
-                    use_retest = True
-                elif value_str in false_values:
-                    use_retest = False
-                else:
-                    use_retest = False
+                use_retest_source = env_raw_os
+        if config and "USE_RETEST" in config:
+            use_retest_source = config["USE_RETEST"]
+        use_retest = parse_bool(use_retest_source, default=self.DEFAULT_CONFIG["USE_RETEST"])
         self._config["USE_RETEST"] = use_retest
         self._use_retest = use_retest
         #logger.info(
@@ -1759,6 +1755,15 @@ class BreakoutDualTFStrategy(Strategy):
             self._market_data = market_data
         if settings is not None:
             self._settings = settings
+        active_interval = getattr(self._settings, "INTERVAL", "1h")
+        self._exec_tf = downscale_interval(active_interval)
+        logger.info(
+            "active_config { INTERVAL=%s, timeframe_exec=%s, RR_FILTER_ENABLED=%s, RR_MIN=%s }",
+            active_interval,
+            self._exec_tf,
+            self._config.get("RR_FILTER_ENABLED"),
+            self._config.get("RR_MIN"),
+        )
 
         now = now_utc or datetime.utcnow()
         symbol = get_symbol(self._settings)
