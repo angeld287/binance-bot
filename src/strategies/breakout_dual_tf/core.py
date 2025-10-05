@@ -162,6 +162,21 @@ def _compute_relative_volume(candles: Sequence[Sequence[float]], lookback: int =
     return last_volume / avg
 
 
+def _fmt(value: Any | None) -> Any | None:
+    """Round numeric values to 6 decimals for logging purposes."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            return round(float(value), 6)
+        except (TypeError, ValueError):
+            return None
+    return value
+
+
 def _ema(values: Sequence[float], period: int) -> float:
     if not values:
         return 0.0
@@ -1334,9 +1349,25 @@ class BreakoutDualTFStrategy(Strategy):
             rr = reward / risk
             if self._config.get("RR_FILTER_ENABLED", False):
                 if rr < rr_min:
-                    self._log_reject(
-                        "rr_filter", level=level, data={"rr": rr, "min": rr_min}
-                    )
+                    tp_pct_value = get_take_profit_pct(self._settings)
+                    if tp_pct_value:
+                        tp_mode = "pct"
+                    else:
+                        tp_mode = "atr"
+                    payload = {
+                        "action": "reject",
+                        "reason": "rr_filter",
+                        "level": {"price": _fmt(level.price), "type": level.level_type},
+                        "rr": _fmt(rr),
+                        "min": _fmt(rr_min),
+                        "side": direction,
+                        "entry_price": _fmt(close),
+                        "sl": _fmt(level.price),
+                        "tp1": _fmt(tp1),
+                        "tp2": _fmt(tp2),
+                        "tp_mode": tp_mode if tp_mode else "unknown",
+                    }
+                    logger.info(json.dumps(payload))
                     continue
             else:
                 logger.info(json.dumps({"action": "skip", "reason": "rr_filter_disabled"}))
