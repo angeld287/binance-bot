@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 from typing import Any
 import types
+from unittest.mock import MagicMock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
@@ -362,10 +363,10 @@ def test_run_skips_when_position_is_open(monkeypatch, caplog):
     payload = _make_payload("BUY")
     strategy._last_payload = payload
 
-    def fake_generate_signal(self, now):
-        return Signal(action="BUY", price=payload.entry_price, time=now)
-
-    strategy.generate_signal = types.MethodType(fake_generate_signal, strategy)
+    strategy.generate_signal = MagicMock(
+        side_effect=AssertionError("generate_signal should not run when skipping")
+    )
+    strategy.should_trigger_breakout = MagicMock()
 
     def fail_compute_orders(self, payload, *, context=None):  # pragma: no cover - defensive
         raise AssertionError("compute_orders should not run when skipping")
@@ -390,6 +391,8 @@ def test_run_skips_when_position_is_open(monkeypatch, caplog):
     assert result["position_amt"] == 0.75
     assert any("skipped_existing_position" in record.message for record in caplog.records)
     assert place_called["count"] == 0
+    strategy.generate_signal.assert_not_called()
+    strategy.should_trigger_breakout.assert_not_called()
 
 
 def test_run_skips_when_entry_order_exists(caplog):
@@ -508,7 +511,7 @@ def test_run_allows_signal_when_no_duplicates(caplog):
     with caplog.at_level("INFO", logger="bot.strategy.breakout_dual_tf"):
         result = strategy.run()
 
-    assert broker.open_orders_calls == 1
+    assert broker.open_orders_calls == 2
     assert result["status"] == "signal"
     assert result["strategy"] == "breakout_dual_tf"
     assert result["symbol"] == "BTCUSDT"

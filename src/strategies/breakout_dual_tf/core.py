@@ -323,13 +323,96 @@ class BreakoutDualTFStrategy(Strategy):
 
     # ------------------------------------------------------------------
     def _has_active_position_or_orders(
-        self, symbol: str, side: str
+        self, symbol: str, side: str | None = None
     ) -> dict[str, Any] | None:
         """Return skip payload when there's an active position/order."""
 
+        sides_to_check: tuple[str, ...]
+        if side is None:
+            sides_to_check = ("BUY", "SELL")
+        else:
+            sides_to_check = (side,)
+
+        summary_total: dict[str, Any] = {
+            "has_position": False,
+            "open_orders_total": 0,
+            "tp_reduce_only": False,
+            "tp_restore_attempted": False,
+            "tp_restore_success": False,
+            "tp_expected_stop": None,
+            "sides": [],
+        }
+
+        payload: dict[str, Any] | None = None
+        for candidate in sides_to_check:
+            payload_candidate = self._has_active_position_or_orders_single(
+                symbol, candidate
+            )
+            side_summary = dict(
+                getattr(self, "_poscheck_last_summary_single", {})
+            )
+            if not side_summary:
+                side_summary = {
+                    "side": str(candidate),
+                    "has_position": False,
+                    "open_orders_total": 0,
+                    "tp_reduce_only": False,
+                    "tp_restore_attempted": False,
+                    "tp_restore_success": False,
+                    "tp_expected_stop": None,
+                }
+            summary_total["sides"].append(side_summary)
+            summary_total["has_position"] = (
+                summary_total["has_position"] or side_summary.get("has_position", False)
+            )
+            summary_total["open_orders_total"] += side_summary.get("open_orders_total", 0)
+            summary_total["tp_reduce_only"] = (
+                summary_total["tp_reduce_only"]
+                or side_summary.get("tp_reduce_only", False)
+            )
+            summary_total["tp_restore_attempted"] = (
+                summary_total["tp_restore_attempted"]
+                or side_summary.get("tp_restore_attempted", False)
+            )
+            summary_total["tp_restore_success"] = (
+                summary_total["tp_restore_success"]
+                or side_summary.get("tp_restore_success", False)
+            )
+            if (
+                summary_total["tp_expected_stop"] is None
+                and side_summary.get("tp_expected_stop") is not None
+            ):
+                summary_total["tp_expected_stop"] = side_summary.get("tp_expected_stop")
+            if payload_candidate is not None and payload is None:
+                payload = payload_candidate
+                break
+
+        setattr(self, "_poscheck_last_summary", summary_total)
+        return payload
+
+    # ------------------------------------------------------------------
+    def _has_active_position_or_orders_single(
+        self, symbol: str, side: str
+    ) -> dict[str, Any] | None:
+        """Return skip payload when there's an active position/order for a side."""
+
+        summary: dict[str, Any] = {
+            "side": "",
+            "has_position": False,
+            "open_orders_total": 0,
+            "tp_reduce_only": False,
+            "tp_restore_attempted": False,
+            "tp_restore_success": False,
+            "tp_expected_stop": None,
+        }
+
+        def _finalize(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+            setattr(self, "_poscheck_last_summary_single", summary.copy())
+            return payload
+
         exchange = self._broker
         if exchange is None:
-            return None
+            return _finalize(None)
 
         if not hasattr(self, "_logger"):
             self._logger = logger
@@ -370,6 +453,7 @@ class BreakoutDualTFStrategy(Strategy):
         side_norm = {"LONG": "BUY", "SHORT": "SELL"}.get(side_norm, side_norm)
         if side_norm not in {"BUY", "SELL"}:
             side_norm = "SELL" if side_norm.startswith("S") else "BUY"
+        summary["side"] = side_norm
 
         def _coerce_bool(value: Any) -> bool:
             if isinstance(value, str):
@@ -437,6 +521,7 @@ class BreakoutDualTFStrategy(Strategy):
                 break
 
             if found_tp_close:
+                summary["tp_reduce_only"] = True
                 self._logger.info(
                     "tp_close_all_exists %s",
                     {"symbol": broker_symbol, "positionSide": target_side},
@@ -468,6 +553,8 @@ class BreakoutDualTFStrategy(Strategy):
                     else:
                         expected = round(expected, 8)
                     expected_stop_price = expected
+            if expected_stop_price is not None:
+                summary["tp_expected_stop"] = expected_stop_price
 
             self._logger.info(
                 "tp_close_all_missing %s",
@@ -560,6 +647,7 @@ class BreakoutDualTFStrategy(Strategy):
             exit_side_order = "SELL" if target_side == "LONG" else "BUY"
             tp_cid = sanitize_client_order_id(f"bdtf-{uuid4().hex[:8]}-tp")
 
+            summary["tp_restore_attempted"] = True
             try:
                 order_resp = exchange.place_tp_reduce_only(
                     broker_symbol,
@@ -579,6 +667,7 @@ class BreakoutDualTFStrategy(Strategy):
                     },
                 )
             else:
+                summary["tp_restore_success"] = True
                 self._logger.info(
                     "tp_s3_load.restore %s",
                     {
@@ -675,6 +764,7 @@ class BreakoutDualTFStrategy(Strategy):
 
         if position_side is not None and not math.isclose(position_amt, 0.0, abs_tol=1e-12):
             orders_for_tp = _ensure_open_orders()
+            summary["open_orders_total"] = len(orders_for_tp or [])
             tp_close_all_state(
                 position_qty=position_amt,
                 position_side_value=position_side_raw or position_side,
@@ -682,6 +772,7 @@ class BreakoutDualTFStrategy(Strategy):
                 orders=orders_for_tp,
             )
             has_position = True
+            summary["has_position"] = True
             payload = {
                 "status": "skipped_existing_position",
                 "strategy": "breakout_dual_tf",
@@ -704,7 +795,7 @@ class BreakoutDualTFStrategy(Strategy):
                     "result": "skip_position",
                 },
             )
-            return payload
+            return _finalize(payload)
 
         tp_close_all_state(
             position_qty=position_amt,
@@ -807,6 +898,7 @@ class BreakoutDualTFStrategy(Strategy):
 
         matched_entry_orders = len(working_orders)
         if working_orders:
+            summary["open_orders_total"] = open_orders_total
             payload = {
                 "status": "skipped_existing_entry_orders",
                 "strategy": "breakout_dual_tf",
@@ -835,7 +927,7 @@ class BreakoutDualTFStrategy(Strategy):
                     "result": "skip_entry_orders",
                 },
             )
-            return payload
+            return _finalize(payload)
 
         self._logger.info(
             "bdtf.poscheck.summary %s",
@@ -846,7 +938,8 @@ class BreakoutDualTFStrategy(Strategy):
                 "result": "none",
             },
         )
-        return None
+        summary["open_orders_total"] = open_orders_total
+        return _finalize(None)
 
     def _get_open_orders(
         self, symbol: str, side_norm: str
@@ -1669,6 +1762,28 @@ class BreakoutDualTFStrategy(Strategy):
 
         now = now_utc or datetime.utcnow()
         symbol = get_symbol(self._settings)
+        skip_payload = self._has_active_position_or_orders(symbol, side=None)
+        summary_pre = getattr(self, "_poscheck_last_summary", None)
+        guard_log: dict[str, Any] = {
+            "strategy": "breakout_dual_tf",
+            "symbol": symbol,
+            "result": "skip" if skip_payload is not None else "continue",
+        }
+        if isinstance(summary_pre, dict):
+            guard_log.update(
+                {
+                    "has_position": summary_pre.get("has_position"),
+                    "open_orders_total": summary_pre.get("open_orders_total"),
+                    "tp_reduce_only": summary_pre.get("tp_reduce_only"),
+                    "tp_restore_attempted": summary_pre.get("tp_restore_attempted"),
+                    "tp_restore_success": summary_pre.get("tp_restore_success"),
+                    "tp_expected_stop": summary_pre.get("tp_expected_stop"),
+                }
+            )
+        logger.info("bdtf.poscheck.guard %s", guard_log)
+        if skip_payload is not None:
+            return skip_payload
+
         signal = self.generate_signal(now)
 
         if signal is None or self._last_payload is None:
