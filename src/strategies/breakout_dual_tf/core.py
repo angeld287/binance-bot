@@ -259,6 +259,42 @@ class BreakoutDualTFStrategy(Strategy):
         if config:
             self._config.update(config)
 
+        level_window_source = "default"
+        base_level_window = self._config.get("LEVEL_WINDOW", self.DEFAULT_CONFIG["LEVEL_WINDOW"])
+        try:
+            effective_level_window = int(base_level_window)
+        except (TypeError, ValueError):
+            effective_level_window = int(self.DEFAULT_CONFIG["LEVEL_WINDOW"])
+
+        env_value: str | None = None
+        if "LEVEL_WINDOW" in os.environ:
+            env_value = os.environ["LEVEL_WINDOW"]
+            level_window_source = "env:LEVEL_WINDOW"
+        elif "LOOKBACK_BARS" in os.environ:
+            env_value = os.environ["LOOKBACK_BARS"]
+            level_window_source = "env:LOOKBACK_BARS"
+
+        if env_value is not None:
+            try:
+                effective_level_window = int(env_value)
+            except (TypeError, ValueError):
+                effective_level_window = int(self._config.get("LEVEL_WINDOW", self.DEFAULT_CONFIG["LEVEL_WINDOW"]))
+                level_window_source = "default"
+
+        if effective_level_window < 10:
+            effective_level_window = 10
+        elif effective_level_window > 500:
+            effective_level_window = 500
+
+        self._config["LEVEL_WINDOW"] = effective_level_window
+        logger.info(
+            {
+                "cfg": "LEVEL_WINDOW",
+                "effective": self._config["LEVEL_WINDOW"],
+                "source": level_window_source,
+            }
+        )
+
         default_rr_enabled = self.DEFAULT_CONFIG["RR_FILTER_ENABLED"]
         rr_source: Any = default_rr_enabled
         settings_rr_value = getattr(settings, "RR_FILTER_ENABLED", None)
@@ -1039,6 +1075,7 @@ class BreakoutDualTFStrategy(Strategy):
     def get_levels(self, symbol: str, tf: str | None = None) -> list[Level]:
         timeframe = tf or getattr(self._settings, "INTERVAL", "1h")
         limit = max(int(self._config["LEVEL_WINDOW"]) * 3, 120)
+        logger.info({"lookback_effective_dual_tf": self._config["LEVEL_WINDOW"]})
         candles = self._fetch_candles(symbol, timeframe, limit)
         if len(candles) < 10:
             return []
