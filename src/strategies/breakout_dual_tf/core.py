@@ -33,6 +33,60 @@ from .filters.ema_distance import ema_distance_filter
 
 logger = logging.getLogger("bot.strategy.breakout_dual_tf")
 
+_TPSL_DEBUG_ENABLED = parse_bool(os.getenv("TPSL_DEBUG_LOG", "0"), default=False)
+_TPSL_RUN_ID = os.getenv("TPSL_DEBUG_RUN_ID", "") or uuid4().hex[:8]
+
+
+def _ts_to_iso(ts: float | int | None) -> str | None:
+    if ts in (None, ""):
+        return None
+    try:
+        ts_float = float(ts)
+    except (TypeError, ValueError):
+        return None
+    if ts_float > 1_000_000_000_000:  # milliseconds
+        ts_float /= 1_000.0
+    try:
+        return datetime.utcfromtimestamp(ts_float).isoformat(timespec="milliseconds") + "Z"
+    except (OverflowError, OSError, ValueError):  # pragma: no cover - defensive guard
+        return None
+
+
+def _debug_timestamp() -> tuple[str, float]:
+    now = datetime.utcnow()
+    iso = now.isoformat(timespec="milliseconds") + "Z"
+    return iso, now.timestamp()
+
+
+def _debug_base(symbol: str | None, side: str | None, interval: str | None) -> dict[str, Any]:
+    iso, unix_ts = _debug_timestamp()
+    return {
+        "timestamp_iso": iso,
+        "timestamp_unix": round(unix_ts, 6),
+        "symbol": symbol or "UNKNOWN",
+        "side": side or "NONE",
+        "interval": interval or "UNKNOWN",
+        "run_id": _TPSL_RUN_ID,
+    }
+
+
+def _format_for_log(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _format_for_log(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_format_for_log(v) for v in value]
+    return _fmt(value)
+
+
+def debug_log(payload: dict[str, Any]) -> None:
+    if not _TPSL_DEBUG_ENABLED:
+        return
+    try:
+        formatted = _format_for_log(payload)
+        logger.info(json.dumps(formatted, separators=(",", ":")))
+    except Exception:  # pragma: no cover - defensive guard
+        logger.debug("tpsl_debug_log_failed", exc_info=True)
+
 
 # ---------------------------------------------------------------------------
 # Helper dataclasses
@@ -192,26 +246,64 @@ def _find_recent_swing(
     direction: str,
     left: int = 2,
     right: int = 2,
+    *,
+    debug: dict[str, Any] | None = None,
 ) -> float:
+    fallback_reason = None
+    pivot_ok = False
+    swing_price = float(candles[-1][3 if direction == "LONG" else 2])
+    swing_ts: int | None = int(candles[-1][0]) if candles else None
+    bars_ago = 0
+    sl_source = "fallback"
+
     if len(candles) < left + right + 1:
-        return float(candles[-1][3 if direction == "LONG" else 2])
-    start = len(candles) - right - 1
-    for idx in range(start, left - 1, -1):
+        fallback_reason = "insufficient_candles"
+    else:
         lows = [float(c[3]) for c in candles]
         highs = [float(c[2]) for c in candles]
-        if direction == "LONG":
-            pivot_low = lows[idx]
-            if pivot_low <= min(lows[idx - left : idx]) and pivot_low <= min(
-                lows[idx + 1 : idx + 1 + right]
-            ):
-                return pivot_low
+        start = len(candles) - right - 1
+        for idx in range(start, left - 1, -1):
+            if direction == "LONG":
+                pivot_low = lows[idx]
+                if pivot_low <= min(lows[idx - left : idx]) and pivot_low <= min(
+                    lows[idx + 1 : idx + 1 + right]
+                ):
+                    swing_price = pivot_low
+                    swing_ts = int(candles[idx][0])
+                    bars_ago = len(candles) - 1 - idx
+                    pivot_ok = True
+                    sl_source = "swing"
+                    break
+            else:
+                pivot_high = highs[idx]
+                if pivot_high >= max(highs[idx - left : idx]) and pivot_high >= max(
+                    highs[idx + 1 : idx + 1 + right]
+                ):
+                    swing_price = pivot_high
+                    swing_ts = int(candles[idx][0])
+                    bars_ago = len(candles) - 1 - idx
+                    pivot_ok = True
+                    sl_source = "swing"
+                    break
         else:
-            pivot_high = highs[idx]
-            if pivot_high >= max(highs[idx - left : idx]) and pivot_high >= max(
-                highs[idx + 1 : idx + 1 + right]
-            ):
-                return pivot_high
-    return float(candles[-1][3 if direction == "LONG" else 2])
+            fallback_reason = "no_pivot_found"
+
+    if debug is not None:
+        debug_log(
+            {
+                **_debug_base(debug.get("symbol"), direction, debug.get("interval")),
+                "evt": "swing_pick",
+                "sl_source": sl_source,
+                "swing_price": swing_price,
+                "swing_ts": swing_ts,
+                "swing_iso": _ts_to_iso(swing_ts),
+                "bars_ago": bars_ago,
+                "pivot_ok": pivot_ok,
+                "fallback_reason": fallback_reason,
+            }
+        )
+
+    return swing_price
 
 
 def _snap_price(price: float, tick: float, *, side: str) -> float:
@@ -726,6 +818,14 @@ class BreakoutDualTFStrategy(Strategy):
                         "order": order_resp,
                     },
                 )
+                debug_log(
+                    {
+                        **_debug_base(broker_symbol, target_side, self._exec_tf),
+                        "evt": "tp_s3_load.restore",
+                        "tp_value": tp_price,
+                        "bars_since_open": None,
+                    }
+                )
         try:
             info: Any | None
             if hasattr(exchange, "get_position"):
@@ -1080,7 +1180,22 @@ class BreakoutDualTFStrategy(Strategy):
         if len(candles) < 10:
             return []
 
-        self._last_level_atr = _compute_atr(candles[-int(self._config["LEVEL_WINDOW"]) - 1 :])
+        atr_slice = candles[-int(self._config["LEVEL_WINDOW"]) - 1 :]
+        self._last_level_atr = _compute_atr(atr_slice)
+        debug_log(
+            {
+                **_debug_base(symbol, "NONE", timeframe),
+                "evt": "atr_calc",
+                "atr_value": self._last_level_atr,
+                "atr_len": len(atr_slice),
+                "atr_source_tf": timeframe,
+                "candles_block": "level_candles",
+                "close_ts_first": atr_slice[0][0] if atr_slice else None,
+                "close_ts_last": atr_slice[-1][0] if atr_slice else None,
+                "close_iso_first": _ts_to_iso(atr_slice[0][0]) if atr_slice else None,
+                "close_iso_last": _ts_to_iso(atr_slice[-1][0]) if atr_slice else None,
+            }
+        )
         window = int(self._config["LEVEL_WINDOW"])
         left = int(self._config["PIVOT_LEFT"])
         right = int(self._config["PIVOT_RIGHT"])
@@ -1221,6 +1336,20 @@ class BreakoutDualTFStrategy(Strategy):
         low = float(candle_exec[3])
         ts = int(candle_exec[0])
         atr_exec = _compute_atr(exec_candles)
+        debug_log(
+            {
+                **_debug_base(context.get("symbol"), "NONE", exec_tf),
+                "evt": "atr_calc",
+                "atr_value": atr_exec,
+                "atr_len": len(exec_candles),
+                "atr_source_tf": exec_tf,
+                "candles_block": "exec_candles",
+                "close_ts_first": exec_candles[0][0] if exec_candles else None,
+                "close_ts_last": exec_candles[-1][0] if exec_candles else None,
+                "close_iso_first": _ts_to_iso(exec_candles[0][0]) if exec_candles else None,
+                "close_iso_last": _ts_to_iso(exec_candles[-1][0]) if exec_candles else None,
+            }
+        )
         if atr_exec <= 0:
             self._log_reject("atr_unavailable")
             return None
@@ -1250,6 +1379,7 @@ class BreakoutDualTFStrategy(Strategy):
         retest_tol = float(self._config["RETEST_TOL_ATR"])
         retest_timeout = int(self._config["RETEST_TIMEOUT"])
 
+        symbol = context.get("symbol")
         for level in sorted_levels:
             direction = "SHORT" if level.level_type == "R" else "LONG"
             action = "SELL" if direction == "SHORT" else "BUY"
@@ -1373,8 +1503,20 @@ class BreakoutDualTFStrategy(Strategy):
                     )
                     continue
 
-            swing = _find_recent_swing(exec_candles, direction)
-            sl, tp1, tp2 = self._compute_sl_tp(direction, close, level, atr_exec, swing)
+            swing = _find_recent_swing(
+                exec_candles,
+                direction,
+                debug={"symbol": symbol, "interval": exec_tf},
+            )
+            sl, tp1, tp2 = self._compute_sl_tp(
+                direction,
+                close,
+                level,
+                atr_exec,
+                swing,
+                symbol=symbol,
+                interval=exec_tf,
+            )
             if sl <= 0:
                 self._log_reject("invalid_sl", level=level, data={"sl": sl})
                 continue
@@ -1384,6 +1526,20 @@ class BreakoutDualTFStrategy(Strategy):
                 self._log_reject("risk_zero", level=level)
                 continue
             rr = reward / risk
+            debug_log(
+                {
+                    **_debug_base(symbol, direction, exec_tf),
+                    "evt": "rr_eval",
+                    "risk_abs": risk,
+                    "reward_abs": reward,
+                    "rr": rr,
+                    "rr_min": rr_min,
+                    "tp_used": "TP2",
+                    "entry_ref": close,
+                    "sl_ref": sl,
+                    "tp_ref": tp2,
+                }
+            )
             if self._config.get("RR_FILTER_ENABLED", False):
                 if rr < rr_min:
                     tp_pct_value = get_take_profit_pct(self._settings)
@@ -1405,6 +1561,19 @@ class BreakoutDualTFStrategy(Strategy):
                         "tp_mode": tp_mode if tp_mode else "unknown",
                     }
                     logger.info(json.dumps(payload))
+                    debug_log(
+                        {
+                            **_debug_base(symbol, direction, exec_tf),
+                            "evt": "rr_reject",
+                            "rr": rr,
+                            "rr_min": rr_min,
+                            "level_price": level.price,
+                            "level_type": level.level_type,
+                            "context": "retest" if pending else "breakout",
+                            "volume_ok": vol_rel >= vol_threshold,
+                            "ema_ok": ema_ok,
+                        }
+                    )
                     continue
             else:
                 logger.info(json.dumps({"action": "skip", "reason": "rr_filter_disabled"}))
@@ -1512,6 +1681,9 @@ class BreakoutDualTFStrategy(Strategy):
         level: Level,
         atr: float,
         swing: float,
+        *,
+        symbol: str | None = None,
+        interval: str | None = None,
     ) -> tuple[float, float, float]:
         stop_pct = get_stop_loss_pct(self._settings)
         tp_pct = get_take_profit_pct(self._settings)
@@ -1533,6 +1705,31 @@ class BreakoutDualTFStrategy(Strategy):
             if tp_pct:
                 tp1 = entry * (1 - tp_pct)
                 tp2 = entry * (1 - 2 * tp_pct)
+        use_pct = bool(stop_pct or tp_pct)
+        source = "PCT" if use_pct else "ATR"
+        signs_ok = (
+            tp1 > entry and tp2 > entry and sl < entry
+            if direction == "LONG"
+            else tp1 < entry and tp2 < entry and sl > entry
+        )
+        debug_log(
+            {
+                **_debug_base(symbol, direction, interval or self._exec_tf),
+                "evt": "sl_tp_raw",
+                "entry_raw": entry,
+                "tp1_raw": tp1,
+                "tp2_raw": tp2,
+                "sl_raw": sl,
+                "use_pct": use_pct,
+                "take_profit_pct": tp_pct,
+                "stop_loss_pct": stop_pct,
+                "source": source,
+                "atr_value": atr,
+                "signs_ok": signs_ok,
+                "level_price": level.price,
+                "swing_price": swing,
+            }
+        )
         return sl, tp1, tp2
 
     # ------------------------------------------------------------------
@@ -1625,6 +1822,28 @@ class BreakoutDualTFStrategy(Strategy):
         sl_rounded = _snap_price(sl, tick, side=sl_side)
         tp1_rounded = _snap_price(tp1, tick, side=signal.action)
         tp2_rounded = _snap_price(tp2, tick, side=signal.action)
+        debug_log(
+            {
+                **_debug_base(symbol, signal.direction, signal.exec_tf),
+                "evt": "snap_prices",
+                "entry_raw": entry,
+                "entry_snapped": entry_rounded,
+                "tp1_raw": tp1,
+                "tp1_snapped": tp1_rounded,
+                "tp2_raw": tp2,
+                "tp2_snapped": tp2_rounded,
+                "sl_raw": sl,
+                "sl_snapped": sl_rounded,
+                "tickSize": tick,
+                "stepSize": step,
+                "buy_sell_side_for_snap": signal.action,
+                "buy_sell_side_sl": sl_side,
+                "delta_entry": entry_rounded - entry,
+                "delta_tp1": tp1_rounded - tp1,
+                "delta_tp2": tp2_rounded - tp2,
+                "delta_sl": sl_rounded - sl,
+            }
+        )
 
         risk_distance = abs(entry_rounded - sl_rounded)
         risk_notional = float(getattr(self._settings, "RISK_NOTIONAL_USDT", 0.0) or 0.0)
@@ -1709,6 +1928,7 @@ class BreakoutDualTFStrategy(Strategy):
 
         symbol = str(orders.get("symbol") or get_symbol(self._settings))
         side = str(orders.get("side", "")).upper() or "BUY"
+        side_log = "LONG" if side == "BUY" else "SHORT"
         qty = float(orders.get("qty", 0.0) or 0.0)
         entry_price = float(orders.get("entry", 0.0) or 0.0)
         stop_loss = float(orders.get("stop_loss", 0.0) or 0.0)
@@ -1746,10 +1966,20 @@ class BreakoutDualTFStrategy(Strategy):
         except (TypeError, ValueError):  # pragma: no cover - defensive conversion
             tp_close_price = 0.0
         if tp_close_price > 0:
+            now_ts = datetime.utcnow()
             persist_tp_value(
                 symbol,
                 tp_close_price,
-                int(datetime.utcnow().timestamp()),
+                int(now_ts.timestamp()),
+            )
+            debug_log(
+                {
+                    **_debug_base(symbol, side_log, self._exec_tf),
+                    "evt": "tp_s3_persist",
+                    "tp_value": tp_close_price,
+                    "timestamp_iso": now_ts.isoformat(timespec="milliseconds") + "Z",
+                    "timestamp_unix": round(now_ts.timestamp(), 6),
+                }
             )
         else:
             logger.info(
