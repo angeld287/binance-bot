@@ -58,16 +58,36 @@ def _debug_timestamp() -> tuple[str, float]:
     return iso, now.timestamp()
 
 
-def _debug_base(symbol: str | None, side: str | None, interval: str | None) -> dict[str, Any]:
+def _debug_base(symbol: Any, side: Any, interval: Any) -> dict[str, Any]:
     iso, unix_ts = _debug_timestamp()
-    return {
-        "timestamp_iso": iso,
-        "timestamp_unix": round(unix_ts, 6),
-        "symbol": symbol or "UNKNOWN",
-        "side": side or "NONE",
-        "interval": interval or "UNKNOWN",
-        "run_id": _TPSL_RUN_ID,
-    }
+
+    def _coerce(value: Any, default: str) -> str:
+        if value in (None, ""):
+            return default
+        try:
+            return str(value)
+        except Exception:
+            return default
+
+    try:
+        return {
+            "timestamp_iso": iso,
+            "timestamp_unix": round(unix_ts, 6),
+            "symbol": _coerce(symbol, "UNKNOWN"),
+            "side": _coerce(side, "NONE"),
+            "interval": _coerce(interval, "UNKNOWN"),
+            "run_id": _coerce(_TPSL_RUN_ID, "NONE"),
+        }
+    except Exception as err:  # pragma: no cover - defensive guard
+        try:
+            logger.info(json.dumps({"evt": "dbg_fail", "err": str(err)}))
+        except Exception:  # pragma: no cover - defensive guard
+            logger.info('{"evt":"dbg_fail","err":"unavailable"}')
+        return {
+            "timestamp_iso": iso,
+            "timestamp_unix": round(unix_ts, 6),
+            "evt": "dbg_fail",
+        }
 
 
 def _format_for_log(value: Any) -> Any:
@@ -439,6 +459,7 @@ class BreakoutDualTFStrategy(Strategy):
         #        }
         #    )
         #)
+
         max_retries_env = getattr(settings, "MAX_RETRIES", None)
         cooldown_env = getattr(settings, "COOLDOWN_BARS", None)
         if max_retries_env is not None:
@@ -459,6 +480,16 @@ class BreakoutDualTFStrategy(Strategy):
         self._last_payload: BreakoutSignalPayload | None = None
         self._exec_tf: str = downscale_interval(getattr(settings, "INTERVAL", "1h"))
         self._bar_ms: int = _interval_to_minutes(self._exec_tf) * 60_000
+
+    def _get_exec_tf(self, context: dict[str, Any] | None) -> str:
+        return (
+            (context or {}).get("exec_tf")
+            or (context or {}).get("interval")
+            or getattr(self, "INTERVAL", None)
+            or getattr(self, "interval", None)
+            or getattr(getattr(self, "config", None), "INTERVAL", None)
+            or "unknown"
+        )
 
     # ------------------------------------------------------------------
     def _has_active_position_or_orders(
@@ -1326,6 +1357,10 @@ class BreakoutDualTFStrategy(Strategy):
         if not levels:
             return None
 
+        symbol = context.get("symbol")
+        exec_tf = self._get_exec_tf(context)
+        debug_log({"evt": "dbg_boot", "exec_tf": exec_tf})
+
         exec_candles: Sequence[Sequence[float]] = context.get("exec_candles", [])
         if len(exec_candles) < 55:
             self._log_reject("not_enough_exec_candles", data={"len": len(exec_candles)})
@@ -1336,9 +1371,10 @@ class BreakoutDualTFStrategy(Strategy):
         low = float(candle_exec[3])
         ts = int(candle_exec[0])
         atr_exec = _compute_atr(exec_candles)
+        base = _debug_base(symbol, "NONE", exec_tf)
         debug_log(
             {
-                **_debug_base(context.get("symbol"), "NONE", exec_tf),
+                **base,
                 "evt": "atr_calc",
                 "atr_value": atr_exec,
                 "atr_len": len(exec_candles),
@@ -1365,7 +1401,6 @@ class BreakoutDualTFStrategy(Strategy):
         if ema25_exec is None:
             ema25_exec = _ema(exec_closes, 25)
             context["ema25_exec"] = ema25_exec
-        exec_tf = context.get("exec_tf", self._exec_tf)
         bar_ms = _interval_to_minutes(exec_tf) * 60_000
         self._bar_ms = bar_ms
 
@@ -1379,7 +1414,6 @@ class BreakoutDualTFStrategy(Strategy):
         retest_tol = float(self._config["RETEST_TOL_ATR"])
         retest_timeout = int(self._config["RETEST_TIMEOUT"])
 
-        symbol = context.get("symbol")
         for level in sorted_levels:
             direction = "SHORT" if level.level_type == "R" else "LONG"
             action = "SELL" if direction == "SHORT" else "BUY"
@@ -1810,7 +1844,9 @@ class BreakoutDualTFStrategy(Strategy):
         tp2 = signal.tp2
         qty_target_src = "NONE"
 
-        ctx = context or {}
+        ctx = dict(context or {})
+        ctx.setdefault("exec_tf", getattr(signal, "exec_tf", None))
+        exec_tf = self._get_exec_tf(ctx)
         tick = float(ctx.get("tick_size", 0.0) or 0.0)
         step = float(ctx.get("step_size", 0.0) or 0.0)
         min_qty = float(ctx.get("min_qty", 0.0) or 0.0)
@@ -1824,7 +1860,7 @@ class BreakoutDualTFStrategy(Strategy):
         tp2_rounded = _snap_price(tp2, tick, side=signal.action)
         debug_log(
             {
-                **_debug_base(symbol, signal.direction, signal.exec_tf),
+                **_debug_base(symbol, signal.direction, exec_tf),
                 "evt": "snap_prices",
                 "entry_raw": entry,
                 "entry_snapped": entry_rounded,
@@ -2032,6 +2068,10 @@ class BreakoutDualTFStrategy(Strategy):
             "now": now,
             "exec_candles": exec_candles,
         }
+        exec_tf = self._get_exec_tf(context)
+        context["exec_tf"] = exec_tf
+        self._exec_tf = exec_tf
+        self._bar_ms = _interval_to_minutes(exec_tf) * 60_000
         payload = self.should_trigger_breakout(exec_candles[-1], levels, context)
         if payload is None:
             return None
