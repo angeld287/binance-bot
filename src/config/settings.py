@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     INTERVAL: str = "1h"
     RR_FILTER_ENABLED: bool | None = None
     RR_MIN: float | None = None
+    STRICT_ROUNDING: bool = True
 
     BINANCE_API_KEY: str | None = None
     BINANCE_API_SECRET: str | None = None
