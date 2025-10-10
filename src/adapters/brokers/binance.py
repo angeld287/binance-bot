@@ -5,7 +5,8 @@ from __future__ import annotations
 import hmac, hashlib, logging, urllib.parse as _url
 import os
 import time
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from datetime import timedelta
+from decimal import Decimal, ROUND_DOWN
 from typing import Any, Dict
 
 from binance.client import Client
@@ -13,6 +14,7 @@ from requests import Session
 
 from config.settings import Settings
 from core.ports.broker import BrokerPort
+from common.precision import FiltersCache, format_decimal, round_to_step, round_to_tick
 from common.utils import sanitize_client_order_id
 from common.symbols import normalize_symbol as _normalize_symbol
 
@@ -103,7 +105,12 @@ class BinanceBroker(BrokerPort):
         )
 
         # Cache for symbol filters to avoid repeated ``exchangeInfo`` calls
-        self._filters_cache: Dict[str, Dict[str, Any]] = {}
+        ttl_minutes = getattr(settings, "FILTERS_CACHE_TTL_MIN", 5)
+        try:
+            ttl_value = max(float(ttl_minutes), 1.0)
+        except (TypeError, ValueError):
+            ttl_value = 5.0
+        self._filters_cache = FiltersCache(ttl=timedelta(minutes=ttl_value))
 
     def _redact(self, s: str) -> str:
         if not s:
@@ -200,15 +207,24 @@ class BinanceBroker(BrokerPort):
 
         try:
             safe_id = sanitize_client_order_id(clientOrderId)
-            return self._client.futures_create_order(
-                symbol=_to_binance_symbol(symbol),
-                side=side,
-                type="LIMIT",
-                price=price,
-                quantity=qty,
-                timeInForce=timeInForce,
-                newClientOrderId=safe_id,
+            filters = self.get_symbol_filters(symbol)
+            tick = Decimal(filters["PRICE_FILTER"]["tickSize"])
+            step = Decimal(filters["LOT_SIZE"]["stepSize"])
+            side_norm = (side or "").upper()
+            price_dec = round_to_tick(price, tick, side=side_norm)
+            qty_dec = round_to_step(qty, step)
+            payload = {
+                "symbol": _to_binance_symbol(symbol),
+                "side": side,
+                "type": "LIMIT",
+                "price": format_decimal(price_dec),
+                "quantity": format_decimal(qty_dec),
+                "timeInForce": timeInForce,
+                "newClientOrderId": safe_id,
                 **extra,
+            }
+            return self._client.futures_create_order(
+                **payload,
             )
         except Exception as exc:  # pragma: no cover - network failures
             logger.error("Failed to place limit order: %s", exc)
@@ -267,17 +283,17 @@ class BinanceBroker(BrokerPort):
             safe_id = sanitize_client_order_id(clientOrderId)
             filters = self.get_symbol_filters(symbol)
             tick = Decimal(filters["PRICE_FILTER"]["tickSize"])
-            precision = max(0, -tick.as_tuple().exponent)
-            requested_decimal = Decimal(str(stopPrice))
-            rounding = ROUND_UP if side.upper() == "SELL" else ROUND_DOWN
-            adjusted_decimal = requested_decimal.quantize(tick, rounding=rounding)
-            adjusted_stop_price = format(adjusted_decimal, f".{precision}f")
+            step = Decimal(filters["LOT_SIZE"]["stepSize"])
+            stop_price_dec = round_to_tick(stopPrice, tick, side=side)
+            qty_dec = round_to_step(qty, step, rounding=ROUND_DOWN)
+            adjusted_stop_price = format_decimal(stop_price_dec)
+            adjusted_qty = format_decimal(qty_dec)
 
             logger.info(
                 "Stop reduce-only price adjust | symbol=%s side=%s requested=%s adjusted=%s tickSize=%s",
                 symbol,
                 side,
-                requested_decimal,
+                format_decimal(stopPrice),
                 adjusted_stop_price,
                 tick,
             )
@@ -286,7 +302,7 @@ class BinanceBroker(BrokerPort):
                 side=side,
                 type="STOP_MARKET",
                 stopPrice=adjusted_stop_price,
-                quantity=qty,
+                quantity=adjusted_qty,
                 reduceOnly=True,
                 newClientOrderId=safe_id,
             )
@@ -311,12 +327,17 @@ class BinanceBroker(BrokerPort):
 
         try:
             safe_id = sanitize_client_order_id(clientOrderId)
+            filters = self.get_symbol_filters(symbol)
+            tick = Decimal(filters["PRICE_FILTER"]["tickSize"])
+            step = Decimal(filters["LOT_SIZE"]["stepSize"])
+            price_dec = round_to_tick(tpPrice, tick, side=side)
+            qty_dec = round_to_step(qty, step)
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
                 type="LIMIT",
-                price=tpPrice,
-                quantity=qty,
+                price=format_decimal(price_dec),
+                quantity=format_decimal(qty_dec),
                 timeInForce="GTC",
                 reduceOnly=True,
                 newClientOrderId=safe_id,
@@ -335,30 +356,32 @@ class BinanceBroker(BrokerPort):
         """
 
         sym = _to_binance_symbol(symbol)
-        if not self._filters_cache:
-            try:
-                info = self._client.futures_exchange_info()
-                for s in info.get("symbols", []):
-                    self._filters_cache[s.get("symbol", "")] = {
-                        f["filterType"]: f for f in s.get("filters", [])
-                    }
-            except Exception as exc:  # pragma: no cover - network failures
-                logger.error("Failed to fetch symbol filters: %s", exc)
-                raise
+        def _on_error(err: Exception) -> None:  # pragma: no cover - network failure
+            logger.warning("exchangeInfo refresh failed: %s", err)
+
         try:
-            return self._filters_cache[sym]
-        except KeyError:
-            raise ValueError(f"Symbol {symbol} not found") from None
+            return self._filters_cache.get(
+                self._client,
+                sym,
+                on_refresh_error=_on_error,
+            )
+        except ValueError:
+            raise
+        except Exception as exc:  # pragma: no cover - network failures
+            logger.error("Failed to fetch symbol filters: %s", exc)
+            raise
 
     def round_price_to_tick(self, symbol: str, px: float) -> float:
         filters = self.get_symbol_filters(symbol)
         tick = Decimal(filters["PRICE_FILTER"]["tickSize"])
-        return float((Decimal(str(px)) // tick) * tick)
+        rounded = round_to_tick(px, tick, side="BUY")
+        return float(rounded)
 
     def round_qty_to_step(self, symbol: str, qty: float) -> float:
         filters = self.get_symbol_filters(symbol)
         step = Decimal(filters["LOT_SIZE"]["stepSize"])
-        return float((Decimal(str(qty)) // step) * step)
+        rounded = round_to_step(qty, step)
+        return float(rounded)
 
     def get_available_balance_usdt(self) -> float:
         """Return available USDT balance.

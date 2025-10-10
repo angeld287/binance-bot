@@ -77,6 +77,16 @@ Para operar sin riesgo utilizar Binance Testnet:
 export BINANCE_TESTNET=true
 ```
 
+## 🎯 Precisión y filtros de Binance
+- El bot consulta dinámicamente el `exchangeInfo` de Binance Futures y cachea los filtros de cada símbolo para respetar `tickSize`, `stepSize` y `minNotional`.
+- Todas las cifras críticas (entry, stop, take profits y cantidades) se procesan con `decimal.Decimal` y se redondean vía `round_to_tick` y `round_to_step` antes de enviarse al broker.
+- La bandera `STRICT_ROUNDING` (habilitada por defecto) garantiza que cualquier precio/cantidad que viole los filtros se ajuste o se rechace con logs claros.
+- En los logs de CloudWatch encontrarás un bloque de validación previo al envío de órdenes:
+  ```json
+  {"pre_order_check":{"symbol":"DOGEUSDT","side":"SELL","filters":{"tickSize":"0.0001","stepSize":"1","minNotional":"5"},"entry":"0.248","stop_loss":"0.2496","take_profit_1":"0.2434","take_profit_2":"0.2397","qty":"30200","notional_est":"7499.6","validated":true}}
+  ```
+- La suite de tests incluye verificaciones específicas para símbolos con distintos filtros (`DOGEUSDT`, `SOLUSDT`, `XRPUSDT`) y valida que nunca aparezcan colas binarias en los JSON serializados.
+
 ## 🔒 Seguridad
 - Nunca exponer claves API en el repositorio.
 - Usar AWS Secrets Manager o Parameter Store en producción.

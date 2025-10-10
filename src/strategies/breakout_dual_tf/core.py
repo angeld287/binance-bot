@@ -15,9 +15,11 @@ import math
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Any, Iterable, Sequence
 from uuid import uuid4
 
+from common.precision import format_decimal, round_to_step, round_to_tick, to_decimal
 from common.symbols import normalize_symbol
 from common.utils import sanitize_client_order_id
 from config.settings import get_stop_loss_pct, get_take_profit_pct
@@ -329,9 +331,8 @@ def _find_recent_swing(
 def _snap_price(price: float, tick: float, *, side: str) -> float:
     if tick <= 0:
         return price
-    if side == "BUY":
-        return math.floor(price / tick) * tick
-    return math.ceil(price / tick) * tick
+    snapped = round_to_tick(price, tick, side=side)
+    return float(snapped)
 
 
 # ---------------------------------------------------------------------------
@@ -1838,52 +1839,61 @@ class BreakoutDualTFStrategy(Strategy):
         context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         symbol = signal.symbol
-        entry = signal.entry_price
-        sl = signal.sl
-        tp1 = signal.tp1
-        tp2 = signal.tp2
         qty_target_src = "NONE"
 
         ctx = dict(context or {})
         ctx.setdefault("exec_tf", getattr(signal, "exec_tf", None))
         exec_tf = self._get_exec_tf(ctx)
-        tick = float(ctx.get("tick_size", 0.0) or 0.0)
-        step = float(ctx.get("step_size", 0.0) or 0.0)
-        min_qty = float(ctx.get("min_qty", 0.0) or 0.0)
-        min_notional = float(ctx.get("min_notional", 0.0) or 0.0)
-        balance_usdt = float(ctx.get("available_balance_usdt", 0.0) or 0.0)
+        tick = to_decimal(ctx.get("tick_size", 0.0) or 0.0)
+        step = to_decimal(ctx.get("step_size", 0.0) or 0.0)
+        min_qty = to_decimal(ctx.get("min_qty", 0.0) or 0.0)
+        min_notional = to_decimal(ctx.get("min_notional", 0.0) or 0.0)
+        balance_usdt = to_decimal(ctx.get("available_balance_usdt", 0.0) or 0.0)
 
-        entry_rounded = _snap_price(entry, tick, side=signal.action)
+        strict_rounding = bool(getattr(self._settings, "STRICT_ROUNDING", True))
+
+        entry_dec = to_decimal(signal.entry_price)
+        sl_dec = to_decimal(signal.sl)
+        tp1_dec = to_decimal(signal.tp1)
+        tp2_dec = to_decimal(signal.tp2)
+
+        def _apply_round(value: Decimal, *, side: str) -> Decimal:
+            if not strict_rounding:
+                return value
+            return round_to_tick(value, tick, side=side)
+
+        entry_rounded = _apply_round(entry_dec, side=signal.action)
         sl_side = "SELL" if signal.direction == "LONG" else "BUY"
-        sl_rounded = _snap_price(sl, tick, side=sl_side)
-        tp1_rounded = _snap_price(tp1, tick, side=signal.action)
-        tp2_rounded = _snap_price(tp2, tick, side=signal.action)
+        sl_rounded = _apply_round(sl_dec, side=sl_side)
+        tp1_rounded = _apply_round(tp1_dec, side=signal.action)
+        tp2_rounded = _apply_round(tp2_dec, side=signal.action)
+
         debug_log(
             {
                 **_debug_base(symbol, signal.direction, exec_tf),
                 "evt": "snap_prices",
-                "entry_raw": entry,
-                "entry_snapped": entry_rounded,
-                "tp1_raw": tp1,
-                "tp1_snapped": tp1_rounded,
-                "tp2_raw": tp2,
-                "tp2_snapped": tp2_rounded,
-                "sl_raw": sl,
-                "sl_snapped": sl_rounded,
-                "tickSize": tick,
-                "stepSize": step,
+                "entry_raw": format_decimal(entry_dec),
+                "entry_snapped": format_decimal(entry_rounded),
+                "tp1_raw": format_decimal(tp1_dec),
+                "tp1_snapped": format_decimal(tp1_rounded),
+                "tp2_raw": format_decimal(tp2_dec),
+                "tp2_snapped": format_decimal(tp2_rounded),
+                "sl_raw": format_decimal(sl_dec),
+                "sl_snapped": format_decimal(sl_rounded),
+                "tickSize": format_decimal(tick),
+                "stepSize": format_decimal(step),
                 "buy_sell_side_for_snap": signal.action,
                 "buy_sell_side_sl": sl_side,
-                "delta_entry": entry_rounded - entry,
-                "delta_tp1": tp1_rounded - tp1,
-                "delta_tp2": tp2_rounded - tp2,
-                "delta_sl": sl_rounded - sl,
+                "delta_entry": format_decimal(entry_rounded - entry_dec),
+                "delta_tp1": format_decimal(tp1_rounded - tp1_dec),
+                "delta_tp2": format_decimal(tp2_rounded - tp2_dec),
+                "delta_sl": format_decimal(sl_rounded - sl_dec),
             }
         )
 
-        risk_distance = abs(entry_rounded - sl_rounded)
-        risk_notional = float(getattr(self._settings, "RISK_NOTIONAL_USDT", 0.0) or 0.0)
-        qty_target = 0.0
+        risk_distance = (entry_rounded - sl_rounded).copy_abs()
+        risk_notional = to_decimal(getattr(self._settings, "RISK_NOTIONAL_USDT", 0.0) or 0.0)
+        qty_target = Decimal("0")
         if risk_notional > 0 and risk_distance > 0:
             qty_target = risk_notional / risk_distance
             qty_target_src = "NOTIONAL_RISK"
@@ -1891,64 +1901,102 @@ class BreakoutDualTFStrategy(Strategy):
             qty_target = risk_notional / entry_rounded
             qty_target_src = "NOTIONAL"
         else:
-            risk_pct = float(getattr(self._settings, "RISK_PCT", 0.0) or 0.0)
+            risk_pct = to_decimal(getattr(self._settings, "RISK_PCT", 0.0) or 0.0)
             if risk_pct > 0 and balance_usdt > 0 and risk_distance > 0:
                 qty_target = (balance_usdt * risk_pct) / risk_distance
                 qty_target_src = "PCT_RISK"
 
-        if step > 0:
-            qty_target = math.floor(qty_target / step) * step
+        if strict_rounding and step > 0:
+            qty_target = round_to_step(qty_target, step)
         qty_target = max(qty_target, min_qty)
-        if entry_rounded and entry_rounded * qty_target < min_notional:
-            required_qty = min_notional / entry_rounded if entry_rounded else 0.0
-            if step > 0:
-                required_qty = math.ceil(required_qty / step) * step
-            qty_target = max(qty_target, required_qty)
 
-        qty_tp1 = 0.0
-        qty_tp2 = 0.0
+        if entry_rounded > 0 and qty_target > 0:
+            notional = entry_rounded * qty_target
+            if notional < min_notional:
+                required_qty = min_notional / entry_rounded
+                if strict_rounding and step > 0:
+                    required_qty = round_to_step(required_qty, step, rounding=ROUND_UP)
+                qty_target = max(qty_target, required_qty)
+                if strict_rounding and step > 0:
+                    qty_target = round_to_step(qty_target, step, rounding=ROUND_UP)
+
+        if strict_rounding and step > 0:
+            qty_target = round_to_step(qty_target, step)
+
+        qty_tp1 = Decimal("0")
+        qty_tp2 = Decimal("0")
         if qty_target > 0:
-            if step > 0:
-                steps_total = max(int(round(qty_target / step)), 1)
+            if step > 0 and strict_rounding:
+                steps_total = int((qty_target / step).to_integral_value(rounding=ROUND_DOWN))
+                steps_total = max(steps_total, 1)
                 steps_tp1 = steps_total // 2
-                qty_tp1 = steps_tp1 * step
-                qty_tp1 = min(qty_tp1, qty_target)
+                qty_tp1 = Decimal(steps_tp1) * step
                 qty_tp2 = qty_target - qty_tp1
             else:
                 qty_tp1 = qty_target / 2
                 qty_tp2 = qty_target - qty_tp1
-            qty_tp1 = round(qty_tp1, 10)
-            qty_tp2 = round(qty_tp2, 10)
+            if strict_rounding and step > 0:
+                qty_tp1 = round_to_step(qty_tp1, step)
+                qty_tp2 = qty_target - qty_tp1
+
+        notional_est = entry_rounded * qty_target if entry_rounded > 0 else Decimal("0")
+        filters_info = {
+            "tickSize": format_decimal(tick) if tick > 0 else "0",
+            "stepSize": format_decimal(step) if step > 0 else "0",
+            "minNotional": format_decimal(min_notional) if min_notional > 0 else "0",
+        }
+        pre_order_log = {
+            "symbol": symbol,
+            "side": signal.action,
+            "filters": filters_info,
+            "entry": format_decimal(entry_rounded),
+            "stop_loss": format_decimal(sl_rounded),
+            "take_profit_1": format_decimal(tp1_rounded),
+            "take_profit_2": format_decimal(tp2_rounded),
+            "qty": format_decimal(qty_target),
+            "notional_est": format_decimal(notional_est),
+            "validated": bool(
+                qty_target > 0
+                and entry_rounded > 0
+                and (min_notional == 0 or notional_est >= min_notional)
+                and (min_qty == 0 or qty_target >= min_qty)
+            ),
+        }
+        logger.info(json.dumps({"pre_order_check": pre_order_log}))
 
         orders = {
             "symbol": symbol,
             "side": signal.action,
-            "entry": entry_rounded,
-            "stop_loss": sl_rounded,
-            "take_profit_1": tp1_rounded,
-            "take_profit_2": tp2_rounded,
-            "qty": qty_target,
-            "qty_tp1": qty_tp1,
-            "qty_tp2": qty_tp2,
-            "rr": signal.rr,
+            "entry": format_decimal(entry_rounded),
+            "stop_loss": format_decimal(sl_rounded),
+            "take_profit_1": format_decimal(tp1_rounded),
+            "take_profit_2": format_decimal(tp2_rounded),
+            "qty": format_decimal(qty_target),
+            "qty_tp1": format_decimal(qty_tp1),
+            "qty_tp2": format_decimal(qty_tp2),
+            "rr": float(signal.rr) if signal.rr is not None else None,
             "breakeven_on_tp1": True,
             "qty_target_src": qty_target_src,
             "timeframe_exec": signal.exec_tf,
             "level": {"price": signal.level.price, "type": signal.level.level_type},
         }
-        logger.info(
-            json.dumps(
-                {
-                    "action": "signal",
-                    "strategy": "breakout_dual_tf",
-                    "orders": orders,
-                    "atr": signal.atr,
-                    "volume_rel": signal.volume_rel,
-                    "ema_fast": signal.ema_fast,
-                    "ema_slow": signal.ema_slow,
-                }
-            )
-        )
+
+        signal_log = {
+            "action": "signal",
+            "strategy": "breakout_dual_tf",
+            "orders": orders,
+            "atr": format_decimal(signal.atr) if signal.atr is not None else None,
+            "volume_rel": format_decimal(signal.volume_rel)
+            if signal.volume_rel is not None
+            else None,
+            "ema_fast": format_decimal(signal.ema_fast)
+            if signal.ema_fast is not None
+            else None,
+            "ema_slow": format_decimal(signal.ema_slow)
+            if signal.ema_slow is not None
+            else None,
+        }
+        logger.info(json.dumps(signal_log))
         return orders
 
     # ------------------------------------------------------------------
@@ -1965,9 +2013,9 @@ class BreakoutDualTFStrategy(Strategy):
         symbol = str(orders.get("symbol") or get_symbol(self._settings))
         side = str(orders.get("side", "")).upper() or "BUY"
         side_log = "LONG" if side == "BUY" else "SHORT"
-        qty = float(orders.get("qty", 0.0) or 0.0)
-        entry_price = float(orders.get("entry", 0.0) or 0.0)
-        stop_loss = float(orders.get("stop_loss", 0.0) or 0.0)
+        qty = to_decimal(orders.get("qty", "0") or "0")
+        entry_price = to_decimal(orders.get("entry", "0") or "0")
+        stop_loss = to_decimal(orders.get("stop_loss", "0") or "0")
         exit_side = "SELL" if side == "BUY" else "BUY"
 
         trade_tag = f"bdtf-{uuid4().hex[:8]}"
@@ -1996,23 +2044,19 @@ class BreakoutDualTFStrategy(Strategy):
 
         logger.debug("tp_atr_call_removed_from_place_orders")
 
-        tp_close_price = 0.0
-        try:
-            tp_close_price = float(orders.get("take_profit_2", 0.0) or 0.0)
-        except (TypeError, ValueError):  # pragma: no cover - defensive conversion
-            tp_close_price = 0.0
+        tp_close_price = to_decimal(orders.get("take_profit_2", "0") or "0")
         if tp_close_price > 0:
             now_ts = datetime.utcnow()
             persist_tp_value(
                 symbol,
-                tp_close_price,
+                float(tp_close_price),
                 int(now_ts.timestamp()),
             )
             debug_log(
                 {
                     **_debug_base(symbol, side_log, self._exec_tf),
                     "evt": "tp_s3_persist",
-                    "tp_value": tp_close_price,
+                    "tp_value": float(tp_close_price),
                     "timestamp_iso": now_ts.isoformat(timespec="milliseconds") + "Z",
                     "timestamp_unix": round(now_ts.timestamp(), 6),
                 }
