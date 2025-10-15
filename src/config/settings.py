@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     RR_FILTER_ENABLED: bool | None = None
     RR_MIN: float | None = None
     STRICT_ROUNDING: bool = True
+    MIN_NOTIONAL_BUFFER_PCT: float = 0.03
+    MIN_NOTIONAL_BUFFER_USD: float = 0.10
 
     BINANCE_API_KEY: str | None = None
     BINANCE_API_SECRET: str | None = None

@@ -19,6 +19,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Any, Iterable, Sequence
 from uuid import uuid4
 
+from common.notional import ensure_min_notional_with_buffers
 from common.precision import format_decimal, round_to_step, round_to_tick, to_decimal
 from common.symbols import normalize_symbol
 from common.utils import sanitize_client_order_id
@@ -1832,6 +1833,23 @@ class BreakoutDualTFStrategy(Strategy):
         return context
 
     # ------------------------------------------------------------------
+    def _get_buffer_value(self, name: str, default: Decimal) -> Decimal:
+        raw = None
+        try:
+            raw = getattr(self._settings, name)
+        except AttributeError:
+            raw = None
+        if raw in (None, "") and hasattr(self._settings, "get"):
+            raw = self._settings.get(name, None)
+        if raw in (None, ""):
+            return default
+        try:
+            dec = to_decimal(raw)
+        except (TypeError, ValueError):
+            return default
+        return dec if dec > 0 else Decimal("0")
+
+    # ------------------------------------------------------------------
     def compute_orders(
         self,
         signal: BreakoutSignalPayload,
@@ -1851,6 +1869,9 @@ class BreakoutDualTFStrategy(Strategy):
         balance_usdt = to_decimal(ctx.get("available_balance_usdt", 0.0) or 0.0)
 
         strict_rounding = bool(getattr(self._settings, "STRICT_ROUNDING", True))
+
+        buffer_pct = self._get_buffer_value("MIN_NOTIONAL_BUFFER_PCT", Decimal("0.03"))
+        buffer_usd = self._get_buffer_value("MIN_NOTIONAL_BUFFER_USD", Decimal("0.10"))
 
         entry_dec = to_decimal(signal.entry_price)
         sl_dec = to_decimal(signal.sl)
@@ -1910,22 +1931,27 @@ class BreakoutDualTFStrategy(Strategy):
             qty_target = round_to_step(qty_target, step)
         qty_target = max(qty_target, min_qty)
 
-        if entry_rounded > 0 and qty_target > 0:
-            notional = entry_rounded * qty_target
-            if notional < min_notional:
-                required_qty = min_notional / entry_rounded
-                if strict_rounding and step > 0:
-                    required_qty = round_to_step(required_qty, step, rounding=ROUND_UP)
-                qty_target = max(qty_target, required_qty)
-                if strict_rounding and step > 0:
-                    qty_target = round_to_step(qty_target, step, rounding=ROUND_UP)
+        qty_before_notional = qty_target
 
-        if strict_rounding and step > 0:
-            qty_target = round_to_step(qty_target, step)
+        notional_guard = ensure_min_notional_with_buffers(
+            qty=qty_target,
+            price=entry_rounded,
+            side=signal.action,
+            step_size=step,
+            tick_size=tick,
+            min_notional=min_notional,
+            buffer_pct=buffer_pct,
+            buffer_usd=buffer_usd,
+            strict_rounding=strict_rounding,
+        )
+        qty_target = notional_guard.qty_rounded
+        entry_rounded = notional_guard.price_used
+        notional_est = notional_guard.notional
 
-        qty_tp1 = Decimal("0")
-        qty_tp2 = Decimal("0")
-        if qty_target > 0:
+        if qty_target <= 0:
+            qty_tp1 = Decimal("0")
+            qty_tp2 = Decimal("0")
+        else:
             if step > 0 and strict_rounding:
                 steps_total = int((qty_target / step).to_integral_value(rounding=ROUND_DOWN))
                 steps_total = max(steps_total, 1)
@@ -1939,11 +1965,29 @@ class BreakoutDualTFStrategy(Strategy):
                 qty_tp1 = round_to_step(qty_tp1, step)
                 qty_tp2 = qty_target - qty_tp1
 
-        notional_est = entry_rounded * qty_target if entry_rounded > 0 else Decimal("0")
+        notional_log = {
+            "symbol": symbol,
+            "side": signal.action,
+            "stepSize": format_decimal(notional_guard.step_size),
+            "tickSize": format_decimal(notional_guard.tick_size),
+            "minNotional": format_decimal(notional_guard.min_notional),
+            "buffer_pct": format_decimal(buffer_pct),
+            "buffer_usd": format_decimal(buffer_usd),
+            "price_used": format_decimal(notional_guard.price_used),
+            "qty_raw": format_decimal(qty_before_notional),
+            "qty_rounded": format_decimal(notional_guard.qty_rounded),
+            "notional_final": format_decimal(notional_guard.notional),
+            "min_notional_target": format_decimal(notional_guard.min_notional_target),
+            "adjustments": list(notional_guard.adjustments),
+        }
+        logger.info(json.dumps({"min_notional_guard": notional_log}))
+
+        notional_est = notional_guard.notional if entry_rounded > 0 else Decimal("0")
         filters_info = {
             "tickSize": format_decimal(tick) if tick > 0 else "0",
             "stepSize": format_decimal(step) if step > 0 else "0",
             "minNotional": format_decimal(min_notional) if min_notional > 0 else "0",
+            "minNotionalTarget": format_decimal(notional_guard.min_notional_target),
         }
         pre_order_log = {
             "symbol": symbol,
@@ -1958,7 +2002,10 @@ class BreakoutDualTFStrategy(Strategy):
             "validated": bool(
                 qty_target > 0
                 and entry_rounded > 0
-                and (min_notional == 0 or notional_est >= min_notional)
+                and (
+                    notional_guard.min_notional_target == 0
+                    or notional_est >= notional_guard.min_notional_target
+                )
                 and (min_qty == 0 or qty_target >= min_qty)
             ),
         }
@@ -2017,6 +2064,71 @@ class BreakoutDualTFStrategy(Strategy):
         entry_price = to_decimal(orders.get("entry", "0") or "0")
         stop_loss = to_decimal(orders.get("stop_loss", "0") or "0")
         exit_side = "SELL" if side == "BUY" else "BUY"
+
+        context = self._build_order_context(broker, symbol)
+        tick = to_decimal(context.get("tick_size", 0.0) or 0.0)
+        step = to_decimal(context.get("step_size", 0.0) or 0.0)
+        min_notional = to_decimal(context.get("min_notional", 0.0) or 0.0)
+        strict_rounding = bool(getattr(self._settings, "STRICT_ROUNDING", True))
+        buffer_pct = self._get_buffer_value("MIN_NOTIONAL_BUFFER_PCT", Decimal("0.03"))
+        buffer_usd = self._get_buffer_value("MIN_NOTIONAL_BUFFER_USD", Decimal("0.10"))
+
+        if strict_rounding and tick > 0:
+            entry_price = round_to_tick(entry_price, tick, side=side)
+            stop_loss = round_to_tick(stop_loss, tick, side=exit_side)
+
+        guard = ensure_min_notional_with_buffers(
+            qty=qty,
+            price=entry_price,
+            side=side,
+            step_size=step,
+            tick_size=tick,
+            min_notional=min_notional,
+            buffer_pct=buffer_pct,
+            buffer_usd=buffer_usd,
+            strict_rounding=strict_rounding,
+        )
+        qty = guard.qty_rounded
+        entry_price = guard.price_used
+
+        qty_tp1 = to_decimal(orders.get("qty_tp1", "0") or "0")
+        qty_tp2 = to_decimal(orders.get("qty_tp2", "0") or "0")
+        if qty > 0:
+            if strict_rounding and step > 0:
+                qty_tp1 = round_to_step(qty_tp1, step)
+                qty_tp1 = min(qty_tp1, qty)
+                qty_tp2 = qty - qty_tp1
+            else:
+                if qty_tp1 + qty_tp2 != qty:
+                    qty_tp1 = qty / 2
+                    qty_tp2 = qty - qty_tp1
+        else:
+            qty_tp1 = Decimal("0")
+            qty_tp2 = Decimal("0")
+
+        orders["qty"] = format_decimal(qty)
+        orders["entry"] = format_decimal(entry_price)
+        orders["stop_loss"] = format_decimal(stop_loss)
+        orders["qty_tp1"] = format_decimal(qty_tp1)
+        orders["qty_tp2"] = format_decimal(qty_tp2)
+
+        place_log = {
+            "phase": "place_orders",
+            "symbol": symbol,
+            "side": side,
+            "stepSize": format_decimal(guard.step_size),
+            "tickSize": format_decimal(guard.tick_size),
+            "minNotional": format_decimal(guard.min_notional),
+            "buffer_pct": format_decimal(buffer_pct),
+            "buffer_usd": format_decimal(buffer_usd),
+            "price_used": format_decimal(guard.price_used),
+            "qty_raw": format_decimal(guard.qty_raw),
+            "qty_rounded": format_decimal(guard.qty_rounded),
+            "notional_final": format_decimal(guard.notional),
+            "min_notional_target": format_decimal(guard.min_notional_target),
+            "adjustments": list(guard.adjustments),
+        }
+        logger.info(json.dumps({"min_notional_guard": place_log}))
 
         trade_tag = f"bdtf-{uuid4().hex[:8]}"
         entry_cid = sanitize_client_order_id(f"{trade_tag}-entry")
