@@ -85,6 +85,7 @@ setattr(botocore_exceptions, "ClientError", _ClientError)
 sys.modules.setdefault("botocore", botocore_stub)
 sys.modules.setdefault("botocore.exceptions", botocore_exceptions)
 
+from common.notional import ensure_min_notional_with_buffers
 from strategies.breakout_dual_tf import BreakoutDualTFStrategy, BreakoutSignalPayload, Level
 
 
@@ -190,7 +191,16 @@ def test_compute_orders_respects_filters(
 
     min_notional_dec = Decimal(min_notional)
     if min_notional_dec > 0:
-        assert entry_dec * qty_dec >= min_notional_dec
+        buffer_pct = Decimal("0.03")
+        buffer_usd = Decimal("0.10")
+        min_target = max(
+            min_notional_dec,
+            min_notional_dec * (Decimal("1") + buffer_pct),
+            min_notional_dec + buffer_usd,
+        )
+        assert entry_dec * qty_dec >= min_target
+
+    assert Decimal(orders["qty_tp1"]) + Decimal(orders["qty_tp2"]) == qty_dec
     assert orders["entry"].count("0.000000") == 0
 
     pre_logs = [json.loads(record.message) for record in caplog.records if "pre_order_check" in record.message]
@@ -202,7 +212,14 @@ def test_compute_orders_respects_filters(
 
 
 def test_signal_log_serialisation_has_no_binary_tail(caplog):
-    settings = DummySettings({"SYMBOL": "DOGEUSDT", "STRICT_ROUNDING": True, "RISK_NOTIONAL_USDT": 200})
+    settings = DummySettings(
+        {
+            "SYMBOL": "DOGEUSDT",
+            "STRICT_ROUNDING": True,
+            "RISK_NOTIONAL_USDT": 200,
+            "INTERVAL": "1h",
+        }
+    )
     strategy = BreakoutDualTFStrategy(None, None, settings)
     signal = _build_signal(
         symbol="DOGEUSDT",
@@ -228,3 +245,21 @@ def test_signal_log_serialisation_has_no_binary_tail(caplog):
     assert payloads, "no logs captured"
     for payload in payloads:
         assert "0.24790000000000003" not in payload
+
+
+def test_ensure_min_notional_with_buffers_increments_qty():
+    result = ensure_min_notional_with_buffers(
+        qty="25.5",
+        price="0.19666",
+        side="BUY",
+        step_size="1",
+        tick_size="0.00001",
+        min_notional="5",
+        buffer_pct="0.0",
+        buffer_usd="0.10",
+    )
+
+    assert result.qty_raw == Decimal("25.5")
+    assert result.qty_rounded == Decimal("26")
+    assert result.notional >= result.min_notional_target
+    assert "qty_increased_for_min_notional" in result.adjustments
