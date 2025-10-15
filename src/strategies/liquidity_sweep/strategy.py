@@ -15,12 +15,21 @@ import json
 import logging
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
+from common.utils import inspect_risk_notional_env
 from core.ports.settings import get_symbol
 
 
 TIMEOUT_NO_FILL_MIN = 5  # minutes after NY open to keep processing ticks
 
 logger = logging.getLogger(__name__)
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (Decimal,)):
+        return float(value)
+    if isinstance(value, set):
+        return list(value)
+    return value
 
 
 def _round_to_tick(value: float, tick: float | None = None, settings: Any | None = None) -> float:
@@ -537,14 +546,18 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
 
     def _ensure_limit(side: str, price: float, cid: str) -> None:
         existing = next((o for o in open_orders if o.get("clientOrderId") == cid), None)
+        existing_skip = False
+        existing_price = None
         if existing:
             try:
-                current_price = float(existing.get("price", 0.0))
+                existing_price = float(existing.get("price", 0.0))
             except Exception:  # pragma: no cover
-                current_price = 0.0
-            if tick and abs(current_price - price) <= tick:
-                return
-            exchange.cancel_order(symbol, clientOrderId=cid)
+                existing_price = 0.0
+            if tick and existing_price is not None and abs(existing_price - price) <= tick:
+                existing_skip = True
+            else:
+                exchange.cancel_order(symbol, clientOrderId=cid)
+
         logger.info(
             json.dumps(
                 {
@@ -556,7 +569,7 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
                 }
             )
         )
-        # Normalize quantity and price according to exchange filters
+
         if hasattr(exchange, "round_qty_to_step"):
             qty_norm = exchange.round_qty_to_step(symbol, qty_final)
         else:
@@ -589,14 +602,140 @@ def do_preopen(exchange: Any, market_data: Any, symbol: str, settings: Any) -> d
             )
         )
 
-        exchange.place_entry_limit(
-            symbol,
-            side,
-            price_str,
-            qty_str,
-            cid,
-            timeInForce="GTC",
+        env_diag = inspect_risk_notional_env(getattr(settings, "RISK_NOTIONAL_USDT", 0.0))
+        timeframe = getattr(settings, "INTERVAL", None) or "1m"
+        timestamp_iso = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+        notional_before = qty_final * price
+        notional_after = qty_norm * price_norm
+        pre_log_payload = {
+            "strategy": "liquidity-sweep",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp_iso": timestamp_iso,
+            "env_raw_keys_checked": env_diag["env_raw_keys_checked"],
+            "env_key_used": env_diag["env_key_used"],
+            "env_value_raw": env_diag["env_value_raw"],
+            "risk_notional_usdt": env_diag["risk_notional_usdt"],
+            "env_pct_conflict": env_diag.get("env_pct_conflict"),
+            "leverage": getattr(settings, "LEVERAGE", None),
+            "position_side": "LONG" if side.upper() == "BUY" else "SHORT",
+            "order_type": "LIMIT",
+            "reduce_only": False,
+            "price_reference": "entry",
+            "price_value": float(price_norm),
+            "price_before_tick": float(price),
+            "price_tick_size": float(tick),
+            "price_tick_adjusted": bool(price_norm != price),
+            "qty_pre_constraints": float(qty_final),
+            "qty_after_step": float(qty_norm),
+            "qty_step_adjusted": bool(qty_norm != qty_final),
+            "min_qty_rule": float(qty_min),
+            "min_qty_applied": bool(qty_final == qty_min),
+            "step_size_rule": float(step),
+            "notional_before_checks": float(notional_before),
+            "min_notional_rule": float(min_notional),
+            "min_notional_target": float(min_notional),
+            "notional_after_checks": float(notional_after),
+            "min_notional_adjustments": [],
+            "margin_final_usdt": float(notional_after),
+            "order_notional_usdt": float(notional_after),
+            "isolated_margin_usdt": None,
+            "source_of_defaults": env_diag["source_of_defaults"],
+            "account_mode": getattr(settings, "ACCOUNT_MODE", None),
+            "env_value_numeric": env_diag.get("env_value_numeric"),
+            "qty_budget": float(qty_budget),
+            "existing_order_price": existing_price,
+            "existing_order_reused": existing_skip,
+        }
+        logger.info(
+            "bdtf.order.debug pre %s",
+            json.dumps(pre_log_payload, default=_json_default, separators=(",", ":")),
         )
+
+        order_payload = {
+            "symbol": symbol,
+            "side": side,
+            "type": "LIMIT",
+            "price": price_str,
+            "qty": qty_str,
+            "reduceOnly": False,
+            "clientOrderId": cid,
+        }
+
+        order_sent = False
+        response: Mapping[str, Any] | None = None
+        rejection_reason: str | None = None
+        error_class: str | None = None
+        try:
+            if existing_skip:
+                rejection_reason = "existing_order_within_tick"
+            else:
+                try:
+                    response = exchange.place_entry_limit(
+                        symbol,
+                        side,
+                        price_str,
+                        qty_str,
+                        cid,
+                        timeInForce="GTC",
+                    )
+                    order_sent = True
+                except TypeError:  # pragma: no cover - legacy adapters
+                    response = exchange.place_entry_limit(symbol, side, price_str, qty_str, cid)
+                    order_sent = True
+        except Exception as exc:
+            rejection_reason = str(exc)
+            error_class = exc.__class__.__name__
+            raise
+        finally:
+            post_timestamp_iso = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+            final_notional = None
+            final_qty = None
+            if isinstance(response, Mapping):
+                try:
+                    if response.get("cumQuote") is not None:
+                        final_notional = float(response.get("cumQuote", 0.0))
+                    elif (
+                        response.get("avgPrice") is not None
+                        and response.get("executedQty") is not None
+                    ):
+                        final_notional = float(response.get("avgPrice", 0.0)) * float(
+                            response.get("executedQty", 0.0)
+                        )
+                except (TypeError, ValueError):
+                    final_notional = None
+                try:
+                    if response.get("executedQty") not in (None, ""):
+                        final_qty = float(response.get("executedQty", 0.0))
+                    elif response.get("origQty") not in (None, ""):
+                        final_qty = float(response.get("origQty", 0.0))
+                except (TypeError, ValueError):
+                    final_qty = None
+
+            post_log_payload = {
+                "strategy": "liquidity-sweep",
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "timestamp_iso": post_timestamp_iso,
+                "order_sent": bool(order_sent),
+                "order_payload": order_payload,
+                "exchange_response_ok": bool(order_sent and isinstance(response, Mapping)),
+                "order_id": response.get("orderId") if isinstance(response, Mapping) else None,
+                "status": response.get("status") if isinstance(response, Mapping) else None,
+                "rejection_reason": rejection_reason,
+                "error_class": error_class,
+                "final_notional_usdt": final_notional
+                if final_notional is not None
+                else float(notional_after),
+                "final_qty": final_qty if final_qty is not None else float(qty_norm),
+            }
+            logger.info(
+                "bdtf.order.debug post %s",
+                json.dumps(post_log_payload, default=_json_default, separators=(",", ":")),
+            )
+
+        if existing_skip:
+            return
 
     _ensure_limit("BUY", buy_px, cid_buy)
     _ensure_limit("SELL", sell_px, cid_sell)

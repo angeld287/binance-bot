@@ -22,7 +22,7 @@ from uuid import uuid4
 from common.notional import ensure_min_notional_with_buffers
 from common.precision import format_decimal, round_to_step, round_to_tick, to_decimal
 from common.symbols import normalize_symbol
-from common.utils import sanitize_client_order_id
+from common.utils import inspect_risk_notional_env, sanitize_client_order_id
 from config.settings import get_stop_loss_pct, get_take_profit_pct
 from config.utils import parse_bool
 from core.domain.models.Signal import Signal
@@ -38,6 +38,14 @@ logger = logging.getLogger("bot.strategy.breakout_dual_tf")
 
 _TPSL_DEBUG_ENABLED = parse_bool(os.getenv("TPSL_DEBUG_LOG", "0"), default=False)
 _TPSL_RUN_ID = os.getenv("TPSL_DEBUG_RUN_ID", "") or uuid4().hex[:8]
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, set):
+        return list(value)
+    return value
 
 
 def _ts_to_iso(ts: float | int | None) -> str | None:
@@ -2069,6 +2077,7 @@ class BreakoutDualTFStrategy(Strategy):
         tick = to_decimal(context.get("tick_size", 0.0) or 0.0)
         step = to_decimal(context.get("step_size", 0.0) or 0.0)
         min_notional = to_decimal(context.get("min_notional", 0.0) or 0.0)
+        min_qty = to_decimal(context.get("min_qty", 0.0) or 0.0)
         strict_rounding = bool(getattr(self._settings, "STRICT_ROUNDING", True))
         buffer_pct = self._get_buffer_value("MIN_NOTIONAL_BUFFER_PCT", Decimal("0.03"))
         buffer_usd = self._get_buffer_value("MIN_NOTIONAL_BUFFER_USD", Decimal("0.10"))
@@ -2076,6 +2085,8 @@ class BreakoutDualTFStrategy(Strategy):
         if strict_rounding and tick > 0:
             entry_price = round_to_tick(entry_price, tick, side=side)
             stop_loss = round_to_tick(stop_loss, tick, side=exit_side)
+
+        entry_price_before_guard = entry_price
 
         guard = ensure_min_notional_with_buffers(
             qty=qty,
@@ -2090,6 +2101,62 @@ class BreakoutDualTFStrategy(Strategy):
         )
         qty = guard.qty_rounded
         entry_price = guard.price_used
+
+        env_diag = inspect_risk_notional_env(
+            getattr(self._settings, "RISK_NOTIONAL_USDT", 0.0)
+        )
+        timeframe = (
+            orders.get("timeframe_exec")
+            or getattr(self, "_exec_tf", None)
+            or getattr(self._settings, "INTERVAL", None)
+        )
+        timestamp_iso = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+
+        qty_raw = guard.qty_raw
+        price_raw = entry_price_before_guard
+        notional_before = price_raw * qty_raw
+        notional_after = guard.notional
+        pre_log_payload = {
+            "strategy": "breakout-dualtf",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp_iso": timestamp_iso,
+            "env_raw_keys_checked": env_diag["env_raw_keys_checked"],
+            "env_key_used": env_diag["env_key_used"],
+            "env_value_raw": env_diag["env_value_raw"],
+            "risk_notional_usdt": env_diag["risk_notional_usdt"],
+            "env_pct_conflict": env_diag.get("env_pct_conflict"),
+            "leverage": getattr(self._settings, "LEVERAGE", None),
+            "position_side": "LONG" if side == "BUY" else "SHORT",
+            "order_type": "LIMIT",
+            "reduce_only": False,
+            "price_reference": "entry",
+            "price_value": float(entry_price),
+            "price_before_tick": float(price_raw),
+            "price_tick_size": float(tick),
+            "price_tick_adjusted": bool(entry_price != price_raw),
+            "qty_pre_constraints": float(qty_raw),
+            "qty_after_step": float(qty),
+            "qty_step_adjusted": bool(qty != qty_raw),
+            "min_qty_rule": float(min_qty),
+            "min_qty_applied": bool(qty_raw < min_qty),
+            "step_size_rule": float(step),
+            "notional_before_checks": float(notional_before),
+            "min_notional_rule": float(min_notional),
+            "min_notional_target": float(guard.min_notional_target),
+            "notional_after_checks": float(notional_after),
+            "min_notional_adjustments": list(guard.adjustments),
+            "margin_final_usdt": float(notional_after),
+            "order_notional_usdt": float(notional_after),
+            "isolated_margin_usdt": None,
+            "source_of_defaults": env_diag["source_of_defaults"],
+            "account_mode": getattr(self._settings, "ACCOUNT_MODE", None),
+            "env_value_numeric": env_diag.get("env_value_numeric"),
+        }
+        logger.info(
+            "bdtf.order.debug pre %s",
+            json.dumps(pre_log_payload, default=_json_default, separators=(",", ":")),
+        )
 
         qty_tp1 = to_decimal(orders.get("qty_tp1", "0") or "0")
         qty_tp2 = to_decimal(orders.get("qty_tp2", "0") or "0")
@@ -2134,17 +2201,87 @@ class BreakoutDualTFStrategy(Strategy):
         entry_cid = sanitize_client_order_id(f"{trade_tag}-entry")
         sl_cid = sanitize_client_order_id(f"{trade_tag}-sl")
 
+        entry_payload = {
+            "symbol": symbol,
+            "side": side,
+            "type": "LIMIT",
+            "price": format_decimal(entry_price),
+            "qty": format_decimal(qty),
+            "reduceOnly": False,
+            "clientOrderId": entry_cid,
+        }
+
+        order_sent = False
+        entry_resp: dict[str, Any] | None = None
+        rejection_reason: str | None = None
+        error_class: str | None = None
+        post_timestamp_iso: str
         try:
-            entry_resp = broker.place_entry_limit(
-                symbol,
-                side,
-                entry_price,
-                qty,
-                entry_cid,
-                timeInForce="GTC",
+            try:
+                entry_resp = broker.place_entry_limit(
+                    symbol,
+                    side,
+                    entry_price,
+                    qty,
+                    entry_cid,
+                    timeInForce="GTC",
+                )
+                order_sent = True
+            except TypeError:  # pragma: no cover - legacy brokers without timeInForce
+                entry_resp = broker.place_entry_limit(
+                    symbol, side, entry_price, qty, entry_cid
+                )
+                order_sent = True
+        except Exception as exc:
+            rejection_reason = str(exc)
+            error_class = exc.__class__.__name__
+            raise
+        finally:
+            post_timestamp_iso = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+            final_notional = None
+            final_qty = None
+            if isinstance(entry_resp, dict):
+                try:
+                    if entry_resp.get("cumQuote") is not None:
+                        final_notional = float(entry_resp.get("cumQuote", 0.0))
+                    elif (
+                        entry_resp.get("avgPrice") is not None
+                        and entry_resp.get("executedQty") is not None
+                    ):
+                        final_notional = float(entry_resp.get("avgPrice", 0.0)) * float(
+                            entry_resp.get("executedQty", 0.0)
+                        )
+                except (TypeError, ValueError):
+                    final_notional = None
+                try:
+                    if entry_resp.get("executedQty") not in (None, ""):
+                        final_qty = float(entry_resp.get("executedQty", 0.0))
+                    elif entry_resp.get("origQty") not in (None, ""):
+                        final_qty = float(entry_resp.get("origQty", 0.0))
+                except (TypeError, ValueError):
+                    final_qty = None
+
+            post_log_payload = {
+                "strategy": "breakout-dualtf",
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "timestamp_iso": post_timestamp_iso,
+                "order_sent": bool(order_sent),
+                "order_payload": entry_payload,
+                "exchange_response_ok": bool(order_sent and isinstance(entry_resp, dict)),
+                "order_id": entry_resp.get("orderId") if isinstance(entry_resp, dict) else None,
+                "status": entry_resp.get("status") if isinstance(entry_resp, dict) else None,
+                "rejection_reason": rejection_reason,
+                "error_class": error_class,
+                "final_notional_usdt": final_notional
+                if final_notional is not None
+                else float(notional_after),
+                "final_qty": final_qty if final_qty is not None else float(qty),
+            }
+            logger.info(
+                "bdtf.order.debug post %s",
+                json.dumps(post_log_payload, default=_json_default, separators=(",", ":")),
             )
-        except TypeError:  # pragma: no cover - legacy brokers without timeInForce
-            entry_resp = broker.place_entry_limit(symbol, side, entry_price, qty, entry_cid)
 
         stop_resp = broker.place_stop_reduce_only(
             symbol,
