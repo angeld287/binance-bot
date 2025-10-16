@@ -72,6 +72,6 @@ jobs:
       - name: Update Lambda function "breakout-ada" from S3
         run: |
           aws lambda update-function-code \
-            --function-name trading-bot-ada \
+            --function-name bot-breakout-ada \
             --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
             --s3-key trading-bot.zip
