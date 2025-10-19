@@ -1401,8 +1401,8 @@ class BreakoutDualTFStrategy(Strategy):
             return None
         vol_rel = _compute_relative_volume(exec_candles)
         exec_closes = [float(c[4]) for c in exec_candles]
-        ema_fast = _ema(exec_closes, 15)
-        ema_slow = _ema(exec_closes, 50)
+        ema_fast = _ema(exec_closes, 7)
+        ema_slow = _ema(exec_closes, 25)
         ema7_exec = context.get("ema7_exec")
         ema25_exec = context.get("ema25_exec")
         if ema7_exec is None:
