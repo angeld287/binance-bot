@@ -35,7 +35,7 @@ src/
    - `BINANCE_API_SECRET`
    - `SYMBOL` (ej. DOGEUSDT)
    - `SR_TIMEFRAME` (ej. 4h)
-   - `STRATEGY_NAME` (alias: `STRATEGY`, ej. breakout)
+   - `STRATEGY_NAME` (alias: `STRATEGY`, ej. `wedge-formation`)
 3. Instalar dependencias:
    ```bash
    pip install -r requirements.txt
@@ -76,6 +76,23 @@ Para operar sin riesgo utilizar Binance Testnet:
 ```bash
 export BINANCE_TESTNET=true
 ```
+
+### Parámetros de la estrategia WedgeFormation
+
+La estrategia `wedge-formation` consume las siguientes variables de entorno. Los valores indicados son los *defaults* cuando no
+se provee la variable:
+
+| Variable | Descripción | Default |
+| --- | --- | --- |
+| `WEDGE_TIMEFRAME` | Timeframe para analizar las velas. | `15m` |
+| `WEDGE_FILTERS_ENABLED` | Activa los filtros opcionales (tolerancia, convergencia, RR). | `false` |
+| `WEDGE_MIN_TOUCHES_PER_SIDE` | Toques mínimos por línea para validar la cuña. | `2` |
+| `WEDGE_TOUCH_TOL_ATR` | Tolerancia de toque en múltiplos de ATR. | `0.25` |
+| `WEDGE_MIN_CONVERGENCE` | Reducción mínima del ancho entre líneas. | `0.2` |
+| `WEDGE_MIN_BARS` / `WEDGE_MAX_BARS` | Rango permitido de barras en la figura. | `20` / `120` |
+| `RR_MIN` | Relación riesgo/beneficio mínima (sólo con filtros activos). | `1.0` |
+| `ORDER_TTL_BARS` | Barras a esperar antes de cancelar la limit pendiente. | `5` |
+| `WEDGE_BUFFER_ATR` | Buffer en múltiplos de ATR para entrada y RR teórico. | `0.15` |
 
 ## 🎯 Precisión y filtros de Binance
 - El bot consulta dinámicamente el `exchangeInfo` de Binance Futures y cachea los filtros de cada símbolo para respetar `tickSize`, `stepSize` y `minNotional`.
