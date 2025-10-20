@@ -5,6 +5,7 @@ from datetime import datetime
 import logging
 import math
 import os
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Any, Iterable, Sequence
 
 from common.utils import sanitize_client_order_id
@@ -12,6 +13,7 @@ from config.utils import parse_bool
 from core.ports.broker import BrokerPort
 from core.ports.market_data import MarketDataPort
 from core.ports.settings import SettingsProvider, get_symbol
+from common.precision import format_decimal, to_decimal
 from utils.tp_store_s3 import load_tp_value, persist_tp_value
 
 logger = logging.getLogger("bot.strategy.wedge")
@@ -36,6 +38,196 @@ class WedgePattern:
     kind: str
     convergence_ratio: float
     bars: int
+
+
+@dataclass(slots=True)
+class SymbolFilters:
+    tick_size: Decimal
+    step_size: Decimal
+    min_notional: Decimal
+    min_qty: Decimal
+
+
+@dataclass(slots=True)
+class QtyGuardResult:
+    success: bool
+    qty: Decimal | None
+    adjusted: bool
+    reason: str | None
+    notional: Decimal
+
+
+def get_symbol_filters(
+    settings: SettingsProvider,
+    exchange: BrokerPort,
+    symbol: str,
+) -> SymbolFilters:
+    """Return precision filters for ``symbol`` using cached exchange info."""
+
+    filters_raw: dict[str, Any] | None = None
+
+    exchange_info = getattr(settings, "EXCHANGE_INFO", None)
+    if isinstance(exchange_info, dict):
+        for sym in exchange_info.get("symbols", []):
+            sym_name = sym.get("symbol")
+            if sym_name == symbol:
+                filters_raw = {
+                    f.get("filterType"): f for f in sym.get("filters", []) if f
+                }
+                break
+
+    if not filters_raw and hasattr(exchange, "get_symbol_filters"):
+        try:
+            filters_raw = exchange.get_symbol_filters(symbol)
+        except Exception as exc:  # pragma: no cover - surface upstream error
+            logger.warning("precision.filters_fetch_failed symbol=%s err=%s", symbol, exc)
+            filters_raw = None
+
+    if not filters_raw:
+        raise ValueError(f"Filters for {symbol} not available")
+
+    price_filter = filters_raw.get("PRICE_FILTER", {}) if isinstance(filters_raw, dict) else {}
+    lot_filter = filters_raw.get("LOT_SIZE", {}) if isinstance(filters_raw, dict) else {}
+    min_notional_filter = (
+        filters_raw.get("MIN_NOTIONAL", {}) if isinstance(filters_raw, dict) else {}
+    )
+
+    return SymbolFilters(
+        tick_size=to_decimal(
+            price_filter.get("tickSize")
+            or price_filter.get("tick_size")
+            or price_filter.get("minPrice")
+            or "0"
+        ),
+        step_size=to_decimal(
+            lot_filter.get("stepSize")
+            or lot_filter.get("step_size")
+            or lot_filter.get("minQty")
+            or "0"
+        ),
+        min_notional=to_decimal(
+            min_notional_filter.get("notional")
+            or min_notional_filter.get("minNotional")
+            or min_notional_filter.get("min_notional")
+            or "0"
+        ),
+        min_qty=to_decimal(lot_filter.get("minQty") or lot_filter.get("min_qty") or "0"),
+    )
+
+
+def round_price_for_side(
+    price: Any,
+    tick_size: Decimal,
+    side: str,
+    order_type: str,
+) -> Decimal:
+    """Return ``price`` rounded according to ``side`` using ``tick_size``."""
+
+    del order_type  # Behaviour identical for LIMIT/STOP/TP in this context.
+
+    tick = tick_size if isinstance(tick_size, Decimal) else to_decimal(tick_size)
+    if tick <= 0:
+        return to_decimal(price)
+    px = to_decimal(price)
+    side_norm = (side or "").upper()
+    rounding = ROUND_DOWN if side_norm == "BUY" else ROUND_UP
+    return px.quantize(tick, rounding=rounding)
+
+
+def round_qty(qty: Any, step_size: Decimal) -> Decimal:
+    """Floor ``qty`` to the closest ``step_size`` multiple."""
+
+    step = step_size if isinstance(step_size, Decimal) else to_decimal(step_size)
+    if step <= 0:
+        return to_decimal(qty)
+    quantity = to_decimal(qty)
+    return quantity.quantize(step, rounding=ROUND_DOWN)
+
+
+def apply_qty_guards(
+    symbol: str,
+    side: str,
+    order_type: str,
+    price_dec: Decimal,
+    qty_dec: Decimal,
+    filters: SymbolFilters,
+    *,
+    allow_increase: bool = True,
+    max_iterations: int = 100,
+) -> QtyGuardResult:
+    """Validate quantity constraints returning adjustments or failure."""
+
+    qty = qty_dec
+    adjusted = False
+    step = filters.step_size
+    min_qty = filters.min_qty
+    notional = price_dec * qty if price_dec > 0 else Decimal("0")
+
+    if min_qty > 0 and qty < min_qty:
+        if allow_increase:
+            qty = round_qty(min_qty, step)
+            adjusted = True
+        else:
+            return QtyGuardResult(
+                success=False,
+                qty=None,
+                adjusted=False,
+                reason="min_qty",
+                notional=notional,
+            )
+
+    notional = price_dec * qty if price_dec > 0 else Decimal("0")
+
+    if price_dec <= 0:
+        return QtyGuardResult(
+            success=False,
+            qty=None,
+            adjusted=adjusted,
+            reason="price_non_positive",
+            notional=notional,
+        )
+
+    if filters.min_notional > 0 and notional < filters.min_notional:
+        if allow_increase and step > 0:
+            iterations = 0
+            qty_candidate = qty
+            notional_candidate = notional
+            while (
+                notional_candidate < filters.min_notional
+                and iterations < max_iterations
+            ):
+                qty_candidate = qty_candidate + step
+                qty_candidate = round_qty(qty_candidate, step)
+                notional_candidate = price_dec * qty_candidate
+                iterations += 1
+            if notional_candidate >= filters.min_notional and qty_candidate > 0:
+                qty = qty_candidate
+                notional = notional_candidate
+                adjusted = True
+            else:
+                return QtyGuardResult(
+                    success=False,
+                    qty=None,
+                    adjusted=adjusted,
+                    reason="min_notional",
+                    notional=notional_candidate,
+                )
+        else:
+            return QtyGuardResult(
+                success=False,
+                qty=None,
+                adjusted=adjusted,
+                reason="min_notional",
+                notional=notional,
+            )
+
+    return QtyGuardResult(
+        success=True,
+        qty=qty,
+        adjusted=adjusted,
+        reason=None,
+        notional=price_dec * qty,
+    )
 
 
 def _timeframe_to_minutes(value: str) -> int:
@@ -321,19 +513,24 @@ class WedgeFormationStrategy:
                 logger.info("%s guard.post order_exists", log_prefix)
                 return {"status": "race_order", "symbol": symbol}
 
-        entry_price_norm = exch.round_price_to_tick(symbol, entry_price)
-        tp_price_norm = exch.round_price_to_tick(symbol, tp_price)
+        filters = get_symbol_filters(settings, exch, symbol)
 
-        filters = exch.get_symbol_filters(symbol)
-        lot = filters.get("LOT_SIZE", {}) if isinstance(filters, dict) else {}
-        step_size = float(lot.get("stepSize", 0.0) or 0.0)
-        min_qty = float(lot.get("minQty", 0.0) or 0.0)
-        price_filter = filters.get("PRICE_FILTER", {}) if isinstance(filters, dict) else {}
-        tick_size = float(price_filter.get("tickSize", 0.0) or 0.0)
-        min_notional = float(
-            (filters.get("MIN_NOTIONAL", {}) or {}).get("notional")
-            or (filters.get("MIN_NOTIONAL", {}) or {}).get("minNotional", 0.0)
+        entry_price_raw_dec = to_decimal(entry_price)
+        tp_price_raw_dec = to_decimal(tp_price)
+        entry_price_dec = round_price_for_side(
+            entry_price_raw_dec, filters.tick_size, side, "LIMIT"
         )
+        exit_side = "SELL" if side == "BUY" else "BUY"
+        tp_price_dec = round_price_for_side(
+            tp_price_raw_dec, filters.tick_size, exit_side, "TAKE_PROFIT"
+        )
+
+        entry_price_norm = float(entry_price_dec)
+        tp_price_norm = float(tp_price_dec)
+
+        step_size = float(filters.step_size)
+        min_qty = float(filters.min_qty)
+        min_notional = float(filters.min_notional)
 
         risk_notional = float(getattr(settings, "RISK_NOTIONAL_USDT", 0.0) or 0.0)
         qty_target_src = "NONE"
@@ -361,13 +558,52 @@ class WedgeFormationStrategy:
             step_size,
         )
         qty = max(qty_target, min_qty, qty_min_by_notional)
-        qty_norm = exch.round_qty_to_step(symbol, qty)
 
-        if entry_price_norm * qty_norm < min_notional and entry_price_norm > 0:
-            qty_norm = exch.round_qty_to_step(
-                symbol,
-                _ceil_to_step(min_notional / entry_price_norm, step_size),
+        qty_raw_dec = to_decimal(qty)
+        qty_dec = round_qty(qty_raw_dec, filters.step_size)
+        guard = apply_qty_guards(
+            symbol,
+            side,
+            "LIMIT",
+            entry_price_dec,
+            qty_dec,
+            filters,
+            allow_increase=True,
+        )
+        if not guard.success or guard.qty is None:
+            logger.warning(
+                "%s precision abort entry side=%s requested_price=%s adjusted_price=%s requested_qty=%s tickSize=%s stepSize=%s minNotional=%s minQty=%s reason=%s",
+                log_prefix,
+                side,
+                format_decimal(entry_price_raw_dec),
+                format_decimal(entry_price_dec),
+                format_decimal(qty_raw_dec),
+                format_decimal(filters.tick_size),
+                format_decimal(filters.step_size),
+                format_decimal(filters.min_notional),
+                format_decimal(filters.min_qty),
+                guard.reason or "unknown",
             )
+            return {"status": "precision_abort_entry", "symbol": symbol, "reason": guard.reason}
+
+        qty_dec = guard.qty
+        qty_norm = float(qty_dec)
+
+        logger.info(
+            "%s precision entry side=%s requested_price=%s adjusted_price=%s requested_qty=%s adjusted_qty=%s tickSize=%s stepSize=%s minNotional=%s minQty=%s action=%s notional=%s",
+            log_prefix,
+            side,
+            format_decimal(entry_price_raw_dec),
+            format_decimal(entry_price_dec),
+            format_decimal(qty_raw_dec),
+            format_decimal(qty_dec),
+            format_decimal(filters.tick_size),
+            format_decimal(filters.step_size),
+            format_decimal(filters.min_notional),
+            format_decimal(filters.min_qty),
+            "rounded" if guard.adjusted else "unchanged",
+            format_decimal(guard.notional),
+        )
 
         logger.info(
             "%s sizing entry_price=%.6f qty_target=%.6f qty_norm=%.6f src=%s",
@@ -405,6 +641,46 @@ class WedgeFormationStrategy:
                 qty_norm,
                 entry_client_id,
             )
+
+        tp_qty_guard = apply_qty_guards(
+            symbol,
+            exit_side,
+            "LIMIT",
+            tp_price_dec,
+            qty_dec,
+            filters,
+            allow_increase=False,
+        )
+        if not tp_qty_guard.success or tp_qty_guard.qty is None:
+            logger.warning(
+                "%s precision abort tp side=%s requested_price=%s adjusted_price=%s requested_qty=%s tickSize=%s stepSize=%s minNotional=%s minQty=%s reason=%s",
+                log_prefix,
+                exit_side,
+                format_decimal(tp_price_raw_dec),
+                format_decimal(tp_price_dec),
+                format_decimal(qty_dec),
+                format_decimal(filters.tick_size),
+                format_decimal(filters.step_size),
+                format_decimal(filters.min_notional),
+                format_decimal(filters.min_qty),
+                tp_qty_guard.reason or "unknown",
+            )
+            return {"status": "precision_abort_tp", "symbol": symbol, "reason": tp_qty_guard.reason}
+
+        logger.info(
+            "%s precision tp side=%s requested_price=%s adjusted_price=%s qty=%s tickSize=%s stepSize=%s minNotional=%s minQty=%s action=%s notional=%s",
+            log_prefix,
+            exit_side,
+            format_decimal(tp_price_raw_dec),
+            format_decimal(tp_price_dec),
+            format_decimal(tp_qty_guard.qty),
+            format_decimal(filters.tick_size),
+            format_decimal(filters.step_size),
+            format_decimal(filters.min_notional),
+            format_decimal(filters.min_qty),
+            "rounded" if tp_qty_guard.adjusted else "unchanged",
+            format_decimal(tp_qty_guard.notional),
+        )
 
         persisted = persist_tp_value(symbol, tp_price_norm, now.timestamp())
         # TODO: Cuando implementemos SL: aplicar SL únicamente al cierre de vela fuera del patrón
@@ -459,13 +735,64 @@ class WedgeFormationStrategy:
             logger.info("%s tp_missing_storage", log_prefix)
             return
 
-        tp_price = exch.round_price_to_tick(symbol, tp_value)
-        qty_norm = exch.round_qty_to_step(symbol, qty)
+        filters = get_symbol_filters(self._settings, exch, symbol)
+        side = "SELL" if is_long else "BUY"
+
+        tp_price_raw_dec = to_decimal(tp_value)
+        tp_price_dec = round_price_for_side(
+            tp_price_raw_dec, filters.tick_size, side, "TAKE_PROFIT"
+        )
+        qty_raw_dec = to_decimal(qty)
+        qty_dec = round_qty(qty_raw_dec, filters.step_size)
+
+        guard = apply_qty_guards(
+            symbol,
+            side,
+            "LIMIT",
+            tp_price_dec,
+            qty_dec,
+            filters,
+            allow_increase=False,
+        )
+
+        if not guard.success or guard.qty is None or guard.qty <= 0:
+            logger.warning(
+                "%s tp_precision_abort side=%s requested_price=%s adjusted_price=%s requested_qty=%s tickSize=%s stepSize=%s minNotional=%s minQty=%s reason=%s",
+                log_prefix,
+                side,
+                format_decimal(tp_price_raw_dec),
+                format_decimal(tp_price_dec),
+                format_decimal(qty_raw_dec),
+                format_decimal(filters.tick_size),
+                format_decimal(filters.step_size),
+                format_decimal(filters.min_notional),
+                format_decimal(filters.min_qty),
+                guard.reason or "unknown",
+            )
+            return
+
+        logger.info(
+            "%s tp_precision side=%s requested_price=%s adjusted_price=%s requested_qty=%s adjusted_qty=%s tickSize=%s stepSize=%s minNotional=%s minQty=%s action=%s notional=%s",
+            log_prefix,
+            side,
+            format_decimal(tp_price_raw_dec),
+            format_decimal(tp_price_dec),
+            format_decimal(qty_raw_dec),
+            format_decimal(guard.qty),
+            format_decimal(filters.tick_size),
+            format_decimal(filters.step_size),
+            format_decimal(filters.min_notional),
+            format_decimal(filters.min_qty),
+            "rounded" if guard.adjusted else "unchanged",
+            format_decimal(guard.notional),
+        )
+
+        tp_price = float(tp_price_dec)
+        qty_norm = float(guard.qty)
+
         if qty_norm <= 0:
             logger.info("%s tp_skip qty_norm<=0", log_prefix)
             return
-
-        side = "SELL" if is_long else "BUY"
         client_id = sanitize_client_order_id(
             f"{cid_prefix}_{int(now.timestamp() // 60)}_TP"
         )
