@@ -13,6 +13,8 @@ __all__ = [
     "ROUND_DOWN",
     "ROUND_UP",
     "format_decimal",
+    "round_price_for_side",
+    "round_qty",
     "round_to_step",
     "round_to_tick",
     "to_decimal",
@@ -59,7 +61,26 @@ def round_to_tick(
     px = to_decimal(price)
     side_norm = (side or "").upper()
     rounding = ROUND_DOWN if side_norm != "SELL" else ROUND_UP
-    return px.quantize(tick, rounding=rounding)
+    units = (px / tick).to_integral_value(rounding=rounding)
+    return (units * tick).quantize(tick)
+
+
+def round_price_for_side(
+    price: Any,
+    tick_size: Any,
+    side: str,
+    order_type: str | None = None,
+) -> Decimal:
+    """Round ``price`` respecting Binance tick rules for ``side`` and type.
+
+    ``order_type`` is accepted for API parity but does not influence the
+    rounding direction beyond enforcing BUY orders rounding down and SELL
+    orders rounding up. STOP/TAKE_PROFIT triggers should call this helper with
+    their trigger prices so the same rules are applied consistently.
+    """
+
+    side_norm = (side or "").upper()
+    return round_to_tick(price, tick_size, side=side_norm)
 
 
 def round_to_step(
@@ -75,6 +96,12 @@ def round_to_step(
         return to_decimal(qty)
     quantity = to_decimal(qty)
     return quantity.quantize(step, rounding=rounding)
+
+
+def round_qty(qty: Any, step_size: Any) -> Decimal:
+    """Round ``qty`` down to a valid ``step_size`` multiple."""
+
+    return round_to_step(qty, step_size, rounding=ROUND_DOWN)
 
 
 def format_decimal(value: Any, max_places: int | None = None) -> str:

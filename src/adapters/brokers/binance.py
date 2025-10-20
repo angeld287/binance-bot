@@ -5,8 +5,9 @@ from __future__ import annotations
 import hmac, hashlib, logging, urllib.parse as _url
 import os
 import time
+from dataclasses import dataclass
 from datetime import timedelta
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_UP
 from typing import Any, Dict
 
 from binance.client import Client
@@ -14,7 +15,13 @@ from requests import Session
 
 from config.settings import Settings
 from core.ports.broker import BrokerPort
-from common.precision import FiltersCache, format_decimal, round_to_step, round_to_tick
+from common.precision import (
+    FiltersCache,
+    format_decimal,
+    round_price_for_side,
+    round_qty,
+    to_decimal,
+)
 from common.utils import sanitize_client_order_id
 from common.symbols import normalize_symbol as _normalize_symbol
 
@@ -23,6 +30,14 @@ logger = logging.getLogger(__name__)
 
 def _to_binance_symbol(sym: str) -> str:
     return _normalize_symbol(sym)
+
+
+@dataclass(frozen=True)
+class _SymbolPrecision:
+    tick_size: Decimal
+    step_size: Decimal
+    min_qty: Decimal
+    min_notional: Decimal
 
 
 def _calc_drift_ms(client: Client) -> int:
@@ -207,12 +222,17 @@ class BinanceBroker(BrokerPort):
 
         try:
             safe_id = sanitize_client_order_id(clientOrderId)
-            filters = self.get_symbol_filters(symbol)
-            tick = Decimal(filters["PRICE_FILTER"]["tickSize"])
-            step = Decimal(filters["LOT_SIZE"]["stepSize"])
-            side_norm = (side or "").upper()
-            price_dec = round_to_tick(price, tick, side=side_norm)
-            qty_dec = round_to_step(qty, step)
+            precision = self._symbol_precision(symbol)
+            price_dec = round_price_for_side(price, precision.tick_size, side, "LIMIT")
+            qty_dec = round_qty(qty, precision.step_size)
+            qty_dec = self._apply_qty_guards(
+                symbol=symbol,
+                side=side,
+                order_type="LIMIT",
+                price=price_dec,
+                qty=qty_dec,
+                precision=precision,
+            )
             payload = {
                 "symbol": _to_binance_symbol(symbol),
                 "side": side,
@@ -242,11 +262,21 @@ class BinanceBroker(BrokerPort):
 
         try:
             safe_id = sanitize_client_order_id(clientOrderId)
+            precision = self._symbol_precision(symbol)
+            qty_dec = round_qty(qty, precision.step_size)
+            qty_dec = self._apply_qty_guards(
+                symbol=symbol,
+                side=side,
+                order_type="MARKET",
+                price=None,
+                qty=qty_dec,
+                precision=precision,
+            )
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
                 type="MARKET",
-                quantity=qty,
+                quantity=format_decimal(qty_dec),
                 newClientOrderId=safe_id,
                 **extra,
             )
@@ -281,11 +311,19 @@ class BinanceBroker(BrokerPort):
     ) -> dict[str, Any]:
         try:
             safe_id = sanitize_client_order_id(clientOrderId)
-            filters = self.get_symbol_filters(symbol)
-            tick = Decimal(filters["PRICE_FILTER"]["tickSize"])
-            step = Decimal(filters["LOT_SIZE"]["stepSize"])
-            stop_price_dec = round_to_tick(stopPrice, tick, side=side)
-            qty_dec = round_to_step(qty, step, rounding=ROUND_DOWN)
+            precision = self._symbol_precision(symbol)
+            stop_price_dec = round_price_for_side(
+                stopPrice, precision.tick_size, side, "STOP_MARKET"
+            )
+            qty_dec = round_qty(qty, precision.step_size)
+            qty_dec = self._apply_qty_guards(
+                symbol=symbol,
+                side=side,
+                order_type="STOP_MARKET",
+                price=stop_price_dec,
+                qty=qty_dec,
+                precision=precision,
+            )
             adjusted_stop_price = format_decimal(stop_price_dec)
             adjusted_qty = format_decimal(qty_dec)
 
@@ -295,7 +333,7 @@ class BinanceBroker(BrokerPort):
                 side,
                 format_decimal(stopPrice),
                 adjusted_stop_price,
-                tick,
+                format_decimal(precision.tick_size),
             )
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
@@ -327,11 +365,17 @@ class BinanceBroker(BrokerPort):
 
         try:
             safe_id = sanitize_client_order_id(clientOrderId)
-            filters = self.get_symbol_filters(symbol)
-            tick = Decimal(filters["PRICE_FILTER"]["tickSize"])
-            step = Decimal(filters["LOT_SIZE"]["stepSize"])
-            price_dec = round_to_tick(tpPrice, tick, side=side)
-            qty_dec = round_to_step(qty, step)
+            precision = self._symbol_precision(symbol)
+            price_dec = round_price_for_side(tpPrice, precision.tick_size, side, "LIMIT")
+            qty_dec = round_qty(qty, precision.step_size)
+            qty_dec = self._apply_qty_guards(
+                symbol=symbol,
+                side=side,
+                order_type="LIMIT",
+                price=price_dec,
+                qty=qty_dec,
+                precision=precision,
+            )
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
@@ -372,16 +416,101 @@ class BinanceBroker(BrokerPort):
             raise
 
     def round_price_to_tick(self, symbol: str, px: float) -> float:
-        filters = self.get_symbol_filters(symbol)
-        tick = Decimal(filters["PRICE_FILTER"]["tickSize"])
-        rounded = round_to_tick(px, tick, side="BUY")
+        precision = self._symbol_precision(symbol)
+        rounded = round_price_for_side(px, precision.tick_size, "BUY", "LIMIT")
         return float(rounded)
 
     def round_qty_to_step(self, symbol: str, qty: float) -> float:
-        filters = self.get_symbol_filters(symbol)
-        step = Decimal(filters["LOT_SIZE"]["stepSize"])
-        rounded = round_to_step(qty, step)
+        precision = self._symbol_precision(symbol)
+        rounded = round_qty(qty, precision.step_size)
         return float(rounded)
+
+    # ------------------------------------------------------------------
+    # Precision helpers
+
+    def _symbol_precision(self, symbol: str) -> _SymbolPrecision:
+        filters = self.get_symbol_filters(symbol)
+        price_filter = filters.get("PRICE_FILTER", {})
+        lot_filter = filters.get("LOT_SIZE", {})
+        market_filter = filters.get("MARKET_LOT_SIZE", {})
+        min_notional_filter = filters.get("MIN_NOTIONAL", {})
+
+        def _safe_decimal(value: Any) -> Decimal:
+            try:
+                return to_decimal(value)
+            except Exception:
+                return Decimal("0")
+
+        tick_size = _safe_decimal(price_filter.get("tickSize"))
+        step_candidates = [
+            _safe_decimal(lot_filter.get("stepSize")),
+            _safe_decimal(market_filter.get("stepSize")),
+        ]
+        step_size = next((s for s in step_candidates if s > 0), step_candidates[0])
+        min_qty_candidates = [
+            _safe_decimal(lot_filter.get("minQty")),
+            _safe_decimal(market_filter.get("minQty")),
+        ]
+        min_qty = max(min_qty_candidates)
+        min_notional = _safe_decimal(
+            min_notional_filter.get("notional") or min_notional_filter.get("minNotional")
+        )
+        return _SymbolPrecision(
+            tick_size=tick_size,
+            step_size=step_size,
+            min_qty=min_qty,
+            min_notional=min_notional,
+        )
+
+    def _apply_qty_guards(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        price: Decimal | None,
+        qty: Decimal,
+        precision: _SymbolPrecision,
+    ) -> Decimal:
+        qty_adj = round_qty(qty, precision.step_size)
+
+        if precision.min_qty > 0 and qty_adj < precision.min_qty:
+            qty_adj = self._ceil_to_step(precision.min_qty, precision.step_size)
+            qty_adj = round_qty(qty_adj, precision.step_size)
+
+        if price is not None and price > 0 and precision.min_notional > 0:
+            notional = price * qty_adj
+            if notional < precision.min_notional:
+                required = precision.min_notional / price
+                required = self._ceil_to_step(required, precision.step_size)
+                if precision.min_qty > 0 and required < precision.min_qty:
+                    required = self._ceil_to_step(precision.min_qty, precision.step_size)
+                required = round_qty(required, precision.step_size)
+                if required > qty_adj:
+                    qty_adj = required
+                if price * qty_adj < precision.min_notional:
+                    logger.warning(
+                        "Order rejected below minNotional | symbol=%s side=%s type=%s price=%s qty=%s minNotional=%s",
+                        symbol,
+                        side,
+                        order_type,
+                        format_decimal(price),
+                        format_decimal(qty_adj),
+                        format_decimal(precision.min_notional),
+                    )
+                    raise ValueError("Order notional below minimum for symbol")
+
+        if precision.min_qty > 0 and qty_adj < precision.min_qty:
+            qty_adj = self._ceil_to_step(precision.min_qty, precision.step_size)
+            qty_adj = round_qty(qty_adj, precision.step_size)
+
+        return qty_adj
+
+    @staticmethod
+    def _ceil_to_step(value: Decimal, step: Decimal) -> Decimal:
+        if step <= 0:
+            return value
+        return value.quantize(step, rounding=ROUND_UP)
 
     def get_available_balance_usdt(self) -> float:
         """Return available USDT balance.

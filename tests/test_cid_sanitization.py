@@ -1,7 +1,30 @@
 import os
 import sys
+import types
 
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
+
+_config_stub = types.ModuleType("config")
+_settings_stub = types.ModuleType("config.settings")
+
+
+class _Settings:
+    def __init__(self, **kwargs):
+        self.BINANCE_API_KEY = kwargs.get("BINANCE_API_KEY", "")
+        self.BINANCE_API_SECRET = kwargs.get("BINANCE_API_SECRET", "")
+        self.BINANCE_TESTNET = kwargs.get("BINANCE_TESTNET", False)
+        self.HTTP_TIMEOUT = kwargs.get("HTTP_TIMEOUT", 30)
+        self.FILTERS_CACHE_TTL_MIN = kwargs.get("FILTERS_CACHE_TTL_MIN", 5)
+        self.RISK_NOTIONAL_USDT = kwargs.get("RISK_NOTIONAL_USDT", 0.0)
+
+    def get(self, key, default=None):  # pragma: no cover - compatibility shim
+        return getattr(self, key, default)
+
+
+_settings_stub.Settings = _Settings
+_config_stub.settings = _settings_stub
+sys.modules.setdefault("config", _config_stub)
+sys.modules.setdefault("config.settings", _settings_stub)
 
 from common.utils import sanitize_client_order_id
 from adapters.brokers.binance import BinanceBroker
@@ -23,6 +46,24 @@ class DummyClient:
     def futures_get_order(self, **kwargs):
         self.last_params = kwargs
         return {}
+
+    def futures_exchange_info(self):  # pragma: no cover - simple stub
+        return {
+            "symbols": [
+                {
+                    "symbol": "BTCUSDT",
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                        {
+                            "filterType": "LOT_SIZE",
+                            "stepSize": "0.001",
+                            "minQty": "0.001",
+                        },
+                        {"filterType": "MIN_NOTIONAL", "notional": "0"},
+                    ],
+                }
+            ]
+        }
 
 
 RAW = "CID??!!0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"  # longer than 36 with invalid chars
