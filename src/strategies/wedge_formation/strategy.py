@@ -254,6 +254,7 @@ def compute_order_precision(
     if tick_size is None or tick_size <= 0 or step_size is None or step_size <= 0:
         raise OrderPrecisionError("ORDER_REJECT_TICK_INVALID", "invalid_tick_or_step")
 
+    logger.info("round_price_to_tick (price, qty, stop)- %s, %s, %s", price_requested, qty_requested, stop_requested)
     price_adjusted: Decimal | None = None
     if price_requested is not None:
         val_price_requested = exchange.round_price_to_tick(symbol, price_requested)
