@@ -197,6 +197,33 @@ class BinanceBroker(BrokerPort):
         stop_price_dec = to_decimal_or_none(stop_price)
         quantity_dec = to_decimal_or_none(quantity)
 
+        invalid_filter_fields: list[str] = []
+        if tick_size_dec is None or tick_size_dec <= 0:
+            invalid_filter_fields.append("tickSize")
+        if step_size_dec is None or step_size_dec <= 0:
+            invalid_filter_fields.append("stepSize")
+        if invalid_filter_fields:
+            reason = "invalid_precision_filters:" + ",".join(sorted(invalid_filter_fields))
+            log_payload: dict[str, Any] = {
+                "tag": "ORDER_REJECT_TICK_INVALID",
+                "symbol": symbol,
+                "side": side,
+                "type": order_type,
+                "timeInForce": time_in_force,
+                "tickSize": tick_size_raw,
+                "stepSize": step_size_raw,
+                "minNotional": min_notional_raw,
+                "price": price,
+                "stopPrice": stop_price,
+                "quantity": quantity,
+                "reason": reason,
+                "sent": False,
+                "reduceOnly": reduce_only,
+                "workingType": working_type,
+            }
+            self._log_order_event(log_payload, level=logging.WARNING)
+            return {"status": "rejected", "reason": reason, "details": log_payload}
+
         is_multiple_price = (
             None if price_dec is None else is_multiple(price_dec, tick_size_dec)
         )
