@@ -14,7 +14,7 @@ from config.utils import parse_bool
 from core.ports.broker import BrokerPort
 from core.ports.market_data import MarketDataPort
 from core.ports.settings import SettingsProvider, get_symbol
-from common.precision import format_decimal, round_to_step, round_to_tick, to_decimal
+from common.precision import format_decimal, round_to_step, to_decimal
 from utils.tp_store_s3 import load_tp_value, persist_tp_value
 
 logger = logging.getLogger("bot.strategy.wedge")
@@ -101,6 +101,24 @@ def assert_is_multiple(dec_value: Decimal | Any, tick_or_step: Decimal | Any) ->
     except (InvalidOperation, DivisionByZero):
         return False
     return ratio == ratio.to_integral_value()
+
+
+def quantize_price_to_tick(
+    price: Decimal | Any, tick_size: Decimal | Any, *, side: str | None
+) -> Decimal:
+    price_dec = price if isinstance(price, Decimal) else to_decimal(price)
+    try:
+        tick_quant = Decimal(str(tick_size))
+    except (InvalidOperation, ValueError, TypeError):
+        return price_dec
+    if tick_quant <= 0:
+        return price_dec
+    if price_dec == 0:
+        return Decimal("0")
+    side_norm = (side or "").upper()
+    rounding = ROUND_UP if side_norm == "SELL" else ROUND_DOWN
+    price_for_quant = Decimal(str(price_dec))
+    return price_for_quant.quantize(tick_quant, rounding=rounding)
 
 
 def ceil_to_step(value: Decimal, step: Decimal) -> Decimal:
@@ -690,11 +708,11 @@ class WedgeFormationStrategy:
         except (InvalidOperation, DivisionByZero, ValueError, TypeError):
             stop_price_raw_dec = None
 
-        entry_price_dec = round_to_tick(
+        entry_price_dec = quantize_price_to_tick(
             entry_price_raw_dec, filters.tick_size, side=side
         )
         exit_side = "SELL" if side == "BUY" else "BUY"
-        tp_price_dec = round_to_tick(
+        tp_price_dec = quantize_price_to_tick(
             tp_price_raw_dec, filters.tick_size, side=exit_side
         )
 
@@ -897,11 +915,9 @@ class WedgeFormationStrategy:
         tp_client_id = sanitize_client_order_id(f"{cid_prefix}_{now_minute}_TP")
 
         entry_price_requested = entry_price_norm_dec
-        entry_price_adjusted = entry_price_requested
-        if not assert_is_multiple(entry_price_adjusted, filters.tick_size):
-            entry_price_adjusted = round_to_tick(
-                entry_price_adjusted, filters.tick_size, side=side
-            )
+        entry_price_adjusted = quantize_price_to_tick(
+            entry_price_requested, filters.tick_size, side=side
+        )
         qty_requested = qty_dec
         qty_adjusted = qty_requested
         if not assert_is_multiple(qty_adjusted, filters.step_size):
@@ -1060,17 +1076,13 @@ class WedgeFormationStrategy:
         )
 
         tp_price_requested = tp_price_norm_dec
-        tp_price_adjusted = tp_price_requested
-        if not assert_is_multiple(tp_price_adjusted, filters.tick_size):
-            tp_price_adjusted = round_to_tick(
-                tp_price_adjusted, filters.tick_size, side=exit_side
-            )
+        tp_price_adjusted = quantize_price_to_tick(
+            tp_price_requested, filters.tick_size, side=exit_side
+        )
         tp_stop_requested = tp_price_requested
-        tp_stop_adjusted = tp_price_adjusted
-        if not assert_is_multiple(tp_stop_adjusted, filters.tick_size):
-            tp_stop_adjusted = round_to_tick(
-                tp_stop_adjusted, filters.tick_size, side=exit_side
-            )
+        tp_stop_adjusted = quantize_price_to_tick(
+            tp_stop_requested, filters.tick_size, side=exit_side
+        )
         tp_qty_requested = tp_qty_guard.qty
         tp_qty_adjusted = tp_qty_requested
         if not assert_is_multiple(tp_qty_adjusted, filters.step_size):
@@ -1170,7 +1182,7 @@ class WedgeFormationStrategy:
         side = "SELL" if is_long else "BUY"
 
         tp_price_raw_dec = Decimal(str(tp_value))
-        tp_price_dec = round_to_tick(
+        tp_price_dec = quantize_price_to_tick(
             tp_price_raw_dec, filters.tick_size, side=side
         )
         qty_raw_dec = to_decimal(qty)
@@ -1237,17 +1249,13 @@ class WedgeFormationStrategy:
             f"{cid_prefix}_{int(now.timestamp() // 60)}_TP"
         )
         tp_price_requested = tp_price_dec
-        tp_price_adjusted = tp_price_requested
-        if not assert_is_multiple(tp_price_adjusted, filters.tick_size):
-            tp_price_adjusted = round_to_tick(
-                tp_price_adjusted, filters.tick_size, side=side
-            )
+        tp_price_adjusted = quantize_price_to_tick(
+            tp_price_requested, filters.tick_size, side=side
+        )
         tp_stop_requested = tp_price_requested
-        tp_stop_adjusted = tp_price_adjusted
-        if not assert_is_multiple(tp_stop_adjusted, filters.tick_size):
-            tp_stop_adjusted = round_to_tick(
-                tp_stop_adjusted, filters.tick_size, side=side
-            )
+        tp_stop_adjusted = quantize_price_to_tick(
+            tp_stop_requested, filters.tick_size, side=side
+        )
         tp_qty_requested = tp_qty_dec
         tp_qty_adjusted = tp_qty_requested
         if not assert_is_multiple(tp_qty_adjusted, filters.step_size):
