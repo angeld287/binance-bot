@@ -58,6 +58,25 @@ class QtyGuardResult:
     notional: Decimal
 
 
+@dataclass(slots=True)
+class PrecisionComputation:
+    price_requested: Decimal | None
+    price_adjusted: Decimal | None
+    qty_requested: Decimal | None
+    qty_adjusted: Decimal | None
+    stop_requested: Decimal | None = None
+    stop_adjusted: Decimal | None = None
+
+
+class OrderPrecisionError(ValueError):
+    """Raised when order precision validation fails before dispatch."""
+
+    def __init__(self, tag: str, reason: str) -> None:
+        super().__init__(reason)
+        self.tag = tag
+        self.reason = reason
+
+
 def to_api_str(value: Decimal | Any) -> str:
     dec = value if isinstance(value, Decimal) else to_decimal(value)
     normalized = dec.normalize()
@@ -186,6 +205,82 @@ def log_precision_summary(
             "is_multiple_qty": qty_multiple,
             "is_multiple_stop": stop_multiple,
         },
+    )
+
+
+def log_order_not_sent(
+    *,
+    log_prefix: str,
+    symbol: str,
+    market: str,
+    timeframe: str,
+    side: str,
+    order_type: str,
+    tag: str,
+    reason: str,
+    filters: SymbolFilters | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "tag": "ORDER_NOT_SENT",
+        "sent": False,
+        "symbol": symbol,
+        "market": market,
+        "timeframe": timeframe,
+        "side": side,
+        "orderType": order_type,
+        "reason": reason,
+        "detail_tag": tag,
+    }
+    if filters is not None:
+        payload["tickSize"] = format_decimal(filters.tick_size)
+        payload["stepSize"] = format_decimal(filters.step_size)
+    logger.warning("%s %s", log_prefix, payload)
+
+
+def compute_order_precision(
+    *,
+    price_requested: Decimal | None,
+    qty_requested: Decimal | None,
+    stop_requested: Decimal | None,
+    side: str,
+    order_type: str,
+    filters: SymbolFilters,
+) -> PrecisionComputation:
+    tick_size = filters.tick_size
+    step_size = filters.step_size
+
+    if tick_size is None or tick_size <= 0 or step_size is None or step_size <= 0:
+        raise OrderPrecisionError("ORDER_REJECT_TICK_INVALID", "invalid_tick_or_step")
+
+    price_adjusted: Decimal | None = None
+    if price_requested is not None:
+        price_adjusted = quantize_price_to_tick(price_requested, tick_size, side=side)
+        if not assert_is_multiple(price_adjusted, tick_size):
+            raise OrderPrecisionError("ORDER_REJECT_TICK_INVALID", "price_not_multiple")
+
+    stop_adjusted: Decimal | None = None
+    if stop_requested is not None:
+        stop_adjusted = quantize_price_to_tick(stop_requested, tick_size, side=side)
+        if not assert_is_multiple(stop_adjusted, tick_size):
+            raise OrderPrecisionError("ORDER_REJECT_TICK_INVALID", "stop_not_multiple")
+
+    qty_adjusted: Decimal | None = None
+    if qty_requested is not None:
+        qty_adjusted = qty_requested
+        if qty_adjusted > 0 and not assert_is_multiple(qty_adjusted, step_size):
+            qty_adjusted = round_to_step(qty_adjusted, step_size, rounding=ROUND_DOWN)
+        if qty_adjusted <= 0:
+            raise OrderPrecisionError("ORDER_REJECT_TICK_INVALID", "qty_non_positive")
+        if not assert_is_multiple(qty_adjusted, step_size):
+            raise OrderPrecisionError("ORDER_REJECT_TICK_INVALID", "qty_not_multiple")
+
+    return PrecisionComputation(
+        price_requested=price_requested,
+        price_adjusted=price_adjusted,
+        qty_requested=qty_requested,
+        qty_adjusted=qty_adjusted,
+        stop_requested=stop_requested,
+        stop_adjusted=stop_adjusted,
     )
 
 
@@ -691,12 +786,27 @@ class WedgeFormationStrategy:
             filters = get_symbol_filters(exch, symbol, market)
         except ValueError as exc:
             logger.warning(
-                "%s filters_unavailable symbol=%s market=%s timeframe=%s reason=%s",
+                "%s %s",
                 log_prefix,
-                symbol,
-                market,
-                timeframe,
-                exc,
+                {
+                    "tag": "ORDER_REJECT_TICK_INVALID",
+                    "symbol": symbol,
+                    "market": market,
+                    "timeframe": timeframe,
+                    "side": side,
+                    "orderType": "LIMIT",
+                    "reason": str(exc),
+                },
+            )
+            log_order_not_sent(
+                log_prefix=log_prefix,
+                symbol=symbol,
+                market=market,
+                timeframe=timeframe,
+                side=side,
+                order_type="LIMIT",
+                tag="ORDER_REJECT_TICK_INVALID",
+                reason=str(exc),
             )
             return {"status": "precision_filters_unavailable", "symbol": symbol}
 
@@ -915,15 +1025,52 @@ class WedgeFormationStrategy:
         tp_client_id = sanitize_client_order_id(f"{cid_prefix}_{now_minute}_TP")
 
         entry_price_requested = entry_price_norm_dec
-        entry_price_adjusted = quantize_price_to_tick(
-            entry_price_requested, filters.tick_size, side=side
-        )
         qty_requested = qty_dec
-        qty_adjusted = qty_requested
-        if not assert_is_multiple(qty_adjusted, filters.step_size):
-            qty_adjusted = round_to_step(
-                qty_adjusted, filters.step_size, rounding=ROUND_DOWN
+
+        try:
+            entry_precision = compute_order_precision(
+                price_requested=entry_price_requested,
+                qty_requested=qty_requested,
+                stop_requested=None,
+                side=side,
+                order_type="LIMIT",
+                filters=filters,
             )
+        except OrderPrecisionError as exc:
+            logger.warning(
+                "%s %s",
+                log_prefix,
+                {
+                    "tag": exc.tag,
+                    "symbol": symbol,
+                    "market": market,
+                    "timeframe": timeframe,
+                    "side": side,
+                    "orderType": "LIMIT",
+                    "reason": exc.reason,
+                    "tickSize": format_decimal(filters.tick_size),
+                    "stepSize": format_decimal(filters.step_size),
+                },
+            )
+            log_order_not_sent(
+                log_prefix=log_prefix,
+                symbol=symbol,
+                market=market,
+                timeframe=timeframe,
+                side=side,
+                order_type="LIMIT",
+                tag=exc.tag,
+                reason=exc.reason,
+                filters=filters,
+            )
+            return {
+                "status": "precision_reject_entry",
+                "symbol": symbol,
+                "reason": exc.reason,
+            }
+
+        entry_price_adjusted = entry_precision.price_adjusted
+        qty_adjusted = entry_precision.qty_adjusted
 
         if rounding_diag_enabled:
             diag_payload_post: dict[str, Any] = {
@@ -998,10 +1145,10 @@ class WedgeFormationStrategy:
             tick_size=filters.tick_size,
             step_size=filters.step_size,
             min_notional=filters.min_notional,
-            requested_price=entry_price_requested,
-            adjusted_price=entry_price_adjusted,
-            requested_qty=qty_requested,
-            adjusted_qty=qty_adjusted,
+            requested_price=entry_precision.price_requested,
+            adjusted_price=entry_precision.price_adjusted,
+            requested_qty=entry_precision.qty_requested,
+            adjusted_qty=entry_precision.qty_adjusted,
         )
 
         entry_price_payload = to_api_str(entry_price_adjusted)
@@ -1076,19 +1223,50 @@ class WedgeFormationStrategy:
         )
 
         tp_price_requested = tp_price_norm_dec
-        tp_price_adjusted = quantize_price_to_tick(
-            tp_price_requested, filters.tick_size, side=exit_side
-        )
         tp_stop_requested = tp_price_requested
-        tp_stop_adjusted = quantize_price_to_tick(
-            tp_stop_requested, filters.tick_size, side=exit_side
-        )
         tp_qty_requested = tp_qty_guard.qty
-        tp_qty_adjusted = tp_qty_requested
-        if not assert_is_multiple(tp_qty_adjusted, filters.step_size):
-            tp_qty_adjusted = round_to_step(
-                tp_qty_adjusted, filters.step_size, rounding=ROUND_DOWN
+
+        try:
+            tp_precision = compute_order_precision(
+                price_requested=tp_price_requested,
+                qty_requested=tp_qty_requested,
+                stop_requested=tp_stop_requested,
+                side=exit_side,
+                order_type="TP_LIMIT",
+                filters=filters,
             )
+        except OrderPrecisionError as exc:
+            logger.warning(
+                "%s %s",
+                log_prefix,
+                {
+                    "tag": exc.tag,
+                    "symbol": symbol,
+                    "market": market,
+                    "timeframe": timeframe,
+                    "side": exit_side,
+                    "orderType": "TP_LIMIT",
+                    "reason": exc.reason,
+                    "tickSize": format_decimal(filters.tick_size),
+                    "stepSize": format_decimal(filters.step_size),
+                },
+            )
+            log_order_not_sent(
+                log_prefix=log_prefix,
+                symbol=symbol,
+                market=market,
+                timeframe=timeframe,
+                side=exit_side,
+                order_type="TP_LIMIT",
+                tag=exc.tag,
+                reason=exc.reason,
+                filters=filters,
+            )
+            return {
+                "status": "precision_reject_tp",
+                "symbol": symbol,
+                "reason": exc.reason,
+            }
 
         log_precision_summary(
             log_prefix=log_prefix,
@@ -1100,18 +1278,20 @@ class WedgeFormationStrategy:
             tick_size=filters.tick_size,
             step_size=filters.step_size,
             min_notional=filters.min_notional,
-            requested_price=tp_price_requested,
-            adjusted_price=tp_price_adjusted,
-            requested_qty=tp_qty_requested,
-            adjusted_qty=tp_qty_adjusted,
-            requested_stop=tp_stop_requested,
-            adjusted_stop=tp_stop_adjusted,
+            requested_price=tp_precision.price_requested,
+            adjusted_price=tp_precision.price_adjusted,
+            requested_qty=tp_precision.qty_requested,
+            adjusted_qty=tp_precision.qty_adjusted,
+            requested_stop=tp_precision.stop_requested,
+            adjusted_stop=tp_precision.stop_adjusted,
         )
 
-        tp_price_payload = to_api_str(tp_price_adjusted)
-        tp_qty_payload = to_api_str(tp_qty_adjusted)
+        tp_price_payload = to_api_str(tp_precision.price_adjusted)
+        tp_qty_payload = to_api_str(tp_precision.qty_adjusted)
 
-        persisted = persist_tp_value(symbol, tp_price_adjusted, now.timestamp())
+        persisted = persist_tp_value(
+            symbol, tp_precision.price_adjusted, now.timestamp()
+        )
         # TODO: Cuando implementemos SL: aplicar SL únicamente al cierre de vela fuera del patrón
         # en el timeframe WEDGE_TIMEFRAME; hasta entonces, sin SL automático.
         logger.info(
@@ -1167,19 +1347,35 @@ class WedgeFormationStrategy:
             logger.info("%s tp_missing_storage", log_prefix)
             return
 
+        side = "SELL" if is_long else "BUY"
+
         try:
             filters = get_symbol_filters(exch, symbol, market)
         except ValueError as exc:
             logger.warning(
-                "%s tp_filters_unavailable symbol=%s market=%s timeframe=%s reason=%s",
+                "%s %s",
                 log_prefix,
-                symbol,
-                market,
-                timeframe,
-                exc,
+                {
+                    "tag": "ORDER_REJECT_TICK_INVALID",
+                    "symbol": symbol,
+                    "market": market,
+                    "timeframe": timeframe,
+                    "side": side,
+                    "orderType": "TP_LIMIT",
+                    "reason": str(exc),
+                },
+            )
+            log_order_not_sent(
+                log_prefix=log_prefix,
+                symbol=symbol,
+                market=market,
+                timeframe=timeframe,
+                side=side,
+                order_type="TP_LIMIT",
+                tag="ORDER_REJECT_TICK_INVALID",
+                reason=str(exc),
             )
             return
-        side = "SELL" if is_long else "BUY"
 
         tp_price_raw_dec = Decimal(str(tp_value))
         tp_price_dec = quantize_price_to_tick(
@@ -1249,19 +1445,46 @@ class WedgeFormationStrategy:
             f"{cid_prefix}_{int(now.timestamp() // 60)}_TP"
         )
         tp_price_requested = tp_price_dec
-        tp_price_adjusted = quantize_price_to_tick(
-            tp_price_requested, filters.tick_size, side=side
-        )
         tp_stop_requested = tp_price_requested
-        tp_stop_adjusted = quantize_price_to_tick(
-            tp_stop_requested, filters.tick_size, side=side
-        )
         tp_qty_requested = tp_qty_dec
-        tp_qty_adjusted = tp_qty_requested
-        if not assert_is_multiple(tp_qty_adjusted, filters.step_size):
-            tp_qty_adjusted = round_to_step(
-                tp_qty_adjusted, filters.step_size, rounding=ROUND_DOWN
+
+        try:
+            tp_precision = compute_order_precision(
+                price_requested=tp_price_requested,
+                qty_requested=tp_qty_requested,
+                stop_requested=tp_stop_requested,
+                side=side,
+                order_type="TP_LIMIT",
+                filters=filters,
             )
+        except OrderPrecisionError as exc:
+            logger.warning(
+                "%s %s",
+                log_prefix,
+                {
+                    "tag": exc.tag,
+                    "symbol": symbol,
+                    "market": market,
+                    "timeframe": timeframe,
+                    "side": side,
+                    "orderType": "TP_LIMIT",
+                    "reason": exc.reason,
+                    "tickSize": format_decimal(filters.tick_size),
+                    "stepSize": format_decimal(filters.step_size),
+                },
+            )
+            log_order_not_sent(
+                log_prefix=log_prefix,
+                symbol=symbol,
+                market=market,
+                timeframe=timeframe,
+                side=side,
+                order_type="TP_LIMIT",
+                tag=exc.tag,
+                reason=exc.reason,
+                filters=filters,
+            )
+            return
 
         log_precision_summary(
             log_prefix=log_prefix,
@@ -1273,16 +1496,16 @@ class WedgeFormationStrategy:
             tick_size=filters.tick_size,
             step_size=filters.step_size,
             min_notional=filters.min_notional,
-            requested_price=tp_price_requested,
-            adjusted_price=tp_price_adjusted,
-            requested_qty=tp_qty_requested,
-            adjusted_qty=tp_qty_adjusted,
-            requested_stop=tp_stop_requested,
-            adjusted_stop=tp_stop_adjusted,
+            requested_price=tp_precision.price_requested,
+            adjusted_price=tp_precision.price_adjusted,
+            requested_qty=tp_precision.qty_requested,
+            adjusted_qty=tp_precision.qty_adjusted,
+            requested_stop=tp_precision.stop_requested,
+            adjusted_stop=tp_precision.stop_adjusted,
         )
 
-        tp_price_payload = to_api_str(tp_price_adjusted)
-        tp_qty_payload = to_api_str(tp_qty_adjusted)
+        tp_price_payload = to_api_str(tp_precision.price_adjusted)
+        tp_qty_payload = to_api_str(tp_precision.qty_adjusted)
 
         try:
             exch.place_tp_reduce_only(
