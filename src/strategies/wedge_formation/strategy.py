@@ -71,6 +71,24 @@ def to_api_str(value: Decimal | Any) -> str:
     return format(normalized, "f")
 
 
+def to_decimal_or_none(value: Any) -> Decimal | None:
+    try:
+        if value is None:
+            return None
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def is_multiple(value_dec: Decimal | None, step_dec: Decimal | None) -> bool | None:
+    try:
+        if value_dec is None or step_dec is None or step_dec == 0:
+            return None
+        return (value_dec % step_dec) == 0
+    except Exception:
+        return None
+
+
 def assert_is_multiple(dec_value: Decimal | Any, tick_or_step: Decimal | Any) -> bool:
     step = tick_or_step if isinstance(tick_or_step, Decimal) else to_decimal(tick_or_step)
     if step <= 0:
@@ -219,20 +237,39 @@ def get_symbol_filters(
     )
     min_qty_raw = lot_filter.get("minQty") or lot_filter.get("min_qty") or "0"
 
-    if market_norm == "futures":
-        emit_rounding_diag(
-            {
-                "tag": "A_filters",
-                "symbol": symbol,
-                "market": "futures",
-                "tickSize_raw": format_rounding_diag_number(tick_size_raw),
-                "stepSize_raw": format_rounding_diag_number(step_size_raw),
-                "minNotional_raw": format_rounding_diag_number(min_notional_raw),
-                "source": "exchangeInfoFutures",
-                "fetched_at": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
-            },
-            logger=logger,
-        )
+    if market_norm == "futures" and os.getenv("ROUNDING_DIAG") == "1":
+        diag_payload: dict[str, Any] = {
+            "tag": "A_filters",
+            "symbol": symbol,
+            "market": "futures",
+            "tickSize_raw": None,
+            "stepSize_raw": None,
+            "minNotional_raw": None,
+            "source": "exchangeInfoFutures",
+            "fetched_at": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+        }
+        try:
+            tick_size_dec = to_decimal_or_none(tick_size_raw)
+            step_size_dec = to_decimal_or_none(step_size_raw)
+            min_notional_dec = to_decimal_or_none(min_notional_raw)
+            diag_payload["tickSize_raw"] = (
+                format_rounding_diag_number(tick_size_dec)
+                if tick_size_dec is not None
+                else None
+            )
+            diag_payload["stepSize_raw"] = (
+                format_rounding_diag_number(step_size_dec)
+                if step_size_dec is not None
+                else None
+            )
+            diag_payload["minNotional_raw"] = (
+                format_rounding_diag_number(min_notional_dec)
+                if min_notional_dec is not None
+                else None
+            )
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            diag_payload["warn"] = str(exc)
+        emit_rounding_diag(diag_payload, logger=logger)
 
     tick_size = to_decimal(tick_size_raw)
     step_size = to_decimal(step_size_raw)
@@ -401,6 +438,7 @@ class WedgeFormationStrategy:
         market = (market_env or market_cfg or "futures").lower()
         log_prefix = f"WEDGE{symbol}{timeframe}"
         cid_prefix = f"WEDGE_{symbol}_{timeframe}"
+        rounding_diag_enabled = os.getenv("ROUNDING_DIAG") == "1"
 
         filters_enabled = parse_bool(os.getenv("WEDGE_FILTERS_ENABLED"), default=False)
         min_touches = _safe_int(os.getenv("WEDGE_MIN_TOUCHES_PER_SIDE"), 2)
@@ -652,59 +690,6 @@ class WedgeFormationStrategy:
         except (InvalidOperation, DivisionByZero, ValueError, TypeError):
             stop_price_raw_dec = None
 
-        price_div_tick = None
-        if filters.tick_size > 0:
-            try:
-                price_div_tick = entry_price_raw_dec / filters.tick_size
-            except (InvalidOperation, DivisionByZero):
-                price_div_tick = None
-
-        if filters.tick_size > 0:
-            try:
-                price_multiple_raw = (entry_price_raw_dec % filters.tick_size) == 0
-            except InvalidOperation:
-                price_multiple_raw = False
-        else:
-            price_multiple_raw = False
-
-        if filters.step_size > 0:
-            try:
-                qty_multiple_raw = (qty_raw_dec % filters.step_size) == 0
-            except InvalidOperation:
-                qty_multiple_raw = False
-        else:
-            qty_multiple_raw = False
-
-        if stop_price_raw_dec is None:
-            stop_multiple_raw = True
-        elif filters.tick_size > 0:
-            try:
-                stop_multiple_raw = (stop_price_raw_dec % filters.tick_size) == 0
-            except InvalidOperation:
-                stop_multiple_raw = False
-        else:
-            stop_multiple_raw = False
-
-        emit_rounding_diag(
-            {
-                "tag": "B_pre_adjust",
-                "symbol": symbol,
-                "side": side,
-                "orderType": "LIMIT",
-                "timeInForce": "GTC",
-                "price_raw": format_rounding_diag_number(entry_price_raw_dec),
-                "qty_raw": format_rounding_diag_number(qty_raw_dec),
-                "stop_raw": format_rounding_diag_number(stop_price_raw_dec),
-                "tickSize": format_rounding_diag_number(filters.tick_size),
-                "stepSize": format_rounding_diag_number(filters.step_size),
-                "price_div_tick": format_rounding_diag_number(price_div_tick),
-                "is_multiple_price": bool(price_multiple_raw),
-                "is_multiple_qty": bool(qty_multiple_raw),
-                "is_multiple_stop": bool(stop_multiple_raw),
-            },
-            logger=logger,
-        )
-
         entry_price_dec = round_to_tick(
             entry_price_raw_dec, filters.tick_size, side=side
         )
@@ -754,6 +739,90 @@ class WedgeFormationStrategy:
         qty_candidate_dec = max(qty_target_dec, min_qty_dec, qty_min_by_notional_dec)
 
         qty_raw_dec = qty_candidate_dec
+
+        if rounding_diag_enabled:
+            diag_payload: dict[str, Any] = {
+                "tag": "B_pre_adjust",
+                "symbol": symbol,
+                "side": side,
+                "orderType": "LIMIT",
+                "timeInForce": "GTC",
+                "price_raw": None,
+                "qty_raw": None,
+                "stop_raw": None,
+                "tickSize": None,
+                "stepSize": None,
+                "price_div_tick": None,
+                "is_multiple_price": None,
+                "is_multiple_qty": None,
+                "is_multiple_stop": None,
+            }
+            try:
+                price_raw_dec_diag = to_decimal_or_none(entry_price_raw_dec)
+                qty_raw_dec_diag = to_decimal_or_none(qty_raw_dec)
+                stop_raw_dec_diag = to_decimal_or_none(stop_price_raw_dec)
+                tick_dec = to_decimal_or_none(filters.tick_size)
+                step_dec = to_decimal_or_none(filters.step_size)
+
+                if price_raw_dec_diag is not None:
+                    diag_payload["price_raw"] = format_rounding_diag_number(
+                        price_raw_dec_diag
+                    )
+                if qty_raw_dec_diag is not None:
+                    diag_payload["qty_raw"] = format_rounding_diag_number(
+                        qty_raw_dec_diag
+                    )
+                if stop_raw_dec_diag is not None:
+                    diag_payload["stop_raw"] = format_rounding_diag_number(
+                        stop_raw_dec_diag
+                    )
+                if tick_dec is not None:
+                    diag_payload["tickSize"] = format_rounding_diag_number(tick_dec)
+                if step_dec is not None:
+                    diag_payload["stepSize"] = format_rounding_diag_number(step_dec)
+
+                if (
+                    price_raw_dec_diag is not None
+                    and tick_dec not in (None, Decimal("0"))
+                ):
+                    try:
+                        diag_payload["price_div_tick"] = str(
+                            price_raw_dec_diag / tick_dec
+                        )
+                    except Exception:
+                        diag_payload["price_div_tick"] = None
+
+                price_multiple_raw = is_multiple(price_raw_dec_diag, tick_dec)
+                qty_multiple_raw = is_multiple(qty_raw_dec_diag, step_dec)
+                stop_multiple_raw = (
+                    True
+                    if stop_raw_dec_diag is None
+                    else is_multiple(stop_raw_dec_diag, tick_dec)
+                )
+
+                diag_payload["is_multiple_price"] = (
+                    bool(price_multiple_raw)
+                    if price_multiple_raw is not None
+                    else None
+                )
+                diag_payload["is_multiple_qty"] = (
+                    bool(qty_multiple_raw)
+                    if qty_multiple_raw is not None
+                    else None
+                )
+                diag_payload["is_multiple_stop"] = (
+                    True
+                    if stop_multiple_raw is True
+                    else (
+                        bool(stop_multiple_raw)
+                        if stop_multiple_raw is not None
+                        else None
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                diag_payload["warn"] = str(exc)
+            emit_rounding_diag(diag_payload, logger=logger)
+
         qty_dec = round_to_step(qty_raw_dec, step_size_dec, rounding=ROUND_DOWN)
         guard = apply_qty_guards(
             symbol,
@@ -840,37 +909,68 @@ class WedgeFormationStrategy:
                 qty_adjusted, filters.step_size, rounding=ROUND_DOWN
             )
 
-        if filters.tick_size > 0:
-            try:
-                price_multiple_adj = (entry_price_adjusted % filters.tick_size) == 0
-            except InvalidOperation:
-                price_multiple_adj = False
-        else:
-            price_multiple_adj = False
-
-        if filters.step_size > 0:
-            try:
-                qty_multiple_adj = (qty_adjusted % filters.step_size) == 0
-            except InvalidOperation:
-                qty_multiple_adj = False
-        else:
-            qty_multiple_adj = False
-
-        emit_rounding_diag(
-            {
+        if rounding_diag_enabled:
+            diag_payload_post: dict[str, Any] = {
                 "tag": "C_post_adjust",
                 "symbol": symbol,
-                "price_adj": format_rounding_diag_number(entry_price_adjusted),
-                "qty_adj": format_rounding_diag_number(qty_adjusted),
+                "price_adj": None,
+                "qty_adj": None,
                 "stop_adj": None,
-                "rule_price": "UP" if (side or "").upper() == "SELL" else "DOWN",
-                "rule_qty": "DOWN",
-                "is_multiple_price_adj": bool(price_multiple_adj),
-                "is_multiple_qty_adj": bool(qty_multiple_adj),
-                "is_multiple_stop_adj": True,
-            },
-            logger=logger,
-        )
+                "rule_price": None,
+                "rule_qty": None,
+                "is_multiple_price_adj": None,
+                "is_multiple_qty_adj": None,
+                "is_multiple_stop_adj": None,
+            }
+            try:
+                price_adj_dec = to_decimal_or_none(entry_price_adjusted)
+                qty_adj_dec = to_decimal_or_none(qty_adjusted)
+                stop_adj_dec = to_decimal_or_none(None)
+                tick_dec = to_decimal_or_none(filters.tick_size)
+                step_dec = to_decimal_or_none(filters.step_size)
+
+                if price_adj_dec is not None:
+                    diag_payload_post["price_adj"] = format_rounding_diag_number(
+                        price_adj_dec
+                    )
+                if qty_adj_dec is not None:
+                    diag_payload_post["qty_adj"] = format_rounding_diag_number(
+                        qty_adj_dec
+                    )
+
+                is_multiple_price_adj = is_multiple(price_adj_dec, tick_dec)
+                is_multiple_qty_adj = is_multiple(qty_adj_dec, step_dec)
+                is_multiple_stop_adj = True if stop_adj_dec is None else is_multiple(
+                    stop_adj_dec, tick_dec
+                )
+
+                diag_payload_post["is_multiple_price_adj"] = (
+                    bool(is_multiple_price_adj)
+                    if is_multiple_price_adj is not None
+                    else None
+                )
+                diag_payload_post["is_multiple_qty_adj"] = (
+                    bool(is_multiple_qty_adj)
+                    if is_multiple_qty_adj is not None
+                    else None
+                )
+                diag_payload_post["is_multiple_stop_adj"] = (
+                    True
+                    if is_multiple_stop_adj is True
+                    else (
+                        bool(is_multiple_stop_adj)
+                        if is_multiple_stop_adj is not None
+                        else None
+                    )
+                )
+
+                rule_price = "UP" if (side or "").upper() == "SELL" else "DOWN"
+                rule_qty = "DOWN"
+                diag_payload_post["rule_price"] = rule_price
+                diag_payload_post["rule_qty"] = rule_qty
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                diag_payload_post["warn"] = str(exc)
+            emit_rounding_diag(diag_payload_post, logger=logger)
 
         log_precision_summary(
             log_prefix=log_prefix,
