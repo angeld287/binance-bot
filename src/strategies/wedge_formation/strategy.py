@@ -256,17 +256,20 @@ def compute_order_precision(
 
     price_adjusted: Decimal | None = None
     if price_requested is not None:
-        price_adjusted = to_decimal(
-            exchange.round_price_to_tick(symbol, price_requested)
-        )
+        val_price_requested = exchange.round_price_to_tick(symbol, price_requested)
+        logger.info("round_price_to_tick - val_price_requested %s", val_price_requested)
+        price_adjusted = to_decimal(price_requested)
+        logger.info("round_price_to_tick - price_adjusted %s", price_adjusted)
+
         if not assert_is_multiple(price_adjusted, tick_size):
             raise OrderPrecisionError("ORDER_REJECT_TICK_INVALID", "price_not_multiple")
 
     stop_adjusted: Decimal | None = None
     if stop_requested is not None:
-        stop_adjusted = to_decimal(
-            exchange.round_price_to_tick(symbol, stop_requested)
-        )
+        val_stop_requested = exchange.round_price_to_tick(symbol, stop_requested)
+        logger.info("round_price_to_tick - val_stop_requested %s", val_stop_requested)
+        stop_adjusted = to_decimal(val_stop_requested)
+        logger.info("round_price_to_tick - stop_adjusted %s", stop_adjusted)
         if not assert_is_multiple(stop_adjusted, tick_size):
             raise OrderPrecisionError("ORDER_REJECT_TICK_INVALID", "stop_not_multiple")
 
@@ -741,11 +744,15 @@ class WedgeFormationStrategy:
             tp_price = tp_line
             sl_theoretical = entry_price - buffer if buffer > 0 else entry_price - atr * 0.5
 
-        entry_price = float(exch.round_price_to_tick(symbol, entry_price))
-        value = exch.round_price_to_tick(symbol, tp_price)
-        logger.info("round_price_to_tick - value: ", value)
-        tp_price = float(value)
-        logger.info("round_price_to_tick - tp_price: ", tp_price)
+        val_entry_price = exch.round_price_to_tick(symbol, entry_price)
+        logger.info("round_price_to_tick - val_entry_price: %s", val_entry_price)
+        entry_price = float(val_entry_price)
+        logger.info("round_price_to_tick - entry_price: %s", entry_price)
+
+        val_tp_price = exch.round_price_to_tick(symbol, tp_price)
+        logger.info("round_price_to_tick - val_tp_price: %s", val_tp_price)
+        tp_price = float(val_tp_price)
+        logger.info("round_price_to_tick - tp_price: %s", tp_price)
 
         if side == "SELL" and tp_price >= entry_price:
             logger.info(
@@ -830,13 +837,17 @@ class WedgeFormationStrategy:
         except (InvalidOperation, DivisionByZero, ValueError, TypeError):
             stop_price_raw_dec = None
 
-        entry_price_dec = to_decimal(
-            exch.round_price_to_tick(symbol, entry_price_raw_dec)
-        )
+        val_entry_price_raw_dec = exch.round_price_to_tick(symbol, entry_price_raw_dec)
+        logger.info("round_price_to_tick - val_entry_price_raw_dec: %s", val_entry_price_raw_dec)
+        entry_price_dec = to_decimal(val_entry_price_raw_dec)
+        logger.info("round_price_to_tick - entry_price_dec: %s", entry_price_dec)
+
         exit_side = "SELL" if side == "BUY" else "BUY"
-        tp_price_dec = to_decimal(
-            exch.round_price_to_tick(symbol, tp_price_raw_dec)
-        )
+
+        val_tp_price_raw_dec = exch.round_price_to_tick(symbol, tp_price_raw_dec)
+        logger.info("round_price_to_tick - val_tp_price_raw_dec: %s", val_tp_price_raw_dec)
+        tp_price_dec = to_decimal(val_tp_price_raw_dec)
+        logger.info("round_price_to_tick - tp_price_dec: %s", tp_price_dec)
 
         entry_price_norm_dec = entry_price_dec
         tp_price_norm_dec = tp_price_dec
@@ -1394,9 +1405,12 @@ class WedgeFormationStrategy:
             return
 
         tp_price_raw_dec = Decimal(str(tp_value))
-        tp_price_dec = to_decimal(
-            exch.round_price_to_tick(symbol, tp_price_raw_dec)
-        )
+        
+        val_tp_price_raw_dec = exch.round_price_to_tick(symbol, tp_price_raw_dec)
+        logger.info("round_price_to_tick - val_tp_price_raw_dec: %s", val_tp_price_raw_dec)
+        tp_price_dec = to_decimal(val_tp_price_raw_dec)
+        logger.info("round_price_to_tick - tp_price_dec: %s", tp_price_dec)
+
         qty_raw_dec = to_decimal(qty)
         qty_dec = round_to_step(qty_raw_dec, filters.step_size, rounding=ROUND_DOWN)
 
