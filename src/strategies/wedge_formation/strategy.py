@@ -5,7 +5,7 @@ from datetime import datetime
 import logging
 import math
 import os
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from decimal import Decimal, DivisionByZero, InvalidOperation, ROUND_DOWN, ROUND_UP
 from typing import Any, Iterable, Sequence
 
 from common.utils import sanitize_client_order_id
@@ -13,7 +13,7 @@ from config.utils import parse_bool
 from core.ports.broker import BrokerPort
 from core.ports.market_data import MarketDataPort
 from core.ports.settings import SettingsProvider, get_symbol
-from common.precision import format_decimal, to_decimal
+from common.precision import format_decimal, round_to_step, round_to_tick, to_decimal
 from utils.tp_store_s3 import load_tp_value, persist_tp_value
 
 logger = logging.getLogger("bot.strategy.wedge")
@@ -55,6 +55,101 @@ class QtyGuardResult:
     adjusted: bool
     reason: str | None
     notional: Decimal
+
+
+def to_api_str(value: Decimal | Any) -> str:
+    dec = value if isinstance(value, Decimal) else to_decimal(value)
+    normalized = dec.normalize()
+    if normalized == normalized.to_integral():
+        normalized = normalized.quantize(Decimal("1"))
+    else:
+        exponent = normalized.as_tuple().exponent
+        if exponent < 0:
+            quantum = Decimal(1).scaleb(exponent)
+            normalized = normalized.quantize(quantum)
+    return format(normalized, "f")
+
+
+def assert_is_multiple(dec_value: Decimal | Any, tick_or_step: Decimal | Any) -> bool:
+    step = tick_or_step if isinstance(tick_or_step, Decimal) else to_decimal(tick_or_step)
+    if step <= 0:
+        return True
+    value = dec_value if isinstance(dec_value, Decimal) else to_decimal(dec_value)
+    if value == 0:
+        return True
+    try:
+        ratio = (value / step).normalize()
+    except (InvalidOperation, DivisionByZero):
+        return False
+    return ratio == ratio.to_integral_value()
+
+
+def ceil_to_step(value: Decimal, step: Decimal) -> Decimal:
+    if step <= 0:
+        return value
+    if value <= 0:
+        return Decimal("0")
+    quotient = (value / step).to_integral_value(rounding=ROUND_UP)
+    return quotient * step
+
+
+def log_precision_summary(
+    *,
+    log_prefix: str,
+    symbol: str,
+    market: str,
+    timeframe: str,
+    side: str,
+    order_type: str,
+    tick_size: Decimal,
+    step_size: Decimal,
+    min_notional: Decimal,
+    requested_price: Decimal | None,
+    adjusted_price: Decimal | None,
+    requested_qty: Decimal | None,
+    adjusted_qty: Decimal | None,
+    requested_stop: Decimal | None = None,
+    adjusted_stop: Decimal | None = None,
+) -> None:
+    price_multiple = (
+        assert_is_multiple(adjusted_price, tick_size)
+        if adjusted_price is not None
+        else True
+    )
+    qty_multiple = (
+        assert_is_multiple(adjusted_qty, step_size)
+        if adjusted_qty is not None
+        else True
+    )
+    stop_multiple = (
+        assert_is_multiple(adjusted_stop, tick_size)
+        if adjusted_stop is not None
+        else True
+    )
+
+    logger.info(
+        "%s precision_summary %s",
+        log_prefix,
+        {
+            "symbol": symbol,
+            "market": market,
+            "timeframe": timeframe,
+            "side": side,
+            "order_type": order_type,
+            "tickSize": repr(tick_size),
+            "stepSize": repr(step_size),
+            "minNotional": repr(min_notional),
+            "requested_price": repr(requested_price),
+            "adjusted_price": repr(adjusted_price),
+            "requested_qty": repr(requested_qty),
+            "adjusted_qty": repr(adjusted_qty),
+            "requested_stopPrice": repr(requested_stop),
+            "adjusted_stopPrice": repr(adjusted_stop),
+            "is_multiple_price": price_multiple,
+            "is_multiple_qty": qty_multiple,
+            "is_multiple_stop": stop_multiple,
+        },
+    )
 
 
 def get_symbol_filters(
@@ -137,35 +232,6 @@ def get_symbol_filters(
     )
 
 
-def round_price_for_side(
-    price: Any,
-    tick_size: Decimal,
-    side: str,
-    order_type: str,
-) -> Decimal:
-    """Return ``price`` rounded according to ``side`` using ``tick_size``."""
-
-    del order_type  # Behaviour identical for LIMIT/STOP/TP in this context.
-
-    tick = tick_size if isinstance(tick_size, Decimal) else to_decimal(tick_size)
-    if tick <= 0:
-        return to_decimal(price)
-    px = to_decimal(price)
-    side_norm = (side or "").upper()
-    rounding = ROUND_DOWN if side_norm == "BUY" else ROUND_UP
-    return px.quantize(tick, rounding=rounding)
-
-
-def round_qty(qty: Any, step_size: Decimal) -> Decimal:
-    """Floor ``qty`` to the closest ``step_size`` multiple."""
-
-    step = step_size if isinstance(step_size, Decimal) else to_decimal(step_size)
-    if step <= 0:
-        return to_decimal(qty)
-    quantity = to_decimal(qty)
-    return quantity.quantize(step, rounding=ROUND_DOWN)
-
-
 def apply_qty_guards(
     symbol: str,
     side: str,
@@ -187,7 +253,7 @@ def apply_qty_guards(
 
     if min_qty > 0 and qty < min_qty:
         if allow_increase:
-            qty = round_qty(min_qty, step)
+            qty = round_to_step(min_qty, step, rounding=ROUND_DOWN)
             adjusted = True
         else:
             return QtyGuardResult(
@@ -219,7 +285,9 @@ def apply_qty_guards(
                 and iterations < max_iterations
             ):
                 qty_candidate = qty_candidate + step
-                qty_candidate = round_qty(qty_candidate, step)
+                qty_candidate = round_to_step(
+                    qty_candidate, step, rounding=ROUND_DOWN
+                )
                 notional_candidate = price_dec * qty_candidate
                 iterations += 1
             if notional_candidate >= filters.min_notional and qty_candidate > 0:
@@ -557,50 +625,56 @@ class WedgeFormationStrategy:
 
         entry_price_raw_dec = to_decimal(entry_price)
         tp_price_raw_dec = to_decimal(tp_price)
-        entry_price_dec = round_price_for_side(
-            entry_price_raw_dec, filters.tick_size, side, "LIMIT"
+        entry_price_dec = round_to_tick(
+            entry_price_raw_dec, filters.tick_size, side=side
         )
         exit_side = "SELL" if side == "BUY" else "BUY"
-        tp_price_dec = round_price_for_side(
-            tp_price_raw_dec, filters.tick_size, exit_side, "TAKE_PROFIT"
+        tp_price_dec = round_to_tick(
+            tp_price_raw_dec, filters.tick_size, side=exit_side
         )
 
-        entry_price_norm = float(entry_price_dec)
-        tp_price_norm = float(tp_price_dec)
+        entry_price_norm_dec = entry_price_dec
+        tp_price_norm_dec = tp_price_dec
 
-        step_size = float(filters.step_size)
-        min_qty = float(filters.min_qty)
-        min_notional = float(filters.min_notional)
+        step_size_dec = filters.step_size
+        min_qty_dec = filters.min_qty
+        min_notional_dec = filters.min_notional
 
-        risk_notional = float(getattr(settings, "RISK_NOTIONAL_USDT", 0.0) or 0.0)
+        risk_notional_dec = to_decimal(
+            getattr(settings, "RISK_NOTIONAL_USDT", Decimal("0")) or Decimal("0")
+        )
         qty_target_src = "NONE"
-        if risk_notional > 0 and entry_price_norm > 0:
-            qty_target = risk_notional / entry_price_norm
+        qty_target_dec = Decimal("0")
+        if risk_notional_dec > 0 and entry_price_norm_dec > 0:
+            qty_target_dec = risk_notional_dec / entry_price_norm_dec
             qty_target_src = "NOTIONAL"
         else:
-            balance = 0.0
+            balance_dec = Decimal("0")
             try:
-                balance = float(exch.get_available_balance_usdt())
+                balance_dec = to_decimal(exch.get_available_balance_usdt())
             except Exception:
-                balance = 0.0
-            risk_pct = float(getattr(settings, "RISK_PCT", 0.0) or 0.0)
-            if risk_pct > 0 and balance > 0 and entry_price_norm > 0:
-                qty_target = (balance * risk_pct) / entry_price_norm
+                balance_dec = Decimal("0")
+            risk_pct_dec = to_decimal(
+                getattr(settings, "RISK_PCT", Decimal("0")) or Decimal("0")
+            )
+            if (
+                risk_pct_dec > 0
+                and balance_dec > 0
+                and entry_price_norm_dec > 0
+            ):
+                qty_target_dec = (balance_dec * risk_pct_dec) / entry_price_norm_dec
                 qty_target_src = "PCT"
-            else:
-                qty_target = 0.0
 
-        def _ceil_to_step(x: float, step: float) -> float:
-            return math.ceil(x / step) * step if step else x
+        qty_min_by_notional_dec = Decimal("0")
+        if entry_price_norm_dec > 0 and min_notional_dec > 0:
+            qty_min_by_notional_dec = ceil_to_step(
+                min_notional_dec / entry_price_norm_dec, step_size_dec
+            )
 
-        qty_min_by_notional = _ceil_to_step(
-            min_notional / entry_price_norm if entry_price_norm else 0.0,
-            step_size,
-        )
-        qty = max(qty_target, min_qty, qty_min_by_notional)
+        qty_candidate_dec = max(qty_target_dec, min_qty_dec, qty_min_by_notional_dec)
 
-        qty_raw_dec = to_decimal(qty)
-        qty_dec = round_qty(qty_raw_dec, filters.step_size)
+        qty_raw_dec = qty_candidate_dec
+        qty_dec = round_to_step(qty_raw_dec, step_size_dec, rounding=ROUND_DOWN)
         guard = apply_qty_guards(
             symbol,
             side,
@@ -632,7 +706,6 @@ class WedgeFormationStrategy:
             return {"status": "precision_abort_entry", "symbol": symbol, "reason": guard.reason}
 
         qty_dec = guard.qty
-        qty_norm = float(qty_dec)
 
         logger.info(
             "%s precision_entry symbol=%s market=%s timeframe=%s side=%s "
@@ -656,15 +729,15 @@ class WedgeFormationStrategy:
         )
 
         logger.info(
-            "%s sizing entry_price=%.6f qty_target=%.6f qty_norm=%.6f src=%s",
+            "%s sizing entry_price=%s qty_target=%s qty_final=%s src=%s",
             log_prefix,
-            entry_price_norm,
-            qty_target,
-            qty_norm,
+            to_api_str(entry_price_norm_dec),
+            to_api_str(qty_target_dec),
+            to_api_str(qty_dec),
             qty_target_src,
         )
 
-        if qty_norm <= 0:
+        if qty_dec <= 0:
             logger.info("%s skip qty_not_positive", log_prefix)
             return {"status": "qty_invalid", "symbol": symbol}
 
@@ -674,12 +747,44 @@ class WedgeFormationStrategy:
         )
         tp_client_id = sanitize_client_order_id(f"{cid_prefix}_{now_minute}_TP")
 
+        entry_price_requested = entry_price_norm_dec
+        entry_price_adjusted = entry_price_requested
+        if not assert_is_multiple(entry_price_adjusted, filters.tick_size):
+            entry_price_adjusted = round_to_tick(
+                entry_price_adjusted, filters.tick_size, side=side
+            )
+        qty_requested = qty_dec
+        qty_adjusted = qty_requested
+        if not assert_is_multiple(qty_adjusted, filters.step_size):
+            qty_adjusted = round_to_step(
+                qty_adjusted, filters.step_size, rounding=ROUND_DOWN
+            )
+
+        log_precision_summary(
+            log_prefix=log_prefix,
+            symbol=symbol,
+            market=market,
+            timeframe=timeframe,
+            side=side,
+            order_type="LIMIT",
+            tick_size=filters.tick_size,
+            step_size=filters.step_size,
+            min_notional=filters.min_notional,
+            requested_price=entry_price_requested,
+            adjusted_price=entry_price_adjusted,
+            requested_qty=qty_requested,
+            adjusted_qty=qty_adjusted,
+        )
+
+        entry_price_payload = to_api_str(entry_price_adjusted)
+        qty_payload = to_api_str(qty_adjusted)
+
         try:
             order = exch.place_entry_limit(
                 symbol,
                 side,
-                entry_price_norm,
-                qty_norm,
+                entry_price_payload,
+                qty_payload,
                 entry_client_id,
                 timeInForce="GTC",
             )
@@ -687,8 +792,8 @@ class WedgeFormationStrategy:
             order = exch.place_entry_limit(
                 symbol,
                 side,
-                entry_price_norm,
-                qty_norm,
+                entry_price_payload,
+                qty_payload,
                 entry_client_id,
             )
 
@@ -742,17 +847,57 @@ class WedgeFormationStrategy:
             format_decimal(tp_qty_guard.notional),
         )
 
-        persisted = persist_tp_value(symbol, tp_price_norm, now.timestamp())
+        tp_price_requested = tp_price_norm_dec
+        tp_price_adjusted = tp_price_requested
+        if not assert_is_multiple(tp_price_adjusted, filters.tick_size):
+            tp_price_adjusted = round_to_tick(
+                tp_price_adjusted, filters.tick_size, side=exit_side
+            )
+        tp_stop_requested = tp_price_requested
+        tp_stop_adjusted = tp_price_adjusted
+        if not assert_is_multiple(tp_stop_adjusted, filters.tick_size):
+            tp_stop_adjusted = round_to_tick(
+                tp_stop_adjusted, filters.tick_size, side=exit_side
+            )
+        tp_qty_requested = tp_qty_guard.qty
+        tp_qty_adjusted = tp_qty_requested
+        if not assert_is_multiple(tp_qty_adjusted, filters.step_size):
+            tp_qty_adjusted = round_to_step(
+                tp_qty_adjusted, filters.step_size, rounding=ROUND_DOWN
+            )
+
+        log_precision_summary(
+            log_prefix=log_prefix,
+            symbol=symbol,
+            market=market,
+            timeframe=timeframe,
+            side=exit_side,
+            order_type="TP_LIMIT",
+            tick_size=filters.tick_size,
+            step_size=filters.step_size,
+            min_notional=filters.min_notional,
+            requested_price=tp_price_requested,
+            adjusted_price=tp_price_adjusted,
+            requested_qty=tp_qty_requested,
+            adjusted_qty=tp_qty_adjusted,
+            requested_stop=tp_stop_requested,
+            adjusted_stop=tp_stop_adjusted,
+        )
+
+        tp_price_payload = to_api_str(tp_price_adjusted)
+        tp_qty_payload = to_api_str(tp_qty_adjusted)
+
+        persisted = persist_tp_value(symbol, tp_price_adjusted, now.timestamp())
         # TODO: Cuando implementemos SL: aplicar SL únicamente al cierre de vela fuera del patrón
         # en el timeframe WEDGE_TIMEFRAME; hasta entonces, sin SL automático.
         logger.info(
-            "%s order entry placed side=%s price=%.6f qty=%.6f clientId=%s tp=%.6f persisted=%s",
+            "%s order entry placed side=%s price=%s qty=%s clientId=%s tp=%s persisted=%s",
             log_prefix,
             side,
-            entry_price_norm,
-            qty_norm,
+            entry_price_payload,
+            qty_payload,
             entry_client_id,
-            tp_price_norm,
+            tp_price_payload,
             persisted,
         )
 
@@ -760,10 +905,10 @@ class WedgeFormationStrategy:
             "status": "entry_order_placed",
             "symbol": symbol,
             "side": side,
-            "entry_price": entry_price_norm,
-            "qty": qty_norm,
+            "entry_price": entry_price_payload,
+            "qty": qty_payload,
             "clientOrderId": entry_client_id,
-            "tp_price": tp_price_norm,
+            "tp_price": tp_price_payload,
             "order": order,
         }
 
@@ -812,12 +957,12 @@ class WedgeFormationStrategy:
             return
         side = "SELL" if is_long else "BUY"
 
-        tp_price_raw_dec = to_decimal(tp_value)
-        tp_price_dec = round_price_for_side(
-            tp_price_raw_dec, filters.tick_size, side, "TAKE_PROFIT"
+        tp_price_raw_dec = Decimal(str(tp_value))
+        tp_price_dec = round_to_tick(
+            tp_price_raw_dec, filters.tick_size, side=side
         )
         qty_raw_dec = to_decimal(qty)
-        qty_dec = round_qty(qty_raw_dec, filters.step_size)
+        qty_dec = round_to_step(qty_raw_dec, filters.step_size, rounding=ROUND_DOWN)
 
         guard = apply_qty_guards(
             symbol,
@@ -871,26 +1016,67 @@ class WedgeFormationStrategy:
             format_decimal(guard.notional),
         )
 
-        tp_price = float(tp_price_dec)
-        qty_norm = float(guard.qty)
+        tp_qty_dec = guard.qty
 
-        if qty_norm <= 0:
-            logger.info("%s tp_skip qty_norm<=0", log_prefix)
+        if tp_qty_dec <= 0:
+            logger.info("%s tp_skip qty<=0", log_prefix)
             return
         client_id = sanitize_client_order_id(
             f"{cid_prefix}_{int(now.timestamp() // 60)}_TP"
         )
+        tp_price_requested = tp_price_dec
+        tp_price_adjusted = tp_price_requested
+        if not assert_is_multiple(tp_price_adjusted, filters.tick_size):
+            tp_price_adjusted = round_to_tick(
+                tp_price_adjusted, filters.tick_size, side=side
+            )
+        tp_stop_requested = tp_price_requested
+        tp_stop_adjusted = tp_price_adjusted
+        if not assert_is_multiple(tp_stop_adjusted, filters.tick_size):
+            tp_stop_adjusted = round_to_tick(
+                tp_stop_adjusted, filters.tick_size, side=side
+            )
+        tp_qty_requested = tp_qty_dec
+        tp_qty_adjusted = tp_qty_requested
+        if not assert_is_multiple(tp_qty_adjusted, filters.step_size):
+            tp_qty_adjusted = round_to_step(
+                tp_qty_adjusted, filters.step_size, rounding=ROUND_DOWN
+            )
+
+        log_precision_summary(
+            log_prefix=log_prefix,
+            symbol=symbol,
+            market=market,
+            timeframe=timeframe,
+            side=side,
+            order_type="TP_LIMIT",
+            tick_size=filters.tick_size,
+            step_size=filters.step_size,
+            min_notional=filters.min_notional,
+            requested_price=tp_price_requested,
+            adjusted_price=tp_price_adjusted,
+            requested_qty=tp_qty_requested,
+            adjusted_qty=tp_qty_adjusted,
+            requested_stop=tp_stop_requested,
+            adjusted_stop=tp_stop_adjusted,
+        )
+
+        tp_price_payload = to_api_str(tp_price_adjusted)
+        tp_qty_payload = to_api_str(tp_qty_adjusted)
+
         try:
-            exch.place_tp_reduce_only(symbol, side, tp_price, qty_norm, client_id)
+            exch.place_tp_reduce_only(
+                symbol, side, tp_price_payload, tp_qty_payload, client_id
+            )
             logger.info(
-                "%s tp_order symbol=%s market=%s timeframe=%s side=%s price=%.6f qty=%.6f clientId=%s",
+                "%s tp_order symbol=%s market=%s timeframe=%s side=%s price=%s qty=%s clientId=%s",
                 log_prefix,
                 symbol,
                 market,
                 timeframe,
                 side,
-                tp_price,
-                qty_norm,
+                tp_price_payload,
+                tp_qty_payload,
                 client_id,
             )
         except Exception as exc:  # pragma: no cover
