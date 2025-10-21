@@ -14,7 +14,7 @@ from requests import Session
 
 from config.settings import Settings
 from core.ports.broker import BrokerPort
-from common.precision import FiltersCache, format_decimal, round_to_step, round_to_tick, to_decimal
+from common.precision import FiltersCache, format_decimal, round_to_step, round_to_tick
 from common.rounding_diag import emit_rounding_diag, format_rounding_diag_number
 from common.utils import sanitize_client_order_id
 from common.symbols import normalize_symbol as _normalize_symbol
@@ -26,22 +26,22 @@ def _to_binance_symbol(sym: str) -> str:
     return _normalize_symbol(sym)
 
 
-def _is_multiple(value: Any, step: Decimal) -> bool:
-    if value is None:
-        return True
-    if step <= 0:
-        return False
+def to_decimal_or_none(value: Any) -> Decimal | None:
     try:
-        dec_value = Decimal(str(value))
-    except (InvalidOperation, TypeError, ValueError):
-        try:
-            dec_value = to_decimal(value)
-        except Exception:
-            return False
+        if value is None:
+            return None
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def is_multiple(value_dec: Decimal | None, step_dec: Decimal | None) -> bool | None:
     try:
-        return (dec_value % step) == 0
-    except InvalidOperation:
-        return False
+        if value_dec is None or step_dec is None or step_dec == 0:
+            return None
+        return (value_dec % step_dec) == 0
+    except Exception:
+        return None
 
 
 def _calc_drift_ms(client: Client) -> int:
@@ -242,62 +242,126 @@ class BinanceBroker(BrokerPort):
                 "newClientOrderId": safe_id,
                 **extra,
             }
-            emit_rounding_diag(
-                {
+            if os.getenv("ROUNDING_DIAG") == "1":
+                diag_payload: dict[str, Any] = {
                     "tag": "D_payload_final",
                     "symbol": symbol,
                     "side": side,
                     "orderType": payload.get("type"),
-                    "price_final": format_rounding_diag_number(payload.get("price")),
-                    "qty_final": format_rounding_diag_number(payload.get("quantity")),
-                    "stop_final": format_rounding_diag_number(payload.get("stopPrice")),
-                    "price_final_is_multiple": _is_multiple(payload.get("price"), tick),
-                    "qty_final_is_multiple": _is_multiple(payload.get("quantity"), step),
-                    "stop_final_is_multiple": (
-                        True
-                        if payload.get("stopPrice") is None
-                        else _is_multiple(payload.get("stopPrice"), tick)
-                    ),
+                    "price_final": None,
+                    "qty_final": None,
+                    "stop_final": None,
+                    "price_final_is_multiple": None,
+                    "qty_final_is_multiple": None,
+                    "stop_final_is_multiple": None,
                     "types": {
-                        "price": type(payload.get("price")).__name__
-                        if "price" in payload
-                        else None,
-                        "qty": type(payload.get("quantity")).__name__
-                        if "quantity" in payload
-                        else None,
-                        "stop": type(payload.get("stopPrice")).__name__
-                        if "stopPrice" in payload
-                        else None,
+                        "price": None,
+                        "qty": None,
+                        "stop": None,
                     },
                     "reduceOnly": payload.get("reduceOnly"),
                     "workingType": payload.get("workingType"),
                     "timeInForce": payload.get("timeInForce"),
-                },
-                logger=logger,
-            )
+                }
+                try:
+                    tick_dec = to_decimal_or_none(tick)
+                    step_dec = to_decimal_or_none(step)
+                    price_final_dec = to_decimal_or_none(payload.get("price"))
+                    qty_final_dec = to_decimal_or_none(payload.get("quantity"))
+                    stop_final_dec = to_decimal_or_none(payload.get("stopPrice"))
+
+                    if price_final_dec is not None:
+                        diag_payload["price_final"] = format_rounding_diag_number(
+                            price_final_dec
+                        )
+                    if qty_final_dec is not None:
+                        diag_payload["qty_final"] = format_rounding_diag_number(
+                            qty_final_dec
+                        )
+                    if stop_final_dec is not None:
+                        diag_payload["stop_final"] = format_rounding_diag_number(
+                            stop_final_dec
+                        )
+
+                    price_final_is_multiple = is_multiple(price_final_dec, tick_dec)
+                    qty_final_is_multiple = is_multiple(qty_final_dec, step_dec)
+                    stop_final_is_multiple = (
+                        True
+                        if stop_final_dec is None
+                        else is_multiple(stop_final_dec, tick_dec)
+                    )
+
+                    diag_payload["price_final_is_multiple"] = (
+                        bool(price_final_is_multiple)
+                        if price_final_is_multiple is not None
+                        else None
+                    )
+                    diag_payload["qty_final_is_multiple"] = (
+                        bool(qty_final_is_multiple)
+                        if qty_final_is_multiple is not None
+                        else None
+                    )
+                    diag_payload["stop_final_is_multiple"] = (
+                        True
+                        if stop_final_is_multiple is True
+                        else (
+                            bool(stop_final_is_multiple)
+                            if stop_final_is_multiple is not None
+                            else None
+                        )
+                    )
+
+                    if "price" in payload:
+                        diag_payload["types"]["price"] = type(
+                            payload.get("price")
+                        ).__name__
+                    if "quantity" in payload:
+                        diag_payload["types"]["qty"] = type(
+                            payload.get("quantity")
+                        ).__name__
+                    if "stopPrice" in payload:
+                        diag_payload["types"]["stop"] = type(
+                            payload.get("stopPrice")
+                        ).__name__
+                except Exception as exc:  # pragma: no cover - diagnostics only
+                    diag_payload["warn"] = str(exc)
+                emit_rounding_diag(diag_payload, logger=logger)
             return self._client.futures_create_order(
                 **payload,
             )
         except Exception as exc:  # pragma: no cover - network failures
-            emit_rounding_diag(
-                {
+            if os.getenv("ROUNDING_DIAG") == "1":
+                diag_payload_err: dict[str, Any] = {
                     "tag": "E_error",
                     "http_status": getattr(exc, "status_code", None)
                     or getattr(exc, "status", None),
                     "binance_code": getattr(exc, "code", None),
                     "binance_msg": getattr(exc, "message", None) or str(exc),
-                    "echo_price": format_rounding_diag_number(payload.get("price"))
-                    if "payload" in locals()
-                    else None,
-                    "echo_qty": format_rounding_diag_number(payload.get("quantity"))
-                    if "payload" in locals()
-                    else None,
-                    "echo_stop": format_rounding_diag_number(payload.get("stopPrice"))
-                    if "payload" in locals()
-                    else None,
-                },
-                logger=logger,
-            )
+                    "echo_price": None,
+                    "echo_qty": None,
+                    "echo_stop": None,
+                }
+                try:
+                    if "payload" in locals():
+                        price_echo_dec = to_decimal_or_none(payload.get("price"))
+                        qty_echo_dec = to_decimal_or_none(payload.get("quantity"))
+                        stop_echo_dec = to_decimal_or_none(payload.get("stopPrice"))
+
+                        if price_echo_dec is not None:
+                            diag_payload_err["echo_price"] = (
+                                format_rounding_diag_number(price_echo_dec)
+                            )
+                        if qty_echo_dec is not None:
+                            diag_payload_err["echo_qty"] = format_rounding_diag_number(
+                                qty_echo_dec
+                            )
+                        if stop_echo_dec is not None:
+                            diag_payload_err["echo_stop"] = format_rounding_diag_number(
+                                stop_echo_dec
+                            )
+                except Exception as diag_exc:  # pragma: no cover - diagnostics only
+                    diag_payload_err["warn"] = str(diag_exc)
+                emit_rounding_diag(diag_payload_err, logger=logger)
             logger.error("Failed to place limit order: %s", exc)
             raise
 
