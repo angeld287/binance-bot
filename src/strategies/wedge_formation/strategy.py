@@ -259,7 +259,10 @@ def compute_order_precision(
     if price_requested is not None:
         val_price_requested = exchange.round_price_to_tick(symbol, price_requested)
         logger.info("round_price_to_tick - val_price_requested %s", val_price_requested)
-        price_adjusted = to_decimal(price_requested)
+        price_adjusted = to_decimal(val_price_requested).quantize(
+            tick_size.normalize(),
+            rounding=ROUND_DOWN,
+        )
         logger.info("round_price_to_tick - price_adjusted %s", price_adjusted)
 
         if not assert_is_multiple(price_adjusted, tick_size):
