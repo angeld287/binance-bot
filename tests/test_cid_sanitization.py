@@ -24,6 +24,20 @@ class DummyClient:
         self.last_params = kwargs
         return {}
 
+    def futures_exchange_info(self):
+        return {
+            "symbols": [
+                {
+                    "symbol": "BTCUSDT",
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.1"},
+                        {"filterType": "LOT_SIZE", "stepSize": "0.001"},
+                        {"filterType": "MIN_NOTIONAL", "notional": "0.1"},
+                    ],
+                }
+            ]
+        }
+
 
 RAW = "CID??!!0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"  # longer than 36 with invalid chars
 EXPECTED = sanitize_client_order_id(RAW)
