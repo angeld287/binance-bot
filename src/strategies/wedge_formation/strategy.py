@@ -58,60 +58,82 @@ class QtyGuardResult:
 
 
 def get_symbol_filters(
-    settings: SettingsProvider,
     exchange: BrokerPort,
     symbol: str,
+    market: str = "futures",
 ) -> SymbolFilters:
-    """Return precision filters for ``symbol`` using cached exchange info."""
+    """Return precision filters for ``symbol`` using the broker cache.
+
+    Parameters
+    ----------
+    exchange:
+        Broker adapter exposing ``get_symbol_filters`` backed by
+        :class:`common.precision.FiltersCache`.
+    symbol:
+        Symbol to resolve (e.g. ``"ADAUSDT"``).
+    market:
+        Market namespace (``"futures"`` or ``"spot"``). The strategy currently
+        supports futures only but the argument is kept to avoid diverging from
+        the rest of the codebase conventions and for clearer logging.
+    """
+
+    market_norm = (market or "futures").strip().lower() or "futures"
+    if market_norm != "futures":
+        logger.warning(
+            "precision.filters_unsupported_market symbol=%s market=%s", symbol, market
+        )
 
     filters_raw: dict[str, Any] | None = None
-
-    exchange_info = getattr(settings, "EXCHANGE_INFO", None)
-    if isinstance(exchange_info, dict):
-        for sym in exchange_info.get("symbols", []):
-            sym_name = sym.get("symbol")
-            if sym_name == symbol:
-                filters_raw = {
-                    f.get("filterType"): f for f in sym.get("filters", []) if f
-                }
-                break
-
-    if not filters_raw and hasattr(exchange, "get_symbol_filters"):
+    if hasattr(exchange, "get_symbol_filters"):
         try:
             filters_raw = exchange.get_symbol_filters(symbol)
         except Exception as exc:  # pragma: no cover - surface upstream error
-            logger.warning("precision.filters_fetch_failed symbol=%s err=%s", symbol, exc)
+            logger.warning(
+                "precision.filters_fetch_failed symbol=%s market=%s err=%s",
+                symbol,
+                market_norm,
+                exc,
+            )
             filters_raw = None
 
-    if not filters_raw:
-        raise ValueError(f"Filters for {symbol} not available")
+    if not isinstance(filters_raw, dict) or not filters_raw:
+        raise ValueError(f"Filters for {symbol} not available (market={market_norm})")
 
-    price_filter = filters_raw.get("PRICE_FILTER", {}) if isinstance(filters_raw, dict) else {}
-    lot_filter = filters_raw.get("LOT_SIZE", {}) if isinstance(filters_raw, dict) else {}
-    min_notional_filter = (
-        filters_raw.get("MIN_NOTIONAL", {}) if isinstance(filters_raw, dict) else {}
+    price_filter = filters_raw.get("PRICE_FILTER", {})
+    lot_filter = filters_raw.get("LOT_SIZE", {})
+    min_notional_filter = filters_raw.get("MIN_NOTIONAL", {})
+
+    tick_size = to_decimal(
+        price_filter.get("tickSize")
+        or price_filter.get("tick_size")
+        or price_filter.get("minPrice")
+        or "0"
     )
+    step_size = to_decimal(
+        lot_filter.get("stepSize")
+        or lot_filter.get("step_size")
+        or lot_filter.get("minQty")
+        or "0"
+    )
+    min_notional = to_decimal(
+        min_notional_filter.get("notional")
+        or min_notional_filter.get("minNotional")
+        or min_notional_filter.get("min_notional")
+        or "0"
+    )
+    min_qty = to_decimal(lot_filter.get("minQty") or lot_filter.get("min_qty") or "0")
+
+    if tick_size <= 0 or step_size <= 0:
+        raise ValueError(
+            f"Invalid precision filters for {symbol} (market={market_norm}): "
+            f"tickSize={tick_size} stepSize={step_size}"
+        )
 
     return SymbolFilters(
-        tick_size=to_decimal(
-            price_filter.get("tickSize")
-            or price_filter.get("tick_size")
-            or price_filter.get("minPrice")
-            or "0"
-        ),
-        step_size=to_decimal(
-            lot_filter.get("stepSize")
-            or lot_filter.get("step_size")
-            or lot_filter.get("minQty")
-            or "0"
-        ),
-        min_notional=to_decimal(
-            min_notional_filter.get("notional")
-            or min_notional_filter.get("minNotional")
-            or min_notional_filter.get("min_notional")
-            or "0"
-        ),
-        min_qty=to_decimal(lot_filter.get("minQty") or lot_filter.get("min_qty") or "0"),
+        tick_size=tick_size,
+        step_size=step_size,
+        min_notional=min_notional,
+        min_qty=min_qty,
     )
 
 
@@ -282,7 +304,12 @@ class WedgeFormationStrategy:
         now = now_utc or datetime.utcnow()
 
         symbol = get_symbol(settings)
-        timeframe = os.getenv("WEDGE_TIMEFRAME", "15m")
+        configured_timeframe = str(settings.get("INTERVAL", "") or "").strip()
+        env_timeframe = str(os.getenv("WEDGE_TIMEFRAME", "")).strip()
+        timeframe = env_timeframe or configured_timeframe or "15m"
+        market_env = str(os.getenv("WEDGE_MARKET", "")).strip()
+        market_cfg = str(settings.get("MARKET", "") or settings.get("MARKET_TYPE", "") or "").strip()
+        market = (market_env or market_cfg or "futures").lower()
         log_prefix = f"WEDGE{symbol}{timeframe}"
         cid_prefix = f"WEDGE_{symbol}_{timeframe}"
 
@@ -332,6 +359,8 @@ class WedgeFormationStrategy:
                 now=now,
                 qty=abs(position_amt),
                 is_long=position_amt > 0,
+                market=market,
+                timeframe=timeframe,
                 log_prefix=log_prefix,
             )
             return {
@@ -513,7 +542,18 @@ class WedgeFormationStrategy:
                 logger.info("%s guard.post order_exists", log_prefix)
                 return {"status": "race_order", "symbol": symbol}
 
-        filters = get_symbol_filters(settings, exch, symbol)
+        try:
+            filters = get_symbol_filters(exch, symbol, market)
+        except ValueError as exc:
+            logger.warning(
+                "%s filters_unavailable symbol=%s market=%s timeframe=%s reason=%s",
+                log_prefix,
+                symbol,
+                market,
+                timeframe,
+                exc,
+            )
+            return {"status": "precision_filters_unavailable", "symbol": symbol}
 
         entry_price_raw_dec = to_decimal(entry_price)
         tp_price_raw_dec = to_decimal(tp_price)
@@ -572,8 +612,13 @@ class WedgeFormationStrategy:
         )
         if not guard.success or guard.qty is None:
             logger.warning(
-                "%s precision abort entry side=%s requested_price=%s adjusted_price=%s requested_qty=%s tickSize=%s stepSize=%s minNotional=%s minQty=%s reason=%s",
+                "%s precision_abort_entry symbol=%s market=%s timeframe=%s side=%s "
+                "requested_price=%s adjusted_price=%s requested_qty=%s tickSize=%s "
+                "stepSize=%s minNotional=%s minQty=%s reason=%s",
                 log_prefix,
+                symbol,
+                market,
+                timeframe,
                 side,
                 format_decimal(entry_price_raw_dec),
                 format_decimal(entry_price_dec),
@@ -590,8 +635,13 @@ class WedgeFormationStrategy:
         qty_norm = float(qty_dec)
 
         logger.info(
-            "%s precision entry side=%s requested_price=%s adjusted_price=%s requested_qty=%s adjusted_qty=%s tickSize=%s stepSize=%s minNotional=%s minQty=%s action=%s notional=%s",
+            "%s precision_entry symbol=%s market=%s timeframe=%s side=%s "
+            "requested_price=%s adjusted_price=%s requested_qty=%s adjusted_qty=%s "
+            "tickSize=%s stepSize=%s minNotional=%s minQty=%s action=%s notional=%s",
             log_prefix,
+            symbol,
+            market,
+            timeframe,
             side,
             format_decimal(entry_price_raw_dec),
             format_decimal(entry_price_dec),
@@ -653,8 +703,13 @@ class WedgeFormationStrategy:
         )
         if not tp_qty_guard.success or tp_qty_guard.qty is None:
             logger.warning(
-                "%s precision abort tp side=%s requested_price=%s adjusted_price=%s requested_qty=%s tickSize=%s stepSize=%s minNotional=%s minQty=%s reason=%s",
+                "%s precision_abort_tp symbol=%s market=%s timeframe=%s side=%s "
+                "requested_price=%s adjusted_price=%s requested_qty=%s tickSize=%s "
+                "stepSize=%s minNotional=%s minQty=%s reason=%s",
                 log_prefix,
+                symbol,
+                market,
+                timeframe,
                 exit_side,
                 format_decimal(tp_price_raw_dec),
                 format_decimal(tp_price_dec),
@@ -668,8 +723,13 @@ class WedgeFormationStrategy:
             return {"status": "precision_abort_tp", "symbol": symbol, "reason": tp_qty_guard.reason}
 
         logger.info(
-            "%s precision tp side=%s requested_price=%s adjusted_price=%s qty=%s tickSize=%s stepSize=%s minNotional=%s minQty=%s action=%s notional=%s",
+            "%s precision_tp symbol=%s market=%s timeframe=%s side=%s "
+            "requested_price=%s adjusted_price=%s qty=%s tickSize=%s stepSize=%s "
+            "minNotional=%s minQty=%s action=%s notional=%s",
             log_prefix,
+            symbol,
+            market,
+            timeframe,
             exit_side,
             format_decimal(tp_price_raw_dec),
             format_decimal(tp_price_dec),
@@ -716,6 +776,9 @@ class WedgeFormationStrategy:
         now: datetime,
         qty: float,
         is_long: bool,
+        *,
+        market: str,
+        timeframe: str,
         log_prefix: str,
     ) -> None:
         if qty <= 0:
@@ -735,7 +798,18 @@ class WedgeFormationStrategy:
             logger.info("%s tp_missing_storage", log_prefix)
             return
 
-        filters = get_symbol_filters(self._settings, exch, symbol)
+        try:
+            filters = get_symbol_filters(exch, symbol, market)
+        except ValueError as exc:
+            logger.warning(
+                "%s tp_filters_unavailable symbol=%s market=%s timeframe=%s reason=%s",
+                log_prefix,
+                symbol,
+                market,
+                timeframe,
+                exc,
+            )
+            return
         side = "SELL" if is_long else "BUY"
 
         tp_price_raw_dec = to_decimal(tp_value)
@@ -757,8 +831,13 @@ class WedgeFormationStrategy:
 
         if not guard.success or guard.qty is None or guard.qty <= 0:
             logger.warning(
-                "%s tp_precision_abort side=%s requested_price=%s adjusted_price=%s requested_qty=%s tickSize=%s stepSize=%s minNotional=%s minQty=%s reason=%s",
+                "%s tp_precision_abort symbol=%s market=%s timeframe=%s side=%s "
+                "requested_price=%s adjusted_price=%s requested_qty=%s tickSize=%s "
+                "stepSize=%s minNotional=%s minQty=%s reason=%s",
                 log_prefix,
+                symbol,
+                market,
+                timeframe,
                 side,
                 format_decimal(tp_price_raw_dec),
                 format_decimal(tp_price_dec),
@@ -772,8 +851,13 @@ class WedgeFormationStrategy:
             return
 
         logger.info(
-            "%s tp_precision side=%s requested_price=%s adjusted_price=%s requested_qty=%s adjusted_qty=%s tickSize=%s stepSize=%s minNotional=%s minQty=%s action=%s notional=%s",
+            "%s tp_precision symbol=%s market=%s timeframe=%s side=%s "
+            "requested_price=%s adjusted_price=%s requested_qty=%s adjusted_qty=%s "
+            "tickSize=%s stepSize=%s minNotional=%s minQty=%s action=%s notional=%s",
             log_prefix,
+            symbol,
+            market,
+            timeframe,
             side,
             format_decimal(tp_price_raw_dec),
             format_decimal(tp_price_dec),
@@ -799,8 +883,11 @@ class WedgeFormationStrategy:
         try:
             exch.place_tp_reduce_only(symbol, side, tp_price, qty_norm, client_id)
             logger.info(
-                "%s tp_order side=%s price=%.6f qty=%.6f clientId=%s",
+                "%s tp_order symbol=%s market=%s timeframe=%s side=%s price=%.6f qty=%.6f clientId=%s",
                 log_prefix,
+                symbol,
+                market,
+                timeframe,
                 side,
                 tp_price,
                 qty_norm,
