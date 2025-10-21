@@ -742,7 +742,10 @@ class WedgeFormationStrategy:
             sl_theoretical = entry_price - buffer if buffer > 0 else entry_price - atr * 0.5
 
         entry_price = float(exch.round_price_to_tick(symbol, entry_price))
-        tp_price = float(exch.round_price_to_tick(symbol, tp_price))
+        value = exch.round_price_to_tick(symbol, tp_price)
+        logger.info("round_price_to_tick - value: ", value)
+        tp_price = float(value)
+        logger.info("round_price_to_tick - tp_price: ", tp_price)
 
         if side == "SELL" and tp_price >= entry_price:
             logger.info(
