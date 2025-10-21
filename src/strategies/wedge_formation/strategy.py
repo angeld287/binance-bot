@@ -245,6 +245,8 @@ def compute_order_precision(
     side: str,
     order_type: str,
     filters: SymbolFilters,
+    exchange: BrokerPort,
+    symbol: str,
 ) -> PrecisionComputation:
     tick_size = filters.tick_size
     step_size = filters.step_size
@@ -254,13 +256,17 @@ def compute_order_precision(
 
     price_adjusted: Decimal | None = None
     if price_requested is not None:
-        price_adjusted = quantize_price_to_tick(price_requested, tick_size, side=side)
+        price_adjusted = to_decimal(
+            exchange.round_price_to_tick(symbol, price_requested)
+        )
         if not assert_is_multiple(price_adjusted, tick_size):
             raise OrderPrecisionError("ORDER_REJECT_TICK_INVALID", "price_not_multiple")
 
     stop_adjusted: Decimal | None = None
     if stop_requested is not None:
-        stop_adjusted = quantize_price_to_tick(stop_requested, tick_size, side=side)
+        stop_adjusted = to_decimal(
+            exchange.round_price_to_tick(symbol, stop_requested)
+        )
         if not assert_is_multiple(stop_adjusted, tick_size):
             raise OrderPrecisionError("ORDER_REJECT_TICK_INVALID", "stop_not_multiple")
 
@@ -735,6 +741,9 @@ class WedgeFormationStrategy:
             tp_price = tp_line
             sl_theoretical = entry_price - buffer if buffer > 0 else entry_price - atr * 0.5
 
+        entry_price = float(exch.round_price_to_tick(symbol, entry_price))
+        tp_price = float(exch.round_price_to_tick(symbol, tp_price))
+
         if side == "SELL" and tp_price >= entry_price:
             logger.info(
                 "%s geometry skip invalid_prices entry=%.6f tp=%.6f side=%s",
@@ -818,12 +827,12 @@ class WedgeFormationStrategy:
         except (InvalidOperation, DivisionByZero, ValueError, TypeError):
             stop_price_raw_dec = None
 
-        entry_price_dec = quantize_price_to_tick(
-            entry_price_raw_dec, filters.tick_size, side=side
+        entry_price_dec = to_decimal(
+            exch.round_price_to_tick(symbol, entry_price_raw_dec)
         )
         exit_side = "SELL" if side == "BUY" else "BUY"
-        tp_price_dec = quantize_price_to_tick(
-            tp_price_raw_dec, filters.tick_size, side=exit_side
+        tp_price_dec = to_decimal(
+            exch.round_price_to_tick(symbol, tp_price_raw_dec)
         )
 
         entry_price_norm_dec = entry_price_dec
@@ -1035,6 +1044,8 @@ class WedgeFormationStrategy:
                 side=side,
                 order_type="LIMIT",
                 filters=filters,
+                exchange=exch,
+                symbol=symbol,
             )
         except OrderPrecisionError as exc:
             logger.warning(
@@ -1234,6 +1245,8 @@ class WedgeFormationStrategy:
                 side=exit_side,
                 order_type="TP_LIMIT",
                 filters=filters,
+                exchange=exch,
+                symbol=symbol,
             )
         except OrderPrecisionError as exc:
             logger.warning(
@@ -1378,8 +1391,8 @@ class WedgeFormationStrategy:
             return
 
         tp_price_raw_dec = Decimal(str(tp_value))
-        tp_price_dec = quantize_price_to_tick(
-            tp_price_raw_dec, filters.tick_size, side=side
+        tp_price_dec = to_decimal(
+            exch.round_price_to_tick(symbol, tp_price_raw_dec)
         )
         qty_raw_dec = to_decimal(qty)
         qty_dec = round_to_step(qty_raw_dec, filters.step_size, rounding=ROUND_DOWN)
@@ -1456,6 +1469,8 @@ class WedgeFormationStrategy:
                 side=side,
                 order_type="TP_LIMIT",
                 filters=filters,
+                exchange=exch,
+                symbol=symbol,
             )
         except OrderPrecisionError as exc:
             logger.warning(
