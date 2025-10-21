@@ -8,6 +8,7 @@ import os
 from decimal import Decimal, DivisionByZero, InvalidOperation, ROUND_DOWN, ROUND_UP
 from typing import Any, Iterable, Sequence
 
+from common.rounding_diag import emit_rounding_diag, format_rounding_diag_number
 from common.utils import sanitize_client_order_id
 from config.utils import parse_bool
 from core.ports.broker import BrokerPort
@@ -198,25 +199,45 @@ def get_symbol_filters(
     lot_filter = filters_raw.get("LOT_SIZE", {})
     min_notional_filter = filters_raw.get("MIN_NOTIONAL", {})
 
-    tick_size = to_decimal(
+    tick_size_raw = (
         price_filter.get("tickSize")
         or price_filter.get("tick_size")
         or price_filter.get("minPrice")
         or "0"
     )
-    step_size = to_decimal(
+    step_size_raw = (
         lot_filter.get("stepSize")
         or lot_filter.get("step_size")
         or lot_filter.get("minQty")
         or "0"
     )
-    min_notional = to_decimal(
+    min_notional_raw = (
         min_notional_filter.get("notional")
         or min_notional_filter.get("minNotional")
         or min_notional_filter.get("min_notional")
         or "0"
     )
-    min_qty = to_decimal(lot_filter.get("minQty") or lot_filter.get("min_qty") or "0")
+    min_qty_raw = lot_filter.get("minQty") or lot_filter.get("min_qty") or "0"
+
+    if market_norm == "futures":
+        emit_rounding_diag(
+            {
+                "tag": "A_filters",
+                "symbol": symbol,
+                "market": "futures",
+                "tickSize_raw": format_rounding_diag_number(tick_size_raw),
+                "stepSize_raw": format_rounding_diag_number(step_size_raw),
+                "minNotional_raw": format_rounding_diag_number(min_notional_raw),
+                "source": "exchangeInfoFutures",
+                "fetched_at": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+            },
+            logger=logger,
+        )
+
+    tick_size = to_decimal(tick_size_raw)
+    step_size = to_decimal(step_size_raw)
+    min_notional = to_decimal(min_notional_raw)
+    min_qty = to_decimal(min_qty_raw)
 
     if tick_size <= 0 or step_size <= 0:
         raise ValueError(
@@ -625,6 +646,65 @@ class WedgeFormationStrategy:
 
         entry_price_raw_dec = to_decimal(entry_price)
         tp_price_raw_dec = to_decimal(tp_price)
+        stop_price_raw_dec = None
+        try:
+            stop_price_raw_dec = to_decimal(sl_theoretical)
+        except (InvalidOperation, DivisionByZero, ValueError, TypeError):
+            stop_price_raw_dec = None
+
+        price_div_tick = None
+        if filters.tick_size > 0:
+            try:
+                price_div_tick = entry_price_raw_dec / filters.tick_size
+            except (InvalidOperation, DivisionByZero):
+                price_div_tick = None
+
+        if filters.tick_size > 0:
+            try:
+                price_multiple_raw = (entry_price_raw_dec % filters.tick_size) == 0
+            except InvalidOperation:
+                price_multiple_raw = False
+        else:
+            price_multiple_raw = False
+
+        if filters.step_size > 0:
+            try:
+                qty_multiple_raw = (qty_raw_dec % filters.step_size) == 0
+            except InvalidOperation:
+                qty_multiple_raw = False
+        else:
+            qty_multiple_raw = False
+
+        if stop_price_raw_dec is None:
+            stop_multiple_raw = True
+        elif filters.tick_size > 0:
+            try:
+                stop_multiple_raw = (stop_price_raw_dec % filters.tick_size) == 0
+            except InvalidOperation:
+                stop_multiple_raw = False
+        else:
+            stop_multiple_raw = False
+
+        emit_rounding_diag(
+            {
+                "tag": "B_pre_adjust",
+                "symbol": symbol,
+                "side": side,
+                "orderType": "LIMIT",
+                "timeInForce": "GTC",
+                "price_raw": format_rounding_diag_number(entry_price_raw_dec),
+                "qty_raw": format_rounding_diag_number(qty_raw_dec),
+                "stop_raw": format_rounding_diag_number(stop_price_raw_dec),
+                "tickSize": format_rounding_diag_number(filters.tick_size),
+                "stepSize": format_rounding_diag_number(filters.step_size),
+                "price_div_tick": format_rounding_diag_number(price_div_tick),
+                "is_multiple_price": bool(price_multiple_raw),
+                "is_multiple_qty": bool(qty_multiple_raw),
+                "is_multiple_stop": bool(stop_multiple_raw),
+            },
+            logger=logger,
+        )
+
         entry_price_dec = round_to_tick(
             entry_price_raw_dec, filters.tick_size, side=side
         )
@@ -759,6 +839,38 @@ class WedgeFormationStrategy:
             qty_adjusted = round_to_step(
                 qty_adjusted, filters.step_size, rounding=ROUND_DOWN
             )
+
+        if filters.tick_size > 0:
+            try:
+                price_multiple_adj = (entry_price_adjusted % filters.tick_size) == 0
+            except InvalidOperation:
+                price_multiple_adj = False
+        else:
+            price_multiple_adj = False
+
+        if filters.step_size > 0:
+            try:
+                qty_multiple_adj = (qty_adjusted % filters.step_size) == 0
+            except InvalidOperation:
+                qty_multiple_adj = False
+        else:
+            qty_multiple_adj = False
+
+        emit_rounding_diag(
+            {
+                "tag": "C_post_adjust",
+                "symbol": symbol,
+                "price_adj": format_rounding_diag_number(entry_price_adjusted),
+                "qty_adj": format_rounding_diag_number(qty_adjusted),
+                "stop_adj": None,
+                "rule_price": "UP" if (side or "").upper() == "SELL" else "DOWN",
+                "rule_qty": "DOWN",
+                "is_multiple_price_adj": bool(price_multiple_adj),
+                "is_multiple_qty_adj": bool(qty_multiple_adj),
+                "is_multiple_stop_adj": True,
+            },
+            logger=logger,
+        )
 
         log_precision_summary(
             log_prefix=log_prefix,

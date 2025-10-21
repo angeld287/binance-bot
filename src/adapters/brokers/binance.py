@@ -6,7 +6,7 @@ import hmac, hashlib, logging, urllib.parse as _url
 import os
 import time
 from datetime import timedelta
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any, Dict
 
 from binance.client import Client
@@ -14,7 +14,8 @@ from requests import Session
 
 from config.settings import Settings
 from core.ports.broker import BrokerPort
-from common.precision import FiltersCache, format_decimal, round_to_step, round_to_tick
+from common.precision import FiltersCache, format_decimal, round_to_step, round_to_tick, to_decimal
+from common.rounding_diag import emit_rounding_diag, format_rounding_diag_number
 from common.utils import sanitize_client_order_id
 from common.symbols import normalize_symbol as _normalize_symbol
 
@@ -23,6 +24,24 @@ logger = logging.getLogger(__name__)
 
 def _to_binance_symbol(sym: str) -> str:
     return _normalize_symbol(sym)
+
+
+def _is_multiple(value: Any, step: Decimal) -> bool:
+    if value is None:
+        return True
+    if step <= 0:
+        return False
+    try:
+        dec_value = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        try:
+            dec_value = to_decimal(value)
+        except Exception:
+            return False
+    try:
+        return (dec_value % step) == 0
+    except InvalidOperation:
+        return False
 
 
 def _calc_drift_ms(client: Client) -> int:
@@ -223,10 +242,62 @@ class BinanceBroker(BrokerPort):
                 "newClientOrderId": safe_id,
                 **extra,
             }
+            emit_rounding_diag(
+                {
+                    "tag": "D_payload_final",
+                    "symbol": symbol,
+                    "side": side,
+                    "orderType": payload.get("type"),
+                    "price_final": format_rounding_diag_number(payload.get("price")),
+                    "qty_final": format_rounding_diag_number(payload.get("quantity")),
+                    "stop_final": format_rounding_diag_number(payload.get("stopPrice")),
+                    "price_final_is_multiple": _is_multiple(payload.get("price"), tick),
+                    "qty_final_is_multiple": _is_multiple(payload.get("quantity"), step),
+                    "stop_final_is_multiple": (
+                        True
+                        if payload.get("stopPrice") is None
+                        else _is_multiple(payload.get("stopPrice"), tick)
+                    ),
+                    "types": {
+                        "price": type(payload.get("price")).__name__
+                        if "price" in payload
+                        else None,
+                        "qty": type(payload.get("quantity")).__name__
+                        if "quantity" in payload
+                        else None,
+                        "stop": type(payload.get("stopPrice")).__name__
+                        if "stopPrice" in payload
+                        else None,
+                    },
+                    "reduceOnly": payload.get("reduceOnly"),
+                    "workingType": payload.get("workingType"),
+                    "timeInForce": payload.get("timeInForce"),
+                },
+                logger=logger,
+            )
             return self._client.futures_create_order(
                 **payload,
             )
         except Exception as exc:  # pragma: no cover - network failures
+            emit_rounding_diag(
+                {
+                    "tag": "E_error",
+                    "http_status": getattr(exc, "status_code", None)
+                    or getattr(exc, "status", None),
+                    "binance_code": getattr(exc, "code", None),
+                    "binance_msg": getattr(exc, "message", None) or str(exc),
+                    "echo_price": format_rounding_diag_number(payload.get("price"))
+                    if "payload" in locals()
+                    else None,
+                    "echo_qty": format_rounding_diag_number(payload.get("quantity"))
+                    if "payload" in locals()
+                    else None,
+                    "echo_stop": format_rounding_diag_number(payload.get("stopPrice"))
+                    if "payload" in locals()
+                    else None,
+                },
+                logger=logger,
+            )
             logger.error("Failed to place limit order: %s", exc)
             raise
 
