@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-import hmac, hashlib, logging, urllib.parse as _url
+import hmac, hashlib, json, logging, urllib.parse as _url
 import os
 import time
 from datetime import timedelta
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
-from typing import Any, Dict
+from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from binance.client import Client
 from requests import Session
 
 from config.settings import Settings
 from core.ports.broker import BrokerPort
-from common.precision import FiltersCache, format_decimal, round_to_step, round_to_tick
+from common.precision import FiltersCache, round_to_step, round_to_tick
 from common.rounding_diag import emit_rounding_diag, format_rounding_diag_number
 from common.utils import sanitize_client_order_id
 from common.symbols import normalize_symbol as _normalize_symbol
@@ -42,6 +42,14 @@ def is_multiple(value_dec: Decimal | None, step_dec: Decimal | None) -> bool | N
         return (value_dec % step_dec) == 0
     except Exception:
         return None
+
+
+def _stringify(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return str(value)
 
 
 def _calc_drift_ms(client: Client) -> int:
@@ -142,6 +150,126 @@ class BinanceBroker(BrokerPort):
         return _normalize_symbol(symbol)
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    def _log_order_event(self, payload: dict[str, Any], *, level: int = logging.INFO) -> None:
+        try:
+            logger.log(
+                level,
+                json.dumps(payload, default=str, ensure_ascii=False, separators=(",", ":")),
+            )
+        except Exception:  # pragma: no cover - defensive logging
+            logger.log(level, str(payload))
+
+    def _precheck_order(
+        self,
+        *,
+        filters: dict[str, Any],
+        symbol: str,
+        side: str,
+        order_type: str,
+        time_in_force: str | None,
+        price: Any | None,
+        stop_price: Any | None,
+        quantity: Any | None,
+        reduce_only: Any | None = None,
+        working_type: Any | None = None,
+    ) -> dict[str, Any] | None:
+        price_filter = filters.get("PRICE_FILTER", {}) or {}
+        lot_filter = filters.get("LOT_SIZE", {}) or {}
+        market_lot_filter = filters.get("MARKET_LOT_SIZE", {}) or {}
+        min_notional_filter = filters.get("MIN_NOTIONAL", {}) or {}
+        notional_filter = filters.get("NOTIONAL", {}) or {}
+
+        tick_size_raw = price_filter.get("tickSize")
+        step_size_raw = lot_filter.get("stepSize") or market_lot_filter.get("stepSize")
+        min_notional_raw = (
+            min_notional_filter.get("notional")
+            or min_notional_filter.get("minNotional")
+            or notional_filter.get("notional")
+            or notional_filter.get("minNotional")
+        )
+
+        tick_size_dec = to_decimal_or_none(tick_size_raw)
+        step_size_dec = to_decimal_or_none(step_size_raw)
+        min_notional_dec = to_decimal_or_none(min_notional_raw)
+
+        price_dec = to_decimal_or_none(price)
+        stop_price_dec = to_decimal_or_none(stop_price)
+        quantity_dec = to_decimal_or_none(quantity)
+
+        is_multiple_price = (
+            None if price_dec is None else is_multiple(price_dec, tick_size_dec)
+        )
+        is_multiple_stop = (
+            None if stop_price_dec is None else is_multiple(stop_price_dec, tick_size_dec)
+        )
+        is_multiple_qty = (
+            None if quantity_dec is None else is_multiple(quantity_dec, step_size_dec)
+        )
+
+        base_price_dec = price_dec if price_dec is not None else stop_price_dec
+        notional = None
+        notional_ok = None
+        if base_price_dec is not None and quantity_dec is not None:
+            try:
+                notional = base_price_dec * quantity_dec
+                if min_notional_dec is not None:
+                    notional_ok = notional >= min_notional_dec
+            except Exception:  # pragma: no cover - defensive
+                notional = None
+                notional_ok = None
+
+        indicators = {
+            "is_multiple_price": is_multiple_price,
+            "is_multiple_stop": is_multiple_stop,
+            "is_multiple_qty": is_multiple_qty,
+        }
+
+        log_payload: dict[str, Any] = {
+            "tag": "ORDER_PRECHECK",
+            "symbol": symbol,
+            "side": side,
+            "type": order_type,
+            "timeInForce": time_in_force,
+            "tickSize": tick_size_raw,
+            "stepSize": step_size_raw,
+            "minNotional": min_notional_raw,
+            "price": price,
+            "stopPrice": stop_price,
+            "quantity": quantity,
+            "indicators": indicators,
+            "notional": str(notional) if notional is not None else None,
+            "notional_ok": notional_ok,
+            "reduceOnly": reduce_only,
+            "workingType": working_type,
+        }
+
+        invalid_fields: list[str] = []
+        if price_dec is not None and is_multiple_price is False:
+            invalid_fields.append("price")
+        if stop_price_dec is not None and is_multiple_stop is False:
+            invalid_fields.append("stopPrice")
+        if quantity_dec is not None and is_multiple_qty is False:
+            invalid_fields.append("quantity")
+
+        if invalid_fields:
+            reason = "invalid_precision:" + ",".join(sorted(invalid_fields))
+            log_payload["tag"] = "ORDER_REJECT_DECIMALS"
+            log_payload["reason"] = reason
+            self._log_order_event(log_payload, level=logging.WARNING)
+            return {"status": "rejected", "reason": reason, "details": log_payload}
+
+        if notional_ok is False:
+            reason = "notional_below_min"
+            log_payload["tag"] = "ORDER_REJECT_NOTIONAL"
+            log_payload["reason"] = reason
+            self._log_order_event(log_payload, level=logging.WARNING)
+            return {"status": "rejected", "reason": reason, "details": log_payload}
+
+        self._log_order_event(log_payload, level=logging.INFO)
+        return None
+
+    # ------------------------------------------------------------------
     # Positions
     def get_position(self, symbol: str) -> dict[str, Any] | None:
         """Return position information for ``symbol`` or ``None``.
@@ -227,17 +355,30 @@ class BinanceBroker(BrokerPort):
         try:
             safe_id = sanitize_client_order_id(clientOrderId)
             filters = self.get_symbol_filters(symbol)
-            tick = Decimal(filters["PRICE_FILTER"]["tickSize"])
-            step = Decimal(filters["LOT_SIZE"]["stepSize"])
-            side_norm = (side or "").upper()
-            price_dec = round_to_tick(price, tick, side=side_norm)
-            qty_dec = round_to_step(qty, step)
+            price_value = _stringify(price)
+            qty_value = _stringify(qty)
+
+            precheck = self._precheck_order(
+                filters=filters,
+                symbol=symbol,
+                side=side,
+                order_type="LIMIT",
+                time_in_force=timeInForce,
+                price=price_value,
+                stop_price=None,
+                quantity=qty_value,
+                reduce_only=extra.get("reduceOnly"),
+                working_type=extra.get("workingType"),
+            )
+            if precheck is not None:
+                return precheck
+
             payload = {
                 "symbol": _to_binance_symbol(symbol),
                 "side": side,
                 "type": "LIMIT",
-                "price": format_decimal(price_dec),
-                "quantity": format_decimal(qty_dec),
+                "price": price_value,
+                "quantity": qty_value,
                 "timeInForce": timeInForce,
                 "newClientOrderId": safe_id,
                 **extra,
@@ -264,8 +405,13 @@ class BinanceBroker(BrokerPort):
                     "timeInForce": payload.get("timeInForce"),
                 }
                 try:
-                    tick_dec = to_decimal_or_none(tick)
-                    step_dec = to_decimal_or_none(step)
+                    tick_dec = to_decimal_or_none(
+                        (filters.get("PRICE_FILTER", {}) or {}).get("tickSize")
+                    )
+                    step_dec = to_decimal_or_none(
+                        (filters.get("LOT_SIZE", {}) or {}).get("stepSize")
+                        or (filters.get("MARKET_LOT_SIZE", {}) or {}).get("stepSize")
+                    )
                     price_final_dec = to_decimal_or_none(payload.get("price"))
                     qty_final_dec = to_decimal_or_none(payload.get("quantity"))
                     stop_final_dec = to_decimal_or_none(payload.get("stopPrice"))
@@ -377,11 +523,32 @@ class BinanceBroker(BrokerPort):
 
         try:
             safe_id = sanitize_client_order_id(clientOrderId)
+            filters = self.get_symbol_filters(symbol)
+            qty_value = _stringify(qty)
+            time_in_force = extra.get("timeInForce")
+            reduce_only = extra.get("reduceOnly")
+            working_type = extra.get("workingType")
+
+            precheck = self._precheck_order(
+                filters=filters,
+                symbol=symbol,
+                side=side,
+                order_type="MARKET",
+                time_in_force=time_in_force,
+                price=None,
+                stop_price=None,
+                quantity=qty_value,
+                reduce_only=reduce_only,
+                working_type=working_type,
+            )
+            if precheck is not None:
+                return precheck
+
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
                 type="MARKET",
-                quantity=qty,
+                quantity=qty_value,
                 newClientOrderId=safe_id,
                 **extra,
             )
@@ -417,27 +584,37 @@ class BinanceBroker(BrokerPort):
         try:
             safe_id = sanitize_client_order_id(clientOrderId)
             filters = self.get_symbol_filters(symbol)
-            tick = Decimal(filters["PRICE_FILTER"]["tickSize"])
-            step = Decimal(filters["LOT_SIZE"]["stepSize"])
-            stop_price_dec = round_to_tick(stopPrice, tick, side=side)
-            qty_dec = round_to_step(qty, step, rounding=ROUND_DOWN)
-            adjusted_stop_price = format_decimal(stop_price_dec)
-            adjusted_qty = format_decimal(qty_dec)
+            stop_value = _stringify(stopPrice)
+            qty_value = _stringify(qty)
+
+            precheck = self._precheck_order(
+                filters=filters,
+                symbol=symbol,
+                side=side,
+                order_type="STOP_MARKET",
+                time_in_force=None,
+                price=None,
+                stop_price=stop_value,
+                quantity=qty_value,
+                reduce_only=True,
+                working_type=None,
+            )
+            if precheck is not None:
+                return precheck
 
             logger.info(
-                "Stop reduce-only price adjust | symbol=%s side=%s requested=%s adjusted=%s tickSize=%s",
+                "Stop reduce-only submit | symbol=%s side=%s stopPrice=%s quantity=%s",
                 symbol,
                 side,
-                format_decimal(stopPrice),
-                adjusted_stop_price,
-                tick,
+                stop_value,
+                qty_value,
             )
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
                 type="STOP_MARKET",
-                stopPrice=adjusted_stop_price,
-                quantity=adjusted_qty,
+                stopPrice=stop_value,
+                quantity=qty_value,
                 reduceOnly=True,
                 newClientOrderId=safe_id,
             )
@@ -463,16 +640,30 @@ class BinanceBroker(BrokerPort):
         try:
             safe_id = sanitize_client_order_id(clientOrderId)
             filters = self.get_symbol_filters(symbol)
-            tick = Decimal(filters["PRICE_FILTER"]["tickSize"])
-            step = Decimal(filters["LOT_SIZE"]["stepSize"])
-            price_dec = round_to_tick(tpPrice, tick, side=side)
-            qty_dec = round_to_step(qty, step)
+            price_value = _stringify(tpPrice)
+            qty_value = _stringify(qty)
+
+            precheck = self._precheck_order(
+                filters=filters,
+                symbol=symbol,
+                side=side,
+                order_type="LIMIT",
+                time_in_force="GTC",
+                price=price_value,
+                stop_price=None,
+                quantity=qty_value,
+                reduce_only=True,
+                working_type=None,
+            )
+            if precheck is not None:
+                return precheck
+
             return self._client.futures_create_order(
                 symbol=_to_binance_symbol(symbol),
                 side=side,
                 type="LIMIT",
-                price=format_decimal(price_dec),
-                quantity=format_decimal(qty_dec),
+                price=price_value,
+                quantity=qty_value,
                 timeInForce="GTC",
                 reduceOnly=True,
                 newClientOrderId=safe_id,
