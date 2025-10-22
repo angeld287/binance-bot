@@ -468,21 +468,44 @@ def _channel_pattern(
     metrics.update({"width_pct": gap_pct, "width_atr": width_atr})
 
     min_width_pct = thresholds.get("CHANNEL_MIN_WIDTH_PCT", env.min_vertical_gap_pct)
-    min_width_atr = thresholds.get("CHANNEL_MIN_WIDTH_ATR")
+    raw_min_width_atr = thresholds.get("CHANNEL_MIN_WIDTH_ATR")
+    if raw_min_width_atr is None:
+        raw_min_width_atr = getattr(env, "min_width_atr", None)
+    if raw_min_width_atr in (None, ""):
+        min_width_atr_value = None
+    else:
+        try:
+            min_width_atr_value = float(raw_min_width_atr)
+        except (TypeError, ValueError):
+            min_width_atr_value = None
     min_width_pct_value = float(min_width_pct or env.min_vertical_gap_pct)
     meets_width_pct = gap_pct >= min_width_pct_value
     meets_width_atr = (
         width_atr is not None
-        and min_width_atr is not None
-        and width_atr >= float(min_width_atr)
+        and min_width_atr_value is not None
+        and width_atr >= min_width_atr_value
+    )
+    chosen_clause = "pct" if meets_width_pct else "atr" if meets_width_atr else "none"
+    metrics.update(
+        {
+            "flags": {"pctPass": meets_width_pct, "atrPass": meets_width_atr},
+            "pctPass": meets_width_pct,
+            "atrPass": meets_width_atr,
+            "chosen_clause": chosen_clause,
+            "min_width_pct_value": min_width_pct_value,
+            "min_width_atr_value": min_width_atr_value,
+            "gap_pct": gap_pct,
+        }
     )
     if not (meets_width_pct or meets_width_atr):
         reason_detail = {
             "reason": "width_below_min",
-            "measured": gap_pct,
+            "measured_pct": gap_pct,
             "min_pct": min_width_pct_value,
             "measured_atr": width_atr,
-            "min_atr": float(min_width_atr) if min_width_atr is not None else None,
+            "min_atr": min_width_atr_value,
+            "pctPass": meets_width_pct,
+            "atrPass": meets_width_atr,
         }
         return None, metrics, thresholds, reason_detail
 
