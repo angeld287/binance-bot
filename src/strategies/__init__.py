@@ -11,7 +11,7 @@ STRATEGY_REGISTRY["breakout"] = BreakoutStrategy
 STRATEGY_REGISTRY["breakout_dual_tf"] = BreakoutDualTFStrategy
 STRATEGY_REGISTRY["liquidity-sweep"] = LiquiditySweepStrategy
 STRATEGY_REGISTRY["wedge-formation"] = WedgeFormationStrategy
-STRATEGY_REGISTRY["ParallelChannelFormation"] = ParallelChannelFormationStrategy
+STRATEGY_REGISTRY["parallel-channel-formation"] = ParallelChannelFormationStrategy
 
 __all__ = [
     "STRATEGY_REGISTRY",
