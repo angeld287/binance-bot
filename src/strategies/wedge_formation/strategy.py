@@ -66,6 +66,10 @@ class PrecisionComputation:
     qty_adjusted: Decimal | None
     stop_requested: Decimal | None = None
     stop_adjusted: Decimal | None = None
+    price_payload: str | None = None
+    stop_payload: str | None = None
+    price_decimals: int | None = None
+    stop_decimals: int | None = None
 
 
 class OrderPrecisionError(ValueError):
@@ -120,6 +124,22 @@ def assert_is_multiple(dec_value: Decimal | Any, tick_or_step: Decimal | Any) ->
     except (InvalidOperation, DivisionByZero):
         return False
     return ratio == ratio.to_integral_value()
+
+
+def _apply_price_rounding(
+    price: Decimal | Any, tick_size: Decimal | Any
+) -> tuple[Decimal, str, int]:
+    price_requested = price if isinstance(price, Decimal) else to_decimal(price)
+    try:
+        tick_quant = Decimal(str(tick_size))
+    except (InvalidOperation, ValueError, TypeError):
+        tick_quant = Decimal("0")
+    tick_normalized = tick_quant.normalize() if tick_quant != 0 else Decimal("0")
+    decimals = max(-tick_normalized.as_tuple().exponent, 0) if tick_normalized != 0 else 0
+    quant = Decimal(10) ** -decimals
+    price_adjusted = price_requested.quantize(quant, rounding=ROUND_DOWN)
+    price_payload = f"{price_adjusted:.{decimals}f}"
+    return price_adjusted, price_payload, decimals
 
 
 def quantize_price_to_tick(
@@ -254,14 +274,18 @@ def compute_order_precision(
     if tick_size is None or tick_size <= 0 or step_size is None or step_size <= 0:
         raise OrderPrecisionError("ORDER_REJECT_TICK_INVALID", "invalid_tick_or_step")
 
-    logger.info("round_price_to_tick (price, qty, stop)- %s, %s, %s", price_requested, qty_requested, stop_requested)
+    logger.info(
+        "round_price_to_tick (price, qty, stop)- %s, %s, %s",
+        price_requested,
+        qty_requested,
+        stop_requested,
+    )
     price_adjusted: Decimal | None = None
+    price_payload: str | None = None
+    price_decimals: int | None = None
     if price_requested is not None:
-        val_price_requested = exchange.round_price_to_tick(symbol, price_requested)
-        logger.info("round_price_to_tick - val_price_requested %s", val_price_requested)
-        price_adjusted = to_decimal(val_price_requested).quantize(
-            tick_size.normalize(),
-            rounding=ROUND_DOWN,
+        price_adjusted, price_payload, price_decimals = _apply_price_rounding(
+            price_requested, tick_size
         )
         logger.info("round_price_to_tick - price_adjusted %s", price_adjusted)
 
@@ -269,10 +293,12 @@ def compute_order_precision(
             raise OrderPrecisionError("ORDER_REJECT_TICK_INVALID", "price_not_multiple")
 
     stop_adjusted: Decimal | None = None
+    stop_payload: str | None = None
+    stop_decimals: int | None = None
     if stop_requested is not None:
-        val_stop_requested = exchange.round_price_to_tick(symbol, stop_requested)
-        logger.info("round_price_to_tick - val_stop_requested %s", val_stop_requested)
-        stop_adjusted = to_decimal(val_stop_requested)
+        stop_adjusted, stop_payload, stop_decimals = _apply_price_rounding(
+            stop_requested, tick_size
+        )
         logger.info("round_price_to_tick - stop_adjusted %s", stop_adjusted)
         if not assert_is_multiple(stop_adjusted, tick_size):
             raise OrderPrecisionError("ORDER_REJECT_TICK_INVALID", "stop_not_multiple")
@@ -294,6 +320,10 @@ def compute_order_precision(
         qty_adjusted=qty_adjusted,
         stop_requested=stop_requested,
         stop_adjusted=stop_adjusted,
+        price_payload=price_payload,
+        stop_payload=stop_payload,
+        price_decimals=price_decimals,
+        stop_decimals=stop_decimals,
     )
 
 
@@ -737,50 +767,24 @@ class WedgeFormationStrategy:
             side = "SELL"
             entry_line = upper_now
             tp_line = lower_now
-            entry_price = entry_line + buffer
-            tp_price = tp_line
-            sl_theoretical = entry_price + buffer if buffer > 0 else entry_price + atr * 0.5
+            entry_price_requested = entry_line + buffer
+            tp_price_requested = tp_line
+            sl_theoretical = (
+                entry_price_requested + buffer
+                if buffer > 0
+                else entry_price_requested + atr * 0.5
+            )
         else:
             side = "BUY"
             entry_line = lower_now
             tp_line = upper_now
-            entry_price = entry_line - buffer
-            tp_price = tp_line
-            sl_theoretical = entry_price - buffer if buffer > 0 else entry_price - atr * 0.5
-
-        val_entry_price = exch.round_price_to_tick(symbol, entry_price)
-        logger.info("round_price_to_tick - val_entry_price: %s", val_entry_price)
-        entry_price = float(val_entry_price)
-        logger.info("round_price_to_tick - entry_price: %s", entry_price)
-
-        val_tp_price = exch.round_price_to_tick(symbol, tp_price)
-        logger.info("round_price_to_tick - val_tp_price: %s", val_tp_price)
-        tp_price = float(val_tp_price)
-        logger.info("round_price_to_tick - tp_price: %s", tp_price)
-
-        if side == "SELL" and tp_price >= entry_price:
-            logger.info(
-                "%s geometry skip invalid_prices entry=%.6f tp=%.6f side=%s",
-                log_prefix,
-                entry_price,
-                tp_price,
-                side,
+            entry_price_requested = entry_line - buffer
+            tp_price_requested = tp_line
+            sl_theoretical = (
+                entry_price_requested - buffer
+                if buffer > 0
+                else entry_price_requested - atr * 0.5
             )
-            return {"status": "invalid_prices", "symbol": symbol}
-        if side == "BUY" and tp_price <= entry_price:
-            logger.info(
-                "%s geometry skip invalid_prices entry=%.6f tp=%.6f side=%s",
-                log_prefix,
-                entry_price,
-                tp_price,
-                side,
-            )
-            return {"status": "invalid_prices", "symbol": symbol}
-
-        rr = self._estimate_rr(entry_price, tp_price, sl_theoretical)
-        if filters_enabled and rr < rr_min:
-            logger.info("%s filter rr_failed rr=%.3f min=%.3f", log_prefix, rr, rr_min)
-            return {"status": "filter_rr", "symbol": symbol, "rr": rr}
 
         # ------------------------------------------------------------------
         # Re-check guards before order placement
@@ -833,25 +837,52 @@ class WedgeFormationStrategy:
             )
             return {"status": "precision_filters_unavailable", "symbol": symbol}
 
-        entry_price_raw_dec = to_decimal(entry_price)
-        tp_price_raw_dec = to_decimal(tp_price)
+        entry_price_raw_dec = to_decimal(entry_price_requested)
+        tp_price_raw_dec = to_decimal(tp_price_requested)
         stop_price_raw_dec = None
         try:
             stop_price_raw_dec = to_decimal(sl_theoretical)
         except (InvalidOperation, DivisionByZero, ValueError, TypeError):
             stop_price_raw_dec = None
 
-        val_entry_price_raw_dec = exch.round_price_to_tick(symbol, entry_price_raw_dec)
-        logger.info("round_price_to_tick - val_entry_price_raw_dec: %s", val_entry_price_raw_dec)
-        entry_price_dec = to_decimal(val_entry_price_raw_dec)
+        entry_price_dec, _, _ = _apply_price_rounding(
+            entry_price_raw_dec, filters.tick_size
+        )
         logger.info("round_price_to_tick - entry_price_dec: %s", entry_price_dec)
 
         exit_side = "SELL" if side == "BUY" else "BUY"
 
-        val_tp_price_raw_dec = exch.round_price_to_tick(symbol, tp_price_raw_dec)
-        logger.info("round_price_to_tick - val_tp_price_raw_dec: %s", val_tp_price_raw_dec)
-        tp_price_dec = to_decimal(val_tp_price_raw_dec)
+        tp_price_dec, _, _ = _apply_price_rounding(
+            tp_price_raw_dec, filters.tick_size
+        )
         logger.info("round_price_to_tick - tp_price_dec: %s", tp_price_dec)
+
+        entry_price = float(entry_price_dec)
+        tp_price = float(tp_price_dec)
+
+        if side == "SELL" and tp_price >= entry_price:
+            logger.info(
+                "%s geometry skip invalid_prices entry=%.6f tp=%.6f side=%s",
+                log_prefix,
+                entry_price,
+                tp_price,
+                side,
+            )
+            return {"status": "invalid_prices", "symbol": symbol}
+        if side == "BUY" and tp_price <= entry_price:
+            logger.info(
+                "%s geometry skip invalid_prices entry=%.6f tp=%.6f side=%s",
+                log_prefix,
+                entry_price,
+                tp_price,
+                side,
+            )
+            return {"status": "invalid_prices", "symbol": symbol}
+
+        rr = self._estimate_rr(entry_price, tp_price, sl_theoretical)
+        if filters_enabled and rr < rr_min:
+            logger.info("%s filter rr_failed rr=%.3f min=%.3f", log_prefix, rr, rr_min)
+            return {"status": "filter_rr", "symbol": symbol, "rr": rr}
 
         entry_price_norm_dec = entry_price_dec
         tp_price_norm_dec = tp_price_dec
@@ -1180,7 +1211,11 @@ class WedgeFormationStrategy:
             adjusted_qty=entry_precision.qty_adjusted,
         )
 
-        entry_price_payload = to_api_str(entry_price_adjusted)
+        entry_price_payload = (
+            entry_precision.price_payload
+            if entry_precision.price_payload is not None
+            else to_api_str(entry_price_adjusted)
+        )
         qty_payload = to_api_str(qty_adjusted)
 
         try:
@@ -1317,7 +1352,11 @@ class WedgeFormationStrategy:
             adjusted_stop=tp_precision.stop_adjusted,
         )
 
-        tp_price_payload = to_api_str(tp_precision.price_adjusted)
+        tp_price_payload = (
+            tp_precision.price_payload
+            if tp_precision.price_payload is not None
+            else to_api_str(tp_precision.price_adjusted)
+        )
         tp_qty_payload = to_api_str(tp_precision.qty_adjusted)
 
         persisted = persist_tp_value(
@@ -1409,10 +1448,10 @@ class WedgeFormationStrategy:
             return
 
         tp_price_raw_dec = Decimal(str(tp_value))
-        
-        val_tp_price_raw_dec = exch.round_price_to_tick(symbol, tp_price_raw_dec)
-        logger.info("round_price_to_tick - val_tp_price_raw_dec: %s", val_tp_price_raw_dec)
-        tp_price_dec = to_decimal(val_tp_price_raw_dec)
+
+        tp_price_dec, _, _ = _apply_price_rounding(
+            tp_price_raw_dec, filters.tick_size
+        )
         logger.info("round_price_to_tick - tp_price_dec: %s", tp_price_dec)
 
         qty_raw_dec = to_decimal(qty)
@@ -1540,7 +1579,11 @@ class WedgeFormationStrategy:
             adjusted_stop=tp_precision.stop_adjusted,
         )
 
-        tp_price_payload = to_api_str(tp_precision.price_adjusted)
+        tp_price_payload = (
+            tp_precision.price_payload
+            if tp_precision.price_payload is not None
+            else to_api_str(tp_precision.price_adjusted)
+        )
         tp_qty_payload = to_api_str(tp_precision.qty_adjusted)
 
         try:
