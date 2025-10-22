@@ -1,0 +1,46 @@
+{
+  "CHANNEL_TOLERANCE_SLOPE": {
+    "default": 0.05,
+    "description": "Maximum allowed absolute slope difference between channel boundaries."
+  },
+  "CHANNEL_MIN_TOUCHES": {
+    "default": 3,
+    "description": "Minimum pivot touches required on each boundary."
+  },
+  "CHANNEL_MIN_VERTICAL_DISTANCE_PCT": {
+    "default": 0.01,
+    "description": "Minimum vertical separation between channel lines relative to price."
+  },
+  "CHANNEL_MIN_DURATION_BARS": {
+    "default": 20,
+    "description": "Minimum number of bars the formation must span."
+  },
+  "CHANNEL_CONFIDENCE_THRESHOLD": {
+    "default": 1.5,
+    "description": "Minimum RR or confidence score expected from the detector."
+  },
+  "TP_MODE": {
+    "default": "opuesto_inmediato",
+    "description": "Take-profit selection policy."
+  },
+  "SL_ENABLED": {
+    "default": false,
+    "description": "Toggle for stop-loss placement (kept off by default)."
+  },
+  "PRICE_TICK_OVERRIDE": {
+    "default": null,
+    "description": "Optional explicit tick size override for precision troubleshooting."
+  },
+  "QTY_STEP_OVERRIDE": {
+    "default": null,
+    "description": "Optional explicit quantity step override for precision troubleshooting."
+  },
+  "MIN_NOTIONAL_BUFFER_PCT": {
+    "default": 0.03,
+    "description": "Extra percentage buffer applied over the exchange min notional."
+  },
+  "TP_STORE_PATH": {
+    "default": "src/strategies/ParallelChannelFormation/state/tp_store.json",
+    "description": "Location of the JSON file used to persist take-profit targets."
+  }
+}
