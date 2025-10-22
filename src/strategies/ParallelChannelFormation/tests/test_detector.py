@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
 from decimal import Decimal
@@ -12,6 +11,34 @@ from pathlib import Path
 PROJECT_SRC = Path(__file__).resolve().parents[3]
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
+
+if "boto3" not in sys.modules:
+    boto3_stub = types.ModuleType("boto3")
+
+    def _stub_client(_name: str):  # pragma: no cover - safety net
+        raise RuntimeError("boto3 client should be mocked in tests")
+
+    boto3_stub.client = _stub_client
+    sys.modules["boto3"] = boto3_stub
+
+if "botocore" not in sys.modules:
+    botocore_pkg = types.ModuleType("botocore")
+    exceptions_pkg = types.ModuleType("botocore.exceptions")
+
+    class ClientError(Exception):
+        def __init__(self, error_response=None, operation_name=""):
+            super().__init__("client error")
+            self.response = error_response or {}
+            self.operation_name = operation_name
+
+    class BotoCoreError(Exception):
+        pass
+
+    exceptions_pkg.ClientError = ClientError
+    exceptions_pkg.BotoCoreError = BotoCoreError
+    botocore_pkg.exceptions = exceptions_pkg
+    sys.modules["botocore"] = botocore_pkg
+    sys.modules["botocore.exceptions"] = exceptions_pkg
 
 strategies_pkg = types.ModuleType("strategies")
 strategies_pkg.__path__ = [str(PROJECT_SRC / "strategies")]
@@ -147,12 +174,7 @@ if "strategies.breakout_dual_tf.filters.ema_distance" not in sys.modules:
     sys.modules["strategies.breakout_dual_tf.filters.ema_distance"] = ema_module
 
 from strategies.ParallelChannelFormation import channel_detector
-from strategies.ParallelChannelFormation.channel_detector import (
-    ChannelEnv,
-    MarketSnapshot,
-    STRATEGY_NAME,
-    run,
-)
+from strategies.ParallelChannelFormation.channel_detector import ChannelEnv, MarketSnapshot, STRATEGY_NAME, run
 from strategies.wedge_formation.strategy import OrderPrecisionError
 
 
@@ -213,7 +235,25 @@ def _candles() -> list[list[float]]:
     return candles
 
 
-def _env(tmp_path: Path) -> ChannelEnv:
+def _mock_tp_store(monkeypatch):
+    storage: dict[str, dict[str, float]] = {}
+
+    def fake_load(symbol: str):
+        entry = storage.get(symbol)
+        if not entry:
+            return None
+        return entry.get("tp_value")
+
+    def fake_persist(symbol: str, tp_value: float, timestamp: float):
+        storage[symbol] = {"tp_value": float(tp_value), "timestamp": float(timestamp)}
+        return True
+
+    monkeypatch.setattr(channel_detector, "load_tp_value", fake_load)
+    monkeypatch.setattr(channel_detector, "persist_tp_value", fake_persist)
+    return storage
+
+
+def _env() -> ChannelEnv:
     return ChannelEnv(
         tolerance_slope=0.2,
         min_touches=1,
@@ -225,11 +265,11 @@ def _env(tmp_path: Path) -> ChannelEnv:
         price_tick_override=None,
         qty_step_override=None,
         min_notional_buffer_pct=0.0,
-        tp_store_path=str(tmp_path / "tp_store.json"),
     )
 
 
-def test_open_orders_skip(tmp_path):
+def test_open_orders_skip(monkeypatch):
+    _mock_tp_store(monkeypatch)
     exchange = FakeExchange()
     exchange._open_orders = [{"status": "NEW", "clientOrderId": "OTHER"}]
     snapshot = MarketSnapshot(
@@ -240,36 +280,26 @@ def test_open_orders_skip(tmp_path):
         ema_slow=100.0,
         volume_avg=10.0,
     )
-    env = _env(tmp_path)
+    env = _env()
     result = run(
         "BTCUSDT",
         snapshot,
         {"qty": 1.0},
         env,
         exchange=exchange,
-        tp_store_path=Path(env.tp_store_path),
     )
     assert result["action"] == "reject"
     assert result["reason"] == "open_order_exists"
 
 
-def test_place_tp_for_existing_position(tmp_path):
+def test_place_tp_for_existing_position(monkeypatch):
+    store = _mock_tp_store(monkeypatch)
+    now_ts = datetime.utcnow().timestamp()
+    store["BTCUSDT"] = {"tp_value": 110.0, "timestamp": now_ts}
     exchange = FakeExchange()
     exchange.position = {"positionAmt": "1", "entryPrice": "100"}
     exchange._open_orders = [{"status": "NEW", "clientOrderId": "PCF_TP_EXISTING"}]
-    env = _env(tmp_path)
-    store_path = Path(env.tp_store_path)
-    store_payload = {
-        "BTCUSDT": {
-            "strategy": STRATEGY_NAME,
-            "tp_price": 110.0,
-            "side": "LONG",
-            "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
-            "source": "detector",
-            "qty": 1.0,
-        }
-    }
-    store_path.write_text(json.dumps(store_payload), encoding="utf-8")
+    env = _env()
     snapshot = MarketSnapshot(
         candles=_candles(),
         timeframe="15m",
@@ -284,15 +314,16 @@ def test_place_tp_for_existing_position(tmp_path):
         {"qty": 1.0},
         env,
         exchange=exchange,
-        tp_store_path=store_path,
     )
     assert result["action"] == "monitor_tp"
     assert len(exchange.tp_orders) == 1
 
 
-def test_detection_places_entry_and_persists_tp(tmp_path):
+def test_detection_places_entry_and_persists_tp(monkeypatch):
+    store = _mock_tp_store(monkeypatch)
+    store["ADAUSDT"] = {"tp_value": 1.0, "timestamp": datetime.utcnow().timestamp()}
     exchange = FakeExchange()
-    env = _env(tmp_path)
+    env = _env()
     snapshot = MarketSnapshot(
         candles=_candles(),
         timeframe="15m",
@@ -301,25 +332,24 @@ def test_detection_places_entry_and_persists_tp(tmp_path):
         ema_slow=100.0,
         volume_avg=10.0,
     )
-    store_path = Path(env.tp_store_path)
     result = run(
         "BTCUSDT",
         snapshot,
         {"qty": 1.0},
         env,
         exchange=exchange,
-        tp_store_path=store_path,
     )
     assert result["action"] == "place_order"
     assert exchange.entry_orders
-    data = channel_detector.load_tp_from_store("BTCUSDT", store_path)
-    assert data is not None
-    assert data["strategy"] == STRATEGY_NAME
+    stored = store.get("BTCUSDT")
+    assert stored is not None
+    assert math.isclose(stored["tp_value"], result["tp1"], rel_tol=1e-9)
 
 
-def test_precision_failure_bubbles_reason(tmp_path, monkeypatch):
+def test_precision_failure_bubbles_reason(monkeypatch):
+    _mock_tp_store(monkeypatch)
     exchange = FakeExchange()
-    env = _env(tmp_path)
+    env = _env()
     snapshot = MarketSnapshot(
         candles=_candles(),
         timeframe="15m",
@@ -339,7 +369,6 @@ def test_precision_failure_bubbles_reason(tmp_path, monkeypatch):
         {"qty": 1.0},
         env,
         exchange=exchange,
-        tp_store_path=Path(env.tp_store_path),
     )
     assert result["action"] == "reject"
     assert result["reason"] == "precision_error_on_entry"

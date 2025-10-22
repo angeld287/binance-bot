@@ -39,8 +39,12 @@
     "default": 0.03,
     "description": "Extra percentage buffer applied over the exchange min notional."
   },
-  "TP_STORE_PATH": {
-    "default": "src/strategies/ParallelChannelFormation/state/tp_store.json",
-    "description": "Location of the JSON file used to persist take-profit targets."
+  "S3_BUCKET_TP": {
+    "default": null,
+    "description": "Alias for the S3 bucket used to persist take-profit data (shared with WedgeFormation)."
+  },
+  "S3_KEY_PREFIX_TP": {
+    "default": null,
+    "description": "Alias for the S3 key prefix leveraged by both WedgeFormation and ParallelChannelFormation."
   }
 }
