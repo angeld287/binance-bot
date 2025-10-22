@@ -38,9 +38,5 @@
   "MIN_NOTIONAL_BUFFER_PCT": {
     "default": 0.03,
     "description": "Extra percentage buffer applied over the exchange min notional."
-  },
-  "TP_STORE_PATH": {
-    "default": "src/strategies/ParallelChannelFormation/state/tp_store.json",
-    "description": "Location of the JSON file used to persist take-profit targets."
   }
 }

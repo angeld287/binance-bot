@@ -23,7 +23,6 @@ class ChannelEnv:
     price_tick_override: float | None
     qty_step_override: float | None
     min_notional_buffer_pct: float
-    tp_store_path: str
 
 
 def _load_defaults() -> MutableMapping[str, Mapping[str, object]]:
@@ -91,15 +90,6 @@ def load_env(*, settings=None) -> ChannelEnv:
         _get_value("MIN_NOTIONAL_BUFFER_PCT", defaults=defaults, coerce=float) or 0.03
     )
 
-    tp_store_default = defaults.get("TP_STORE_PATH", {}).get("default")
-    if tp_store_default:
-        tp_store_path = str(tp_store_default)
-    else:
-        tp_store_path = str(
-            Path(__file__).resolve().parent.parent / "state" / "tp_store.json"
-        )
-    tp_store_path = os.getenv("TP_STORE_PATH", tp_store_path)
-
     return ChannelEnv(
         tolerance_slope=float(tol),
         min_touches=int(touches),
@@ -111,7 +101,6 @@ def load_env(*, settings=None) -> ChannelEnv:
         price_tick_override=float(price_override) if price_override else None,
         qty_step_override=float(qty_override) if qty_override else None,
         min_notional_buffer_pct=float(buffer_pct),
-        tp_store_path=tp_store_path,
     )
 
 

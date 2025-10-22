@@ -5,11 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from common.precision import format_decimal, to_decimal
@@ -25,6 +23,7 @@ from strategies.wedge_formation.strategy import (
     OrderPrecisionError,
     WedgeFormationStrategy,
 )
+from utils.tp_store_s3 import load_tp_value, persist_tp_value
 
 from .geometry_utils import (
     Line,
@@ -83,41 +82,69 @@ def _apply_overrides(filters: SymbolFilters, env: ChannelEnv) -> SymbolFilters:
     )
 
 
-def _read_tp_store(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{}\n", encoding="utf-8")
-        return {}
-    try:
-        raw = path.read_text(encoding="utf-8")
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-    return {}
-
-
-def load_tp_from_store(symbol: str, path: Path) -> dict[str, Any] | None:
-    data = _read_tp_store(path)
-    entry = data.get(symbol)
-    if not isinstance(entry, dict):
+def _load_tp_entry(symbol: str) -> dict[str, Any] | None:
+    tp_value = load_tp_value(symbol)
+    if tp_value is None:
+        _log(
+            {
+                "strategy": STRATEGY_NAME,
+                "symbol": symbol,
+                "state": "tp_store",
+                "action": "load_tp",
+                "storage_backend": "s3",
+                "result": "miss",
+                "reason": "tp_not_found_in_store",
+            }
+        )
         return None
-    if entry.get("strategy") != STRATEGY_NAME:
-        return None
+
+    entry = {
+        "strategy": STRATEGY_NAME,
+        "tp_price": float(tp_value),
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
+        "source": "detector",
+    }
+    _log(
+        {
+            "strategy": STRATEGY_NAME,
+            "symbol": symbol,
+            "state": "tp_store",
+            "action": "load_tp",
+            "storage_backend": "s3",
+            "result": "hit",
+        }
+    )
     return entry
 
 
-def save_tp_to_store(symbol: str, payload: Mapping[str, Any], path: Path) -> None:
-    store = _read_tp_store(path)
-    store[symbol] = dict(payload)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_text(
-        json.dumps(store, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8",
+def _persist_tp_entry(symbol: str, payload: Mapping[str, Any]) -> None:
+    timestamp_raw = payload.get("timestamp")
+    ts_epoch: float
+    if isinstance(timestamp_raw, (int, float)):
+        ts_epoch = float(timestamp_raw)
+    elif isinstance(timestamp_raw, str):
+        try:
+            ts_epoch = datetime.fromisoformat(timestamp_raw).timestamp()
+        except ValueError:
+            ts_epoch = datetime.utcnow().timestamp()
+    else:
+        ts_epoch = datetime.utcnow().timestamp()
+
+    persisted = persist_tp_value(
+        symbol,
+        payload.get("tp_price", 0.0),
+        ts_epoch,
     )
-    os.replace(tmp_path, path)
+    _log(
+        {
+            "strategy": STRATEGY_NAME,
+            "symbol": symbol,
+            "state": "tp_store",
+            "action": "save_tp",
+            "storage_backend": "s3",
+            "result": "persisted" if persisted else "error",
+        }
+    )
 
 
 def _build_client_id(*parts: Any) -> str:
@@ -435,7 +462,6 @@ def run(
     env: ChannelEnv,
     *,
     exchange: BrokerPort,
-    tp_store_path: Path,
 ) -> dict[str, Any]:
     pending, count, open_orders = _check_open_orders(exchange, symbol)
     if pending:
@@ -443,7 +469,7 @@ def run(
 
     has_position, amt, _position_raw = _check_position(exchange, symbol)
     if has_position:
-        store_entry = load_tp_from_store(symbol, tp_store_path)
+        store_entry = _load_tp_entry(symbol)
         if not store_entry:
             _log(
                 {
@@ -456,6 +482,10 @@ def run(
                 }
             )
             return {"action": "monitor_tp", "reason": "tp_not_found_in_store"}
+
+        store_entry = dict(store_entry)
+        store_entry.setdefault("side", "LONG" if amt > 0 else "SHORT")
+        store_entry.setdefault("qty", abs(amt))
 
         filters_raw = get_symbol_filters(exchange, symbol)
         filters = SymbolFilters(
@@ -636,7 +666,7 @@ def run(
         "source": "detector",
         "qty": float(qty_final),
     }
-    save_tp_to_store(symbol, tp_entry, tp_store_path)
+    _persist_tp_entry(symbol, tp_entry)
 
     candles = market_data.candles
     last_open_time = int(candles[-1][0]) if candles else int(datetime.utcnow().timestamp())
@@ -711,7 +741,6 @@ class ParallelChannelFormationStrategy:
         timeframe = str(settings.get("INTERVAL", "15m"))
 
         env = load_env(settings=settings)
-        tp_store_path = Path(env.tp_store_path)
 
         candles = md.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=200)
         atr = WedgeFormationStrategy._compute_atr(candles)
@@ -745,7 +774,6 @@ class ParallelChannelFormationStrategy:
             indicators,
             env,
             exchange=exch,
-            tp_store_path=tp_store_path,
         )
 
 

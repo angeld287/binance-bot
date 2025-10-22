@@ -13,8 +13,8 @@ overlapping management.
 * Precision enforcement delegated to the same utilities used by
   `WedgeFormation`, including deterministic `clientOrderId` generation and
   strict min-notional checks with configurable buffers.
-* Persistent take-profit tracking stored in `state/tp_store.json` using atomic
-  writes.
+* Persistent take-profit tracking stored in S3 using the shared `tp_store_s3`
+  helper leveraged by `WedgeFormation`, keeping JSON entries keyed by symbol.
 * Modular structure with dedicated helpers for geometry, filters, environment
   configuration and state persistence.
 
