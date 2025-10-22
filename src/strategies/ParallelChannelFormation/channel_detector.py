@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -57,6 +58,60 @@ def _log(payload: Mapping[str, Any]) -> None:
         logger.info(json.dumps(payload, default=str))
     except Exception:  # pragma: no cover - defensive
         logger.info(str(payload))
+
+
+def _safe_float_env(key: str) -> float | None:
+    raw = os.getenv(key)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int_env(key: str) -> int | None:
+    raw = os.getenv(key)
+    if raw is None:
+        return None
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def _channel_thresholds(env: ChannelEnv) -> dict[str, float | int | None]:
+    min_touches = _safe_int_env("CHANNEL_MIN_TOUCHES_PER_SIDE")
+    min_bars = _safe_int_env("CHANNEL_MIN_BARS")
+    min_width_pct = _safe_float_env("CHANNEL_MIN_WIDTH_PCT")
+    min_width_atr = _safe_float_env("CHANNEL_MIN_WIDTH_ATR")
+    max_slope_diff_pct = _safe_float_env("CHANNEL_MAX_SLOPE_DIFF_PCT")
+    tolerance_pct = _safe_float_env("CHANNEL_TOLERANCE_PCT")
+
+    return {
+        "CHANNEL_MIN_TOUCHES_PER_SIDE": min_touches if min_touches is not None else env.min_touches,
+        "CHANNEL_MIN_BARS": min_bars if min_bars is not None else env.min_duration_bars,
+        "CHANNEL_MIN_WIDTH_PCT": (
+            min_width_pct if min_width_pct is not None else env.min_vertical_gap_pct
+        ),
+        "CHANNEL_MIN_WIDTH_ATR": min_width_atr,
+        "CHANNEL_MAX_SLOPE_DIFF_PCT": (
+            max_slope_diff_pct if max_slope_diff_pct is not None else env.tolerance_slope
+        ),
+        "CHANNEL_TOLERANCE_PCT": (
+            tolerance_pct if tolerance_pct is not None else env.tolerance_slope
+        ),
+    }
+
+
+def _count_touches(line: Line, pivots: Sequence[tuple[int, float]], *, tolerance: float) -> int:
+    touches = 0
+    tol = abs(float(tolerance))
+    for idx, price in pivots:
+        expected = line.value_at(idx)
+        if abs(expected - price) <= tol:
+            touches += 1
+    return touches
 
 
 def _apply_overrides(filters: SymbolFilters, env: ChannelEnv) -> SymbolFilters:
@@ -333,31 +388,129 @@ def _channel_pattern(
     candles: Sequence[Sequence[float]],
     env: ChannelEnv,
     snapshot: MarketSnapshot,
-) -> tuple[Line, Line] | None:
+) -> tuple[
+    tuple[Line, Line] | None,
+    dict[str, Any],
+    dict[str, float | int | None],
+    dict[str, Any] | None,
+]:
     pivots_high, pivots_low = find_pivots(candles)
+    thresholds = _channel_thresholds(env)
+
+    combined_pivots = list(pivots_high + pivots_low)
+    bars_span = (
+        combined_pivots[-1][0] - combined_pivots[0][0]
+        if len(combined_pivots) >= 2
+        else 0
+    )
+
+    last_close = float(candles[-1][4]) if candles else 0.0
+    atr_value = float(snapshot.atr or 0.0)
+
+    metrics: dict[str, Any] = {
+        "touches_top": 0,
+        "touches_bottom": 0,
+        "slope_top": None,
+        "slope_bottom": None,
+        "slope_diff_pct": None,
+        "width_pct": None,
+        "width_atr": None,
+        "bars_span": bars_span,
+        "overshoot_pct": 0.0,
+        "tolerance_pct": thresholds.get("CHANNEL_TOLERANCE_PCT"),
+        "atr": atr_value,
+        "tick_size": env.price_tick_override,
+        "price": last_close,
+    }
+
+    reason_detail: dict[str, Any] | None = None
+
     upper = fit_line(pivots_high)
     lower = fit_line(pivots_low)
     if upper is None or lower is None:
-        return None
+        reason_detail = {
+            "reason": "insufficient_pivots",
+            "measured_top": len(pivots_high),
+            "measured_bottom": len(pivots_low),
+            "min_pivots": 2,
+        }
+        return None, metrics, thresholds, reason_detail
+
+    slope_top = float(upper.slope)
+    slope_bottom = float(lower.slope)
+    slope_diff = abs(slope_top - slope_bottom)
+    tolerance_pct = thresholds.get("CHANNEL_TOLERANCE_PCT")
+    if tolerance_pct is None:
+        tolerance_pct = env.tolerance_slope
+    overshoot_pct = max(0.0, slope_diff - tolerance_pct)
+
+    metrics.update(
+        {
+            "slope_top": slope_top,
+            "slope_bottom": slope_bottom,
+            "slope_diff_pct": slope_diff,
+            "overshoot_pct": overshoot_pct,
+            "tolerance_pct": tolerance_pct,
+        }
+    )
 
     if not are_parallel(upper.slope, lower.slope, env.tolerance_slope):
-        return None
+        reason_detail = {
+            "reason": "slope_diff_above_max",
+            "measured": slope_diff,
+            "max_pct": thresholds.get("CHANNEL_MAX_SLOPE_DIFF_PCT", env.tolerance_slope),
+        }
+        return None, metrics, thresholds, reason_detail
 
-    last_close = float(candles[-1][4]) if candles else 0.0
     gap_pct = vertical_gap_pct(upper, lower, last_close, len(candles) - 1)
-    if gap_pct < env.min_vertical_gap_pct:
-        return None
+    width_abs = abs(upper.value_at(len(candles) - 1) - lower.value_at(len(candles) - 1))
+    width_atr = (width_abs / atr_value) if atr_value > 0 else None
+    metrics.update({"width_pct": gap_pct, "width_atr": width_atr})
 
-    atr_tolerance = snapshot.atr or 0.0
-    if not has_min_touches(upper, pivots_high, tolerance=atr_tolerance, min_touches=env.min_touches):
-        return None
-    if not has_min_touches(lower, pivots_low, tolerance=atr_tolerance, min_touches=env.min_touches):
-        return None
+    min_width_pct = thresholds.get("CHANNEL_MIN_WIDTH_PCT", env.min_vertical_gap_pct)
+    if gap_pct < float(min_width_pct or env.min_vertical_gap_pct):
+        reason_detail = {
+            "reason": "width_below_min",
+            "measured": gap_pct,
+            "min_pct": min_width_pct or env.min_vertical_gap_pct,
+        }
+        return None, metrics, thresholds, reason_detail
 
+    atr_tolerance = atr_value
+    touches_top = _count_touches(upper, pivots_high, tolerance=atr_tolerance)
+    touches_bottom = _count_touches(lower, pivots_low, tolerance=atr_tolerance)
+    metrics.update({"touches_top": touches_top, "touches_bottom": touches_bottom})
+
+    min_touches = thresholds.get("CHANNEL_MIN_TOUCHES_PER_SIDE", env.min_touches)
+    if not has_min_touches(
+        upper, pivots_high, tolerance=atr_tolerance, min_touches=env.min_touches
+    ):
+        reason_detail = {
+            "reason": "touches_top_below_min",
+            "measured": touches_top,
+            "min_touches": min_touches,
+        }
+        return None, metrics, thresholds, reason_detail
+    if not has_min_touches(
+        lower, pivots_low, tolerance=atr_tolerance, min_touches=env.min_touches
+    ):
+        reason_detail = {
+            "reason": "touches_bottom_below_min",
+            "measured": touches_bottom,
+            "min_touches": min_touches,
+        }
+        return None, metrics, thresholds, reason_detail
+
+    min_bars = thresholds.get("CHANNEL_MIN_BARS", env.min_duration_bars)
     if not has_min_duration(pivots_high + pivots_low, min_bars=env.min_duration_bars):
-        return None
+        reason_detail = {
+            "reason": "bars_span_below_min",
+            "measured": bars_span,
+            "min_bars": min_bars,
+        }
+        return None, metrics, thresholds, reason_detail
 
-    return upper, lower
+    return (upper, lower), metrics, thresholds, None
 
 
 def compute_channel_entry_tp(
@@ -564,17 +717,25 @@ def run(
         )
         return {"action": "reject", "reason": reason or "precision_error_on_tp"}
 
-    lines = _channel_pattern(market_data.candles, env, market_data)
+    (
+        lines,
+        pattern_metrics,
+        pattern_thresholds,
+        pattern_reason,
+    ) = _channel_pattern(market_data.candles, env, market_data)
     if lines is None:
-        _log(
-            {
-                "strategy": STRATEGY_NAME,
-                "symbol": symbol,
-                "state": "pattern_invalid",
-                "action": "reject",
-                "reason": "pattern_invalid",
-            }
-        )
+        log_payload: dict[str, Any] = {
+            "strategy": STRATEGY_NAME,
+            "symbol": symbol,
+            "state": "pattern_invalid",
+            "action": "reject",
+            "reason": "pattern_invalid",
+            "pattern_metrics": pattern_metrics,
+            "pattern_thresholds": pattern_thresholds,
+        }
+        if pattern_reason:
+            log_payload["pattern_invalid_detail"] = pattern_reason
+        _log(log_payload)
         return {"action": "reject", "reason": "pattern_invalid"}
 
     channel = compute_channel_entry_tp(market_data.candles, lines=lines, snapshot=market_data)
