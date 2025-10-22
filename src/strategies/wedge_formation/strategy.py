@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import logging
 import math
 import os
@@ -707,7 +708,34 @@ class WedgeFormationStrategy:
             atr,
         )
 
+        tol_price = atr * tol_atr_mult
+        pivot_window_high = 2
+        pivot_window_low = 2
+
         if len(pivots_high) < min_touches or len(pivots_low) < min_touches:
+            metrics = self._gather_wedge_eval_metrics(
+                pivots_high,
+                pivots_low,
+                self._fit_line(pivots_high) if len(pivots_high) >= 2 else None,
+                self._fit_line(pivots_low) if len(pivots_low) >= 2 else None,
+                tol_price,
+            )
+            self._emit_wedge_eval_log(
+                symbol=symbol,
+                interval=timeframe,
+                atr=atr,
+                tol_mult=tol_atr_mult,
+                tol_price=tol_price,
+                pivot_window_high=pivot_window_high,
+                pivot_window_low=pivot_window_low,
+                min_convergence=min_convergence,
+                min_touches=min_touches,
+                min_bars=min_bars,
+                order_ttl_bars=order_ttl_bars,
+                metrics=metrics,
+                decision="reject",
+                reason="touches_fail",
+            )
             logger.info("%s skip not_enough_touches", log_prefix)
             return {"status": "not_enough_touches", "symbol": symbol}
 
@@ -719,8 +747,45 @@ class WedgeFormationStrategy:
             min_convergence=min_convergence,
         )
         if pattern is None:
+            base_metrics = self._gather_wedge_eval_metrics(
+                pivots_high,
+                pivots_low,
+                self._fit_line(pivots_high) if len(pivots_high) >= 2 else None,
+                self._fit_line(pivots_low) if len(pivots_low) >= 2 else None,
+                tol_price,
+            )
+            reason = self._determine_reject_reason(
+                metrics=base_metrics,
+                min_touches=min_touches,
+                min_bars=min_bars,
+                min_convergence=min_convergence,
+            )
+            self._emit_wedge_eval_log(
+                symbol=symbol,
+                interval=timeframe,
+                atr=atr,
+                tol_mult=tol_atr_mult,
+                tol_price=tol_price,
+                pivot_window_high=pivot_window_high,
+                pivot_window_low=pivot_window_low,
+                min_convergence=min_convergence,
+                min_touches=min_touches,
+                min_bars=min_bars,
+                order_ttl_bars=order_ttl_bars,
+                metrics=base_metrics,
+                decision="reject",
+                reason=reason,
+            )
             logger.info("%s skip no_wedge_detected", log_prefix)
             return {"status": "no_wedge", "symbol": symbol}
+
+        metrics = self._gather_wedge_eval_metrics(
+            pivots_high,
+            pivots_low,
+            pattern.upper,
+            pattern.lower,
+            tol_price,
+        )
 
         logger.info(
             "%s wedge kind=%s conv=%.3f bars=%d slopes=(%.6f, %.6f)",
@@ -735,12 +800,60 @@ class WedgeFormationStrategy:
         if filters_enabled:
             tol_value = tol_atr_mult * atr
             if not self._validate_touch_tolerance(pivots_high, pattern.upper, tol_value):
+                self._emit_wedge_eval_log(
+                    symbol=symbol,
+                    interval=timeframe,
+                    atr=atr,
+                    tol_mult=tol_atr_mult,
+                    tol_price=tol_price,
+                    pivot_window_high=pivot_window_high,
+                    pivot_window_low=pivot_window_low,
+                    min_convergence=min_convergence,
+                    min_touches=min_touches,
+                    min_bars=min_bars,
+                    order_ttl_bars=order_ttl_bars,
+                    metrics=metrics,
+                    decision="reject",
+                    reason="touches_fail",
+                )
                 logger.info("%s filter touch_upper_failed tol=%.6f", log_prefix, tol_value)
                 return {"status": "filter_touch_upper", "symbol": symbol}
             if not self._validate_touch_tolerance(pivots_low, pattern.lower, tol_value):
+                self._emit_wedge_eval_log(
+                    symbol=symbol,
+                    interval=timeframe,
+                    atr=atr,
+                    tol_mult=tol_atr_mult,
+                    tol_price=tol_price,
+                    pivot_window_high=pivot_window_high,
+                    pivot_window_low=pivot_window_low,
+                    min_convergence=min_convergence,
+                    min_touches=min_touches,
+                    min_bars=min_bars,
+                    order_ttl_bars=order_ttl_bars,
+                    metrics=metrics,
+                    decision="reject",
+                    reason="touches_fail",
+                )
                 logger.info("%s filter touch_lower_failed tol=%.6f", log_prefix, tol_value)
                 return {"status": "filter_touch_lower", "symbol": symbol}
             if pattern.convergence_ratio < min_convergence:
+                self._emit_wedge_eval_log(
+                    symbol=symbol,
+                    interval=timeframe,
+                    atr=atr,
+                    tol_mult=tol_atr_mult,
+                    tol_price=tol_price,
+                    pivot_window_high=pivot_window_high,
+                    pivot_window_low=pivot_window_low,
+                    min_convergence=min_convergence,
+                    min_touches=min_touches,
+                    min_bars=min_bars,
+                    order_ttl_bars=order_ttl_bars,
+                    metrics=metrics,
+                    decision="reject",
+                    reason="convergence_fail",
+                )
                 logger.info(
                     "%s filter convergence_failed ratio=%.6f min=%.6f",
                     log_prefix,
@@ -749,6 +862,22 @@ class WedgeFormationStrategy:
                 )
                 return {"status": "filter_convergence", "symbol": symbol}
             if pattern.bars < min_bars or pattern.bars > max_bars:
+                self._emit_wedge_eval_log(
+                    symbol=symbol,
+                    interval=timeframe,
+                    atr=atr,
+                    tol_mult=tol_atr_mult,
+                    tol_price=tol_price,
+                    pivot_window_high=pivot_window_high,
+                    pivot_window_low=pivot_window_low,
+                    min_convergence=min_convergence,
+                    min_touches=min_touches,
+                    min_bars=min_bars,
+                    order_ttl_bars=order_ttl_bars,
+                    metrics=metrics,
+                    decision="reject",
+                    reason="min_bars_fail",
+                )
                 logger.info(
                     "%s filter bars_failed bars=%d range=[%d,%d]",
                     log_prefix,
@@ -757,6 +886,23 @@ class WedgeFormationStrategy:
                     max_bars,
                 )
                 return {"status": "filter_bars", "symbol": symbol, "bars": pattern.bars}
+
+        self._emit_wedge_eval_log(
+            symbol=symbol,
+            interval=timeframe,
+            atr=atr,
+            tol_mult=tol_atr_mult,
+            tol_price=tol_price,
+            pivot_window_high=pivot_window_high,
+            pivot_window_low=pivot_window_low,
+            min_convergence=min_convergence,
+            min_touches=min_touches,
+            min_bars=min_bars,
+            order_ttl_bars=order_ttl_bars,
+            metrics=metrics,
+            decision="accept",
+            reason="ok",
+        )
 
         current_index = len(candles) - 1
         buffer = buffer_atr_mult * atr
@@ -1722,6 +1868,164 @@ class WedgeFormationStrategy:
             if abs(price - projected) > tolerance:
                 return False
         return True
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _gather_wedge_eval_metrics(
+        pivots_high: Sequence[tuple[int, float]],
+        pivots_low: Sequence[tuple[int, float]],
+        upper: TrendLine | None,
+        lower: TrendLine | None,
+        tolerance: float,
+    ) -> dict[str, Any]:
+        tolerance = max(tolerance, 0.0)
+        touches_top_indices: list[int] = []
+        touches_bottom_indices: list[int] = []
+
+        if upper is not None:
+            for idx, price in pivots_high:
+                if tolerance == 0.0:
+                    if math.isclose(price, upper.value_at(idx), abs_tol=1e-12):
+                        touches_top_indices.append(idx)
+                else:
+                    if abs(price - upper.value_at(idx)) <= tolerance:
+                        touches_top_indices.append(idx)
+        if lower is not None:
+            for idx, price in pivots_low:
+                if tolerance == 0.0:
+                    if math.isclose(price, lower.value_at(idx), abs_tol=1e-12):
+                        touches_bottom_indices.append(idx)
+                else:
+                    if abs(price - lower.value_at(idx)) <= tolerance:
+                        touches_bottom_indices.append(idx)
+
+        combined_indices = touches_top_indices + touches_bottom_indices
+        span_bars = 0
+        if combined_indices:
+            span_bars = max(combined_indices) - min(combined_indices)
+
+        width_start = None
+        width_end = None
+        convergence = None
+        if (
+            upper is not None
+            and lower is not None
+            and pivots_high
+            and pivots_low
+        ):
+            first_idx = min(pivots_high[0][0], pivots_low[0][0])
+            last_idx = max(pivots_high[-1][0], pivots_low[-1][0])
+            width_start = abs(upper.value_at(first_idx) - lower.value_at(first_idx))
+            width_end = abs(upper.value_at(last_idx) - lower.value_at(last_idx))
+            if width_start == 0:
+                convergence = 0.0
+            else:
+                convergence = (width_start - width_end) / width_start
+
+        parallelness = None
+        slope_top = None
+        slope_bottom = None
+        if upper is not None and lower is not None:
+            slope_top = upper.slope
+            slope_bottom = lower.slope
+            parallelness = abs(abs(slope_top) - abs(slope_bottom))
+
+        return {
+            "width_start": width_start,
+            "width_end": width_end,
+            "convergence": convergence,
+            "touches_top": len(touches_top_indices),
+            "touches_bottom": len(touches_bottom_indices),
+            "span_bars": span_bars,
+            "parallelness": parallelness,
+            "slope_top": slope_top,
+            "slope_bottom": slope_bottom,
+        }
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _determine_reject_reason(
+        *,
+        metrics: dict[str, Any],
+        min_touches: int,
+        min_bars: int,
+        min_convergence: float,
+    ) -> str:
+        touches_top = metrics.get("touches_top") or 0
+        touches_bottom = metrics.get("touches_bottom") or 0
+        if touches_top < min_touches or touches_bottom < min_touches:
+            return "touches_fail"
+
+        span_bars = metrics.get("span_bars")
+        if span_bars is not None and span_bars < min_bars:
+            return "min_bars_fail"
+
+        slope_top = metrics.get("slope_top")
+        slope_bottom = metrics.get("slope_bottom")
+        parallelness = metrics.get("parallelness")
+        if (
+            slope_top is not None
+            and slope_bottom is not None
+            and slope_top * slope_bottom > 0
+            and parallelness is not None
+        ):
+            slope_ref = max(abs(slope_top), abs(slope_bottom))
+            threshold = max(slope_ref * 0.05, 1e-6)
+            if parallelness <= threshold:
+                return "parallel_channel"
+
+        convergence = metrics.get("convergence")
+        if convergence is not None and convergence < min_convergence:
+            return "convergence_fail"
+
+        return "convergence_fail"
+
+    # ------------------------------------------------------------------
+    def _emit_wedge_eval_log(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        atr: float,
+        tol_mult: float,
+        tol_price: float,
+        pivot_window_high: int,
+        pivot_window_low: int,
+        min_convergence: float,
+        min_touches: int,
+        min_bars: int,
+        order_ttl_bars: int,
+        metrics: dict[str, Any],
+        decision: str,
+        reason: str,
+    ) -> None:
+        payload = {
+            "stage": "wedge_eval",
+            "symbol": symbol,
+            "interval": interval,
+            "atr": atr,
+            "tol_mult": tol_mult,
+            "tol_price": tol_price,
+            "pivot_window_high": pivot_window_high,
+            "pivot_window_low": pivot_window_low,
+            "min_convergence": min_convergence,
+            "convergence": metrics.get("convergence"),
+            "width_start": metrics.get("width_start"),
+            "width_end": metrics.get("width_end"),
+            "slope_top": metrics.get("slope_top"),
+            "slope_bottom": metrics.get("slope_bottom"),
+            "parallelness": metrics.get("parallelness"),
+            "min_touches_per_side": min_touches,
+            "touches_top": metrics.get("touches_top"),
+            "touches_bottom": metrics.get("touches_bottom"),
+            "min_bars": min_bars,
+            "span_bars": metrics.get("span_bars"),
+            "order_ttl_bars": order_ttl_bars,
+            "decision": decision,
+            "reason": reason,
+            "ts": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        }
+        logger.info(json.dumps(payload, separators=(",", ":")))
 
     # ------------------------------------------------------------------
     @staticmethod
