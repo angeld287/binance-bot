@@ -38,13 +38,5 @@
   "MIN_NOTIONAL_BUFFER_PCT": {
     "default": 0.03,
     "description": "Extra percentage buffer applied over the exchange min notional."
-  },
-  "S3_BUCKET_TP": {
-    "default": null,
-    "description": "Alias for the S3 bucket used to persist take-profit data (shared with WedgeFormation)."
-  },
-  "S3_KEY_PREFIX_TP": {
-    "default": null,
-    "description": "Alias for the S3 key prefix leveraged by both WedgeFormation and ParallelChannelFormation."
   }
 }
