@@ -4,12 +4,14 @@ from .breakout import BreakoutStrategy
 from .breakout_dual_tf import BreakoutDualTFStrategy, factory as BreakoutDualTFFactory
 from .liquidity_sweep import LiquiditySweepStrategy
 from .wedge_formation import WedgeFormationStrategy
+from .ParallelChannelFormation import ParallelChannelFormationStrategy
 
 STRATEGY_REGISTRY: dict[str, type] = {}
 STRATEGY_REGISTRY["breakout"] = BreakoutStrategy
 STRATEGY_REGISTRY["breakout_dual_tf"] = BreakoutDualTFStrategy
 STRATEGY_REGISTRY["liquidity-sweep"] = LiquiditySweepStrategy
 STRATEGY_REGISTRY["wedge-formation"] = WedgeFormationStrategy
+STRATEGY_REGISTRY["ParallelChannelFormation"] = ParallelChannelFormationStrategy
 
 __all__ = [
     "STRATEGY_REGISTRY",
@@ -18,4 +20,5 @@ __all__ = [
     "BreakoutDualTFFactory",
     "LiquiditySweepStrategy",
     "WedgeFormationStrategy",
+    "ParallelChannelFormationStrategy",
 ]
