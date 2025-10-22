@@ -468,11 +468,21 @@ def _channel_pattern(
     metrics.update({"width_pct": gap_pct, "width_atr": width_atr})
 
     min_width_pct = thresholds.get("CHANNEL_MIN_WIDTH_PCT", env.min_vertical_gap_pct)
-    if gap_pct < float(min_width_pct or env.min_vertical_gap_pct):
+    min_width_atr = thresholds.get("CHANNEL_MIN_WIDTH_ATR")
+    min_width_pct_value = float(min_width_pct or env.min_vertical_gap_pct)
+    meets_width_pct = gap_pct >= min_width_pct_value
+    meets_width_atr = (
+        width_atr is not None
+        and min_width_atr is not None
+        and width_atr >= float(min_width_atr)
+    )
+    if not (meets_width_pct or meets_width_atr):
         reason_detail = {
             "reason": "width_below_min",
             "measured": gap_pct,
-            "min_pct": min_width_pct or env.min_vertical_gap_pct,
+            "min_pct": min_width_pct_value,
+            "measured_atr": width_atr,
+            "min_atr": float(min_width_atr) if min_width_atr is not None else None,
         }
         return None, metrics, thresholds, reason_detail
 
