@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 from decimal import Decimal
@@ -7,6 +8,7 @@ import sys
 import types
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 PROJECT_SRC = Path(__file__).resolve().parents[3]
 if str(PROJECT_SRC) not in sys.path:
@@ -236,7 +238,7 @@ def _candles() -> list[list[float]]:
 
 
 def _mock_tp_store(monkeypatch):
-    storage: dict[str, dict[str, float]] = {}
+    storage: dict[str, dict[str, Any]] = {}
 
     def fake_load(symbol: str):
         entry = storage.get(symbol)
@@ -244,11 +246,25 @@ def _mock_tp_store(monkeypatch):
             return None
         return entry.get("tp_value")
 
-    def fake_persist(symbol: str, tp_value: float, timestamp: float):
-        storage[symbol] = {"tp_value": float(tp_value), "timestamp": float(timestamp)}
+    def fake_load_entry(symbol: str):
+        entry = storage.get(symbol)
+        if not entry:
+            return None
+        return dict(entry)
+
+    def fake_persist(symbol: str, tp_value: float, timestamp: float, extra: dict | None = None):
+        payload: dict[str, Any] = {
+            "symbol": symbol,
+            "tp_value": float(tp_value),
+            "timestamp": float(timestamp),
+        }
+        if extra:
+            payload.update(extra)
+        storage[symbol] = payload
         return True
 
-    monkeypatch.setattr(channel_detector, "load_tp_value", fake_load)
+    monkeypatch.setattr(channel_detector, "load_tp_value", fake_load, raising=False)
+    monkeypatch.setattr(channel_detector, "load_tp_entry", fake_load_entry)
     monkeypatch.setattr(channel_detector, "persist_tp_value", fake_persist)
     return storage
 
@@ -344,6 +360,138 @@ def test_detection_places_entry_and_persists_tp(monkeypatch):
     stored = store.get("BTCUSDT")
     assert stored is not None
     assert math.isclose(stored["tp_value"], result["tp1"], rel_tol=1e-9)
+
+
+def test_channel_meta_persisted(monkeypatch):
+    store = _mock_tp_store(monkeypatch)
+    exchange = FakeExchange()
+    env = _env()
+    snapshot = MarketSnapshot(
+        candles=_candles(),
+        timeframe="15m",
+        atr=1.0,
+        ema_fast=100.0,
+        ema_slow=100.0,
+        volume_avg=10.0,
+    )
+
+    result = run(
+        "BTCUSDT",
+        snapshot,
+        {"qty": 1.0},
+        env,
+        exchange=exchange,
+    )
+    assert result["action"] == "place_order"
+    stored = store.get("BTCUSDT")
+    assert stored is not None
+    meta = stored.get("channel_meta")
+    assert meta is not None
+    assert meta.get("break_logged") is False
+    assert meta.get("channel_id")
+    assert meta.get("lower_at_entry") < meta.get("upper_at_entry")
+
+
+def test_channel_break_logged_once(monkeypatch, caplog):
+    store = _mock_tp_store(monkeypatch)
+    exchange = FakeExchange()
+    env = _env()
+    base_snapshot = MarketSnapshot(
+        candles=_candles(),
+        timeframe="15m",
+        atr=1.0,
+        ema_fast=100.0,
+        ema_slow=100.0,
+        volume_avg=10.0,
+    )
+
+    run(
+        "BTCUSDT",
+        base_snapshot,
+        {"qty": 1.0},
+        env,
+        exchange=exchange,
+    )
+
+    stored = store.get("BTCUSDT")
+    assert stored is not None
+    channel_meta = stored.get("channel_meta")
+    assert channel_meta is not None
+    tolerance = float(channel_meta.get("break_tolerance", 0.0005))
+
+    lower_entry = float(channel_meta["lower_at_entry"])
+    upper_entry = float(channel_meta["upper_at_entry"])
+    side = str(channel_meta.get("side", "LONG"))
+
+    entry_price = float(channel_meta.get("entry_price", lower_entry))
+    position_amt = "1" if side.upper() == "LONG" else "-1"
+    exchange.position = {"positionAmt": position_amt, "entryPrice": str(entry_price)}
+
+    candles_break = _candles()
+    if side.upper() == "LONG":
+        break_price = lower_entry * (1 - tolerance * 5)
+        candles_break[-1][4] = break_price
+        candles_break[-1][3] = min(candles_break[-1][3], break_price)
+        candles_break[-1][2] = max(candles_break[-1][2], break_price + 1.0)
+    else:
+        break_price = upper_entry * (1 + tolerance * 5)
+        candles_break[-1][4] = break_price
+        candles_break[-1][2] = max(candles_break[-1][2], break_price)
+        candles_break[-1][3] = min(candles_break[-1][3], break_price - 1.0)
+
+    snapshot_break = MarketSnapshot(
+        candles=candles_break,
+        timeframe="15m",
+        atr=1.0,
+        ema_fast=100.0,
+        ema_slow=100.0,
+        volume_avg=10.0,
+    )
+
+    caplog.clear()
+    caplog.set_level("INFO")
+    result_monitor = run(
+        "BTCUSDT",
+        snapshot_break,
+        {"qty": 1.0},
+        env,
+        exchange=exchange,
+    )
+    assert result_monitor["action"] in {"monitor_tp", "reject", "monitoring"}
+
+    break_logs = []
+    for record in caplog.records:
+        try:
+            payload = json.loads(record.message)
+        except Exception:
+            continue
+        if payload.get("action") == "channel_break":
+            break_logs.append(payload)
+
+    assert len(break_logs) == 1
+    assert break_logs[0]["now"]["price"] == break_price
+    assert store["BTCUSDT"]["channel_meta"]["break_logged"] is True
+
+    caplog.clear()
+    caplog.set_level("INFO")
+    run(
+        "BTCUSDT",
+        snapshot_break,
+        {"qty": 1.0},
+        env,
+        exchange=exchange,
+    )
+
+    repeat_logs = []
+    for record in caplog.records:
+        try:
+            payload = json.loads(record.message)
+        except Exception:
+            continue
+        if payload.get("action") == "channel_break":
+            repeat_logs.append(payload)
+
+    assert not repeat_logs
 
 
 def test_precision_failure_bubbles_reason(monkeypatch):

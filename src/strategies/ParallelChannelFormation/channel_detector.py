@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -24,7 +25,7 @@ from strategies.wedge_formation.strategy import (
     OrderPrecisionError,
     WedgeFormationStrategy,
 )
-from utils.tp_store_s3 import load_tp_value, persist_tp_value
+from utils.tp_store_s3 import load_tp_entry, persist_tp_value
 
 from .geometry_utils import (
     Line,
@@ -49,6 +50,7 @@ LOG_CHANNEL_META = os.getenv("LOG_CHANNEL_META", "").strip().lower() in {
     "on",
 }
 CHANNEL_SLOPE_EPSILON = 1e-5
+CHANNEL_BREAK_TOLERANCE = 0.0005
 
 
 @dataclass(slots=True)
@@ -59,6 +61,116 @@ class MarketSnapshot:
     ema_fast: float | None
     ema_slow: float | None
     volume_avg: float | None
+
+
+def _timeframe_to_seconds(timeframe: str | None) -> float:
+    tf = (timeframe or "").strip().lower()
+    if not tf:
+        return 0.0
+    unit = tf[-1]
+    value_raw = tf[:-1] if unit.isalpha() else tf
+    try:
+        value = float(value_raw)
+    except (TypeError, ValueError):
+        return 0.0
+    multiplier = {
+        "s": 1,
+        "m": 60,
+        "h": 3600,
+        "d": 86400,
+        "w": 604800,
+    }.get(unit, 0)
+    if multiplier <= 0:
+        return 0.0
+    return value * multiplier
+
+
+def _build_channel_meta(
+    *,
+    symbol: str,
+    channel: Mapping[str, Any],
+    upper_line: Line,
+    lower_line: Line,
+    candles: Sequence[Sequence[float]],
+    timeframe: str | None,
+    thresholds: Mapping[str, Any] | None,
+    order_response: Mapping[str, Any] | None,
+    client_id: str,
+) -> dict[str, Any] | None:
+    if not candles:
+        return None
+
+    entry_index = len(candles) - 1
+    entry_candle_ts = float(candles[-1][0])
+    entry_ts = datetime.utcnow().timestamp()
+
+    lower_at_entry = float(lower_line.value_at(entry_index))
+    upper_at_entry = float(upper_line.value_at(entry_index))
+    slope_value = float(upper_line.slope)
+    mid_at_entry = (upper_at_entry + lower_at_entry) / 2.0
+    intercept_mid = mid_at_entry - slope_value * float(entry_index)
+    width = abs(upper_at_entry - lower_at_entry) / 2.0
+
+    pivots_high, pivots_low = find_pivots(candles)
+    combined = sorted(pivots_high + pivots_low, key=lambda item: item[0])
+    if combined:
+        anchor_start_idx = combined[0][0]
+        anchor_end_idx = combined[-1][0]
+        try:
+            anchor_start_ts = float(candles[anchor_start_idx][0])
+        except (IndexError, TypeError, ValueError):
+            anchor_start_ts = entry_candle_ts
+        try:
+            anchor_end_ts = float(candles[anchor_end_idx][0])
+        except (IndexError, TypeError, ValueError):
+            anchor_end_ts = entry_candle_ts
+    else:
+        anchor_start_ts = entry_candle_ts
+        anchor_end_ts = entry_candle_ts
+
+    channel_id_source = (
+        f"{symbol}:{anchor_start_ts}:{anchor_end_ts}:{slope_value:.8f}:{width:.8f}:{client_id}"
+    )
+    channel_id = hashlib.sha256(channel_id_source.encode()).hexdigest()[:16]
+
+    timeframe_sec = _timeframe_to_seconds(timeframe)
+    tolerance_pct = None
+    if thresholds:
+        tolerance_pct = thresholds.get("CHANNEL_TOLERANCE_PCT")
+
+    meta: dict[str, Any] = {
+        "channel_id": channel_id,
+        "side": channel.get("side"),
+        "anchor_start_ts": int(anchor_start_ts),
+        "anchor_end_ts": int(anchor_end_ts),
+        "slope": slope_value,
+        "intercept_mid": intercept_mid,
+        "width": width,
+        "lower_at_entry": lower_at_entry,
+        "upper_at_entry": upper_at_entry,
+        "entry_ts": entry_ts,
+        "entry_index": entry_index,
+        "entry_candle_ts": int(entry_candle_ts),
+        "timeframe": timeframe,
+        "timeframe_sec": timeframe_sec,
+        "break_logged": False,
+        "tolerance_pct": tolerance_pct,
+        "break_tolerance": CHANNEL_BREAK_TOLERANCE,
+    }
+
+    if isinstance(order_response, Mapping):
+        order_id = order_response.get("orderId") or order_response.get("order_id")
+        if order_id is not None:
+            meta["order_id"] = order_id
+    if client_id:
+        meta["client_order_id"] = client_id
+
+    try:
+        meta["entry_price"] = float(channel.get("entry_price", 0.0) or meta["lower_at_entry"])
+    except (TypeError, ValueError):
+        meta["entry_price"] = meta["lower_at_entry"]
+
+    return meta
 
 
 def _log(payload: Mapping[str, Any]) -> None:
@@ -145,9 +257,9 @@ def _apply_overrides(filters: SymbolFilters, env: ChannelEnv) -> SymbolFilters:
     )
 
 
-def _load_tp_entry(symbol: str) -> dict[str, Any] | None:
-    tp_value = load_tp_value(symbol)
-    if tp_value is None:
+def _load_tp_entry(symbol: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    payload = load_tp_entry(symbol)
+    if not payload:
         _log(
             {
                 "strategy": STRATEGY_NAME,
@@ -161,12 +273,37 @@ def _load_tp_entry(symbol: str) -> dict[str, Any] | None:
         )
         return None
 
-    entry = {
+    tp_raw = payload.get("tp_value")
+    try:
+        tp_value = float(tp_raw)
+    except (TypeError, ValueError):
+        _log(
+            {
+                "strategy": STRATEGY_NAME,
+                "symbol": symbol,
+                "state": "tp_store",
+                "action": "load_tp",
+                "storage_backend": "s3",
+                "result": "miss",
+                "reason": "invalid_tp_value",
+            }
+        )
+        return None
+
+    entry: dict[str, Any] = {
         "strategy": STRATEGY_NAME,
-        "tp_price": float(tp_value),
+        "tp_price": tp_value,
         "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
-        "source": "detector",
+        "source": payload.get("source", "detector"),
     }
+    if "side" in payload:
+        entry["side"] = payload["side"]
+    if "qty" in payload:
+        entry["qty"] = payload["qty"]
+    channel_meta = payload.get("channel_meta")
+    if isinstance(channel_meta, Mapping):
+        entry["channel_meta"] = channel_meta
+
     _log(
         {
             "strategy": STRATEGY_NAME,
@@ -177,7 +314,7 @@ def _load_tp_entry(symbol: str) -> dict[str, Any] | None:
             "result": "hit",
         }
     )
-    return entry
+    return entry, payload
 
 
 def _persist_tp_entry(symbol: str, payload: Mapping[str, Any]) -> None:
@@ -193,10 +330,22 @@ def _persist_tp_entry(symbol: str, payload: Mapping[str, Any]) -> None:
     else:
         ts_epoch = datetime.utcnow().timestamp()
 
+    try:
+        tp_price = float(payload.get("tp_price", 0.0))
+    except (TypeError, ValueError):
+        tp_price = 0.0
+
+    extra: dict[str, Any] = {}
+    for key in ("side", "qty", "source"):
+        value = payload.get(key)
+        if value is not None:
+            extra[key] = value
+
     persisted = persist_tp_value(
         symbol,
-        payload.get("tp_price", 0.0),
+        tp_price,
         ts_epoch,
+        extra=extra if extra else None,
     )
     _log(
         {
@@ -209,6 +358,198 @@ def _persist_tp_entry(symbol: str, payload: Mapping[str, Any]) -> None:
         }
     )
 
+
+def _persist_channel_meta(
+    symbol: str,
+    tp_entry: Mapping[str, Any],
+    channel_meta: Mapping[str, Any] | None,
+) -> None:
+    if not isinstance(channel_meta, Mapping):
+        return
+
+    existing_payload = load_tp_entry(symbol) or {}
+    extra_payload: dict[str, Any] = {
+        k: v
+        for k, v in existing_payload.items()
+        if k not in {"symbol", "tp_value", "timestamp"}
+    }
+
+    for key in ("side", "qty", "source"):
+        value = tp_entry.get(key)
+        if value is not None:
+            extra_payload[key] = value
+
+    extra_payload["channel_meta"] = dict(channel_meta)
+
+    timestamp_value = channel_meta.get("entry_ts")
+    if timestamp_value is None:
+        timestamp_value = existing_payload.get("timestamp")
+    if timestamp_value is None:
+        timestamp_value = datetime.utcnow().timestamp()
+    try:
+        timestamp_float = float(timestamp_value)
+    except (TypeError, ValueError):
+        timestamp_float = datetime.utcnow().timestamp()
+
+    tp_value = tp_entry.get("tp_price")
+    if tp_value is None:
+        tp_value = existing_payload.get("tp_value", 0.0)
+    try:
+        tp_float = float(tp_value)
+    except (TypeError, ValueError):
+        tp_float = 0.0
+
+    persist_tp_value(
+        symbol,
+        tp_float,
+        timestamp_float,
+        extra=extra_payload,
+    )
+
+
+def _maybe_log_channel_break(
+    *,
+    symbol: str,
+    side: str,
+    current_price: float | None,
+    store_payload: Mapping[str, Any],
+    position: Mapping[str, Any] | None,
+) -> None:
+    channel_meta = store_payload.get("channel_meta")
+    if not isinstance(channel_meta, Mapping):
+        return
+    if channel_meta.get("break_logged"):
+        return
+    if current_price is None:
+        return
+
+    try:
+        slope_value = float(channel_meta.get("slope", 0.0))
+        intercept_mid = float(channel_meta.get("intercept_mid", 0.0))
+        width = abs(float(channel_meta.get("width", 0.0)))
+    except (TypeError, ValueError):
+        return
+
+    try:
+        entry_index = float(channel_meta.get("entry_index", 0.0))
+    except (TypeError, ValueError):
+        entry_index = 0.0
+
+    entry_ts_raw = channel_meta.get("entry_ts")
+    timeframe_sec = channel_meta.get("timeframe_sec")
+    if timeframe_sec in (None, 0, 0.0):
+        timeframe_sec = _timeframe_to_seconds(channel_meta.get("timeframe"))
+    try:
+        timeframe_sec = float(timeframe_sec)
+    except (TypeError, ValueError):
+        timeframe_sec = 0.0
+
+    try:
+        entry_ts = float(entry_ts_raw) if entry_ts_raw is not None else None
+    except (TypeError, ValueError):
+        entry_ts = None
+
+    now_dt = datetime.utcnow()
+    now_ts = now_dt.timestamp()
+
+    bars_elapsed = 0.0
+    if entry_ts is not None and timeframe_sec and timeframe_sec > 0:
+        bars_elapsed = max((now_ts - entry_ts) / timeframe_sec, 0.0)
+
+    current_index = entry_index + bars_elapsed
+    mid_now = slope_value * current_index + intercept_mid
+    lower_now = mid_now - width
+    upper_now = mid_now + width
+
+    tolerance = channel_meta.get("break_tolerance", CHANNEL_BREAK_TOLERANCE)
+    try:
+        tolerance = abs(float(tolerance))
+    except (TypeError, ValueError):
+        tolerance = CHANNEL_BREAK_TOLERANCE
+
+    side_norm = str(side or "").upper()
+    broke_long = side_norm == "LONG" and current_price < lower_now * (1 - tolerance)
+    broke_short = side_norm == "SHORT" and current_price > upper_now * (1 + tolerance)
+    if not (broke_long or broke_short):
+        return
+
+    entry_price = None
+    if isinstance(position, Mapping):
+        try:
+            entry_price = float(position.get("entryPrice"))
+        except (TypeError, ValueError):
+            entry_price = None
+        if entry_price is None:
+            raw_entry = position.get("entry_price")
+            try:
+                entry_price = float(raw_entry)
+            except (TypeError, ValueError, AttributeError):
+                entry_price = None
+    if entry_price is None:
+        try:
+            entry_price = float(channel_meta.get("entry_price", 0.0))
+        except (TypeError, ValueError):
+            entry_price = None
+
+    position_id = None
+    if isinstance(position, Mapping):
+        position_id = position.get("positionId") or position.get("position_id")
+    if position_id is None:
+        position_id = channel_meta.get("order_id")
+
+    log_payload = {
+        "action": "channel_break",
+        "strategy": STRATEGY_NAME,
+        "symbol": symbol,
+        "position_id": position_id,
+        "side": side_norm,
+        "entry_price": entry_price,
+        "time": now_dt.isoformat(timespec="seconds"),
+        "channel": {
+            "slope": slope_value,
+            "width": width,
+            "lower_at_entry": channel_meta.get("lower_at_entry"),
+            "upper_at_entry": channel_meta.get("upper_at_entry"),
+        },
+        "now": {
+            "price": current_price,
+            "lower": lower_now,
+            "upper": upper_now,
+        },
+    }
+    _log(log_payload)
+
+    new_meta = dict(channel_meta)
+    new_meta["break_logged"] = True
+    new_meta["break_logged_at"] = now_dt.isoformat(timespec="seconds")
+
+    extra_payload: dict[str, Any] = {
+        k: v
+        for k, v in store_payload.items()
+        if k not in {"symbol", "tp_value", "timestamp"}
+    }
+    extra_payload["channel_meta"] = new_meta
+
+    timestamp_value = store_payload.get("timestamp")
+    if timestamp_value is None:
+        timestamp_value = new_meta.get("entry_ts") or now_ts
+    try:
+        timestamp_float = float(timestamp_value)
+    except (TypeError, ValueError):
+        timestamp_float = now_ts
+
+    tp_value_raw = store_payload.get("tp_value", 0.0)
+    try:
+        tp_value = float(tp_value_raw)
+    except (TypeError, ValueError):
+        tp_value = 0.0
+
+    persist_tp_value(
+        symbol,
+        tp_value,
+        timestamp_float,
+        extra=extra_payload,
+    )
 
 def _build_client_id(*parts: Any) -> str:
     raw = "_".join(str(p) for p in parts if p is not None)
@@ -638,10 +979,10 @@ def run(
     if pending:
         return {"action": "reject", "reason": "open_order_exists", "meta": {"open_orders": count}}
 
-    has_position, amt, _position_raw = _check_position(exchange, symbol)
+    has_position, amt, position_raw = _check_position(exchange, symbol)
     if has_position:
-        store_entry = _load_tp_entry(symbol)
-        if not store_entry:
+        loaded_entry = _load_tp_entry(symbol)
+        if not loaded_entry:
             _log(
                 {
                     "strategy": STRATEGY_NAME,
@@ -654,9 +995,24 @@ def run(
             )
             return {"action": "monitor_tp", "reason": "tp_not_found_in_store"}
 
+        store_entry, store_payload = loaded_entry
         store_entry = dict(store_entry)
         store_entry.setdefault("side", "LONG" if amt > 0 else "SHORT")
         store_entry.setdefault("qty", abs(amt))
+
+        current_price = None
+        if market_data.candles:
+            try:
+                current_price = float(market_data.candles[-1][4])
+            except (TypeError, ValueError):
+                current_price = None
+        _maybe_log_channel_break(
+            symbol=symbol,
+            side=store_entry.get("side", "LONG" if amt > 0 else "SHORT"),
+            current_price=current_price,
+            store_payload=store_payload,
+            position=position_raw,
+        )
 
         filters_raw = get_symbol_filters(exchange, symbol)
         filters = SymbolFilters(
@@ -901,7 +1257,7 @@ def run(
     client_id = _build_client_id("PCF", symbol, last_open_time)
 
     try:
-        exchange.place_entry_limit(
+        order_response = exchange.place_entry_limit(
             symbol=symbol,
             side="BUY" if channel["side"] == "LONG" else "SELL",
             price=float(price_final),
@@ -920,6 +1276,19 @@ def run(
             }
         )
         return {"action": "reject", "reason": "order_error"}
+
+    channel_meta = _build_channel_meta(
+        symbol=symbol,
+        channel={"side": channel["side"], "entry_price": float(price_final)},
+        upper_line=upper_line,
+        lower_line=lower_line,
+        candles=market_data.candles,
+        timeframe=market_data.timeframe,
+        thresholds=pattern_thresholds,
+        order_response=order_response,
+        client_id=client_id,
+    )
+    _persist_channel_meta(symbol, tp_entry, channel_meta)
 
     _log(
         {

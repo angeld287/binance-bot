@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Mapping
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -23,15 +23,23 @@ def _build_key(symbol: str) -> str:
     return f"{_S3_PREFIX}/{symbol_clean}.json"
 
 
-def persist_tp_value(symbol: str, tp_value: float, timestamp: int | float) -> bool:
+def persist_tp_value(
+    symbol: str,
+    tp_value: float,
+    timestamp: int | float,
+    extra: Mapping[str, Any] | None = None,
+) -> bool:
     """Persist the take-profit value for ``symbol`` in S3."""
 
     key = _build_key(symbol)
-    payload = {
+    payload: dict[str, Any] = {
         "symbol": str(symbol),
         "tp_value": float(tp_value),
         "timestamp": timestamp,
     }
+    if extra:
+        for k, v in extra.items():
+            payload[k] = v
 
     body = json.dumps(payload).encode("utf-8")
     client = boto3.client("s3")
@@ -51,13 +59,48 @@ def persist_tp_value(symbol: str, tp_value: float, timestamp: int | float) -> bo
 
     logger.info(
         "tp_s3_persist.success %s",
-        {"bucket": _S3_BUCKET, "key": key, "tp_value": payload["tp_value"]},
+        {
+            "bucket": _S3_BUCKET,
+            "key": key,
+            "tp_value": payload["tp_value"],
+            "extra_keys": sorted(set(payload.keys()) - {"symbol", "tp_value", "timestamp"}),
+        },
     )
     return True
 
 
 def load_tp_value(symbol: str) -> float | None:
     """Load a previously persisted take-profit value for ``symbol`` from S3."""
+
+    payload = load_tp_entry(symbol)
+    if payload is None:
+        return None
+
+    value = payload.get("tp_value")
+    if value is None:
+        logger.info(
+            "tp_s3_load.missing %s",
+            {"bucket": _S3_BUCKET, "key": _build_key(symbol), "reason": "no_value"},
+        )
+        return None
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logger.info(
+            "tp_s3_load.missing %s",
+            {
+                "bucket": _S3_BUCKET,
+                "key": _build_key(symbol),
+                "reason": "invalid_value",
+                "value": value,
+            },
+        )
+        return None
+
+
+def load_tp_entry(symbol: str) -> dict[str, Any] | None:
+    """Load the raw TP entry payload for ``symbol`` from S3."""
 
     key = _build_key(symbol)
     client = boto3.client("s3")
@@ -101,28 +144,18 @@ def load_tp_value(symbol: str) -> float | None:
         )
         return None
 
-    value = data.get("tp_value") if isinstance(data, dict) else None
-    if value is None:
+    if not isinstance(data, dict):
         logger.info(
             "tp_s3_load.missing %s",
-            {"bucket": _S3_BUCKET, "key": key, "reason": "no_value"},
-        )
-        return None
-
-    try:
-        tp_value = float(value)
-    except (TypeError, ValueError):
-        logger.info(
-            "tp_s3_load.missing %s",
-            {"bucket": _S3_BUCKET, "key": key, "reason": "invalid_value", "value": value},
+            {"bucket": _S3_BUCKET, "key": key, "reason": "invalid_payload"},
         )
         return None
 
     logger.info(
         "tp_s3_load.success %s",
-        {"bucket": _S3_BUCKET, "key": key, "tp_value": tp_value},
+        {"bucket": _S3_BUCKET, "key": key, "fields": sorted(data.keys())},
     )
-    return tp_value
+    return data
 
 
-__all__ = ["persist_tp_value", "load_tp_value"]
+__all__ = ["persist_tp_value", "load_tp_value", "load_tp_entry"]
