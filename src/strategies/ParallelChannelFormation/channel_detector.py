@@ -42,6 +42,14 @@ logger = logging.getLogger("bot.strategy.parallel_channel")
 
 STRATEGY_NAME = "ParallelChannelFormation"
 
+LOG_CHANNEL_META = os.getenv("LOG_CHANNEL_META", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CHANNEL_SLOPE_EPSILON = 1e-5
+
 
 @dataclass(slots=True)
 class MarketSnapshot:
@@ -750,6 +758,31 @@ def run(
 
     channel = compute_channel_entry_tp(market_data.candles, lines=lines, snapshot=market_data)
 
+    last_idx = len(market_data.candles) - 1
+    last_close = float(market_data.candles[-1][4]) if market_data.candles else 0.0
+    upper_line, lower_line = lines
+    lower_val = lower_line.value_at(last_idx) if market_data.candles else 0.0
+    upper_val = upper_line.value_at(last_idx) if market_data.candles else 0.0
+    distance_to_lower = abs(last_close - lower_val)
+    distance_to_upper = abs(upper_val - last_close)
+    slope_value = float(upper_line.slope)
+    if slope_value > CHANNEL_SLOPE_EPSILON:
+        channel_direction = "bullish"
+    elif slope_value < -CHANNEL_SLOPE_EPSILON:
+        channel_direction = "bearish"
+    else:
+        channel_direction = "flat"
+    if channel["side"] == "LONG":
+        edge = "bottom"
+        distance_to_edge = distance_to_lower
+    else:
+        edge = "top"
+        distance_to_edge = distance_to_upper
+    distance_to_edge_pct = None
+    if last_close:
+        distance_to_edge_pct = distance_to_edge / abs(last_close)
+    width_pct = pattern_metrics.get("width_pct")
+
     last_candle = market_data.candles[-1] if market_data.candles else None
     ohlc_meta = {}
     if last_candle:
@@ -772,6 +805,30 @@ def run(
         meta={**(indicators or {}), **ohlc_meta},
         side=channel.get("side"),
     )
+    if LOG_CHANNEL_META:
+        rr_value = channel.get("rr")
+        ema_ok = filter_reason != "ema_filter"
+        if filters_result:
+            ema_ok = True
+        log_payload = {
+            "strategy": STRATEGY_NAME,
+            "symbol": symbol,
+            "state": "signal_eval",
+            "channel": {
+                "slope": float(slope_value),
+                "direction": channel_direction,
+                "width_pct": float(width_pct) if width_pct is not None else None,
+            },
+            "edge": edge,
+            "distance_to_edge_pct": float(distance_to_edge_pct) if distance_to_edge_pct is not None else None,
+            "filters": {
+                "ema_ok": bool(ema_ok),
+                "rr": float(rr_value) if rr_value is not None else None,
+                "rr_min": float(env.confidence_threshold) if env.confidence_threshold is not None else None,
+            },
+            "side_decision": channel.get("side"),
+        }
+        _log(log_payload)
     if not filters_result:
         _log(
             {
