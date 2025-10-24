@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -390,6 +390,20 @@ def test_channel_meta_persisted(monkeypatch):
     assert meta.get("break_logged") is False
     assert meta.get("channel_id")
     assert meta.get("lower_at_entry") < meta.get("upper_at_entry")
+    assert meta.get("anchor_start_hm")
+    assert meta.get("anchor_end_hm")
+
+    utc_minus_four = timezone(timedelta(hours=-4))
+    start_seconds = float(meta.get("anchor_start_ts", 0))
+    end_seconds = float(meta.get("anchor_end_ts", 0))
+    if start_seconds > 10**10:
+        start_seconds /= 1000.0
+    if end_seconds > 10**10:
+        end_seconds /= 1000.0
+    expected_start = datetime.fromtimestamp(start_seconds, tz=utc_minus_four).strftime("%H:%M")
+    expected_end = datetime.fromtimestamp(end_seconds, tz=utc_minus_four).strftime("%H:%M")
+    assert meta.get("anchor_start_hm") == expected_start
+    assert meta.get("anchor_end_hm") == expected_end
 
 
 def test_channel_break_logged_once(monkeypatch, caplog):

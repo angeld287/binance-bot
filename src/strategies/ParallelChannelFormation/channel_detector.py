@@ -8,7 +8,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
@@ -52,6 +52,8 @@ LOG_CHANNEL_META = os.getenv("LOG_CHANNEL_META", "").strip().lower() in {
 CHANNEL_SLOPE_EPSILON = 1e-5
 CHANNEL_BREAK_TOLERANCE = 0.0005
 
+UTC_MINUS_FOUR = timezone(timedelta(hours=-4))
+
 
 @dataclass(slots=True)
 class MarketSnapshot:
@@ -83,6 +85,24 @@ def _timeframe_to_seconds(timeframe: str | None) -> float:
     if multiplier <= 0:
         return 0.0
     return value * multiplier
+
+
+def _format_anchor_hm(timestamp_raw: Any) -> str:
+    try:
+        timestamp_value = float(timestamp_raw)
+    except (TypeError, ValueError):
+        return ""
+
+    if math.isnan(timestamp_value):  # type: ignore[arg-type]
+        return ""
+
+    # Handle both millisecond and second precision inputs gracefully.
+    seconds = timestamp_value / 1000.0 if timestamp_value > 10**10 else timestamp_value
+    try:
+        dt_value = datetime.fromtimestamp(seconds, tz=UTC_MINUS_FOUR)
+    except (OverflowError, OSError, ValueError):
+        return ""
+    return dt_value.strftime("%H:%M")
 
 
 def _build_channel_meta(
@@ -143,6 +163,8 @@ def _build_channel_meta(
         "side": channel.get("side"),
         "anchor_start_ts": int(anchor_start_ts),
         "anchor_end_ts": int(anchor_end_ts),
+        "anchor_start_hm": _format_anchor_hm(anchor_start_ts),
+        "anchor_end_hm": _format_anchor_hm(anchor_end_ts),
         "slope": slope_value,
         "intercept_mid": intercept_mid,
         "width": width,
