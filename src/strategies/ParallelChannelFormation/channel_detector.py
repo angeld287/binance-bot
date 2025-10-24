@@ -32,7 +32,6 @@ from .geometry_utils import (
     are_parallel,
     find_pivots,
     fit_line,
-    has_min_duration,
     has_min_touches,
     vertical_gap_pct,
 )
@@ -777,6 +776,26 @@ def _channel_pattern(
         else 0
     )
 
+    timeframe_bounds_table: dict[str, tuple[int, int]] = {
+        "1m": (20, 60),
+        "5m": (30, 100),
+        "15m": (40, 150),
+    }
+    fallback_min_bars = int(env.min_duration_bars)
+    fallback_max_bars = fallback_min_bars * 4
+    timeframe_raw = (snapshot.timeframe or "").strip().lower()
+    timeframe_key = timeframe_raw
+    bounds = timeframe_bounds_table.get(timeframe_key)
+    if bounds is None:
+        timeframe_seconds_map = {60: "1m", 300: "5m", 900: "15m"}
+        timeframe_seconds = int(_timeframe_to_seconds(timeframe_raw) or 0)
+        alias = timeframe_seconds_map.get(timeframe_seconds)
+        if alias is not None:
+            bounds = timeframe_bounds_table.get(alias)
+    if bounds is None:
+        bounds = (fallback_min_bars, fallback_max_bars)
+    min_duration_bars, max_duration_bars = bounds
+
     last_close = float(candles[-1][4]) if candles else 0.0
     atr_value = float(snapshot.atr or 0.0)
 
@@ -795,6 +814,7 @@ def _channel_pattern(
         "tick_size": env.price_tick_override,
         "price": last_close,
     }
+    metrics.update({"min_bars": min_duration_bars, "max_bars": max_duration_bars})
 
     reason_detail: dict[str, Any] | None = None
 
@@ -884,12 +904,22 @@ def _channel_pattern(
         }
         return None, metrics, thresholds, reason_detail
 
-    min_bars = thresholds.get("CHANNEL_MIN_BARS", env.min_duration_bars)
-    if not has_min_duration(pivots_high + pivots_low, min_bars=env.min_duration_bars):
+    has_min_duration_span = bars_span >= min_duration_bars
+    has_max_duration_span = bars_span <= max_duration_bars
+    if not has_min_duration_span:
         reason_detail = {
             "reason": "bars_span_below_min",
             "measured": bars_span,
-            "min_bars": min_bars,
+            "min_bars": min_duration_bars,
+            "max_bars": max_duration_bars,
+        }
+        return None, metrics, thresholds, reason_detail
+    if not has_max_duration_span:
+        reason_detail = {
+            "reason": "bars_span_above_max",
+            "measured": bars_span,
+            "min_bars": min_duration_bars,
+            "max_bars": max_duration_bars,
         }
         return None, metrics, thresholds, reason_detail
 
