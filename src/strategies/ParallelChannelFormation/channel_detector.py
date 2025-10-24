@@ -412,6 +412,7 @@ def _maybe_log_channel_break(
     symbol: str,
     side: str,
     current_price: float | None,
+    candle_close: float | None = None,
     store_payload: Mapping[str, Any],
     position: Mapping[str, Any] | None,
 ) -> None:
@@ -420,7 +421,8 @@ def _maybe_log_channel_break(
         return
     if channel_meta.get("break_logged"):
         return
-    if current_price is None:
+    price_reference = candle_close if candle_close is not None else current_price
+    if price_reference is None:
         return
 
     try:
@@ -468,8 +470,8 @@ def _maybe_log_channel_break(
         tolerance = CHANNEL_BREAK_TOLERANCE
 
     side_norm = str(side or "").upper()
-    broke_long = side_norm == "LONG" and current_price < lower_now * (1 - tolerance)
-    broke_short = side_norm == "SHORT" and current_price > upper_now * (1 + tolerance)
+    broke_long = side_norm == "LONG" and price_reference < lower_now * (1 - tolerance)
+    broke_short = side_norm == "SHORT" and price_reference > upper_now * (1 + tolerance)
     if not (broke_long or broke_short):
         return
 
@@ -512,7 +514,7 @@ def _maybe_log_channel_break(
             "upper_at_entry": channel_meta.get("upper_at_entry"),
         },
         "now": {
-            "price": current_price,
+            "price": price_reference,
             "lower": lower_now,
             "upper": upper_now,
         },
@@ -1010,6 +1012,7 @@ def run(
             symbol=symbol,
             side=store_entry.get("side", "LONG" if amt > 0 else "SHORT"),
             current_price=current_price,
+            candle_close=current_price,
             store_payload=store_payload,
             position=position_raw,
         )
