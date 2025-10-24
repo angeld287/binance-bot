@@ -8,7 +8,7 @@ import sys
 import types
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 PROJECT_SRC = Path(__file__).resolve().parents[3]
 if str(PROJECT_SRC) not in sys.path:
@@ -492,6 +492,67 @@ def test_channel_break_logged_once(monkeypatch, caplog):
             repeat_logs.append(payload)
 
     assert not repeat_logs
+
+
+def test_channel_break_requires_close_outside(monkeypatch):
+    captured_logs: list[dict[str, Any]] = []
+
+    def _capture(payload: Mapping[str, Any]):
+        captured_logs.append(dict(payload))
+
+    monkeypatch.setattr(channel_detector, "_log", _capture)
+
+    persisted: list[tuple[Any, ...]] = []
+
+    def _persist(*args: Any, **kwargs: Any):
+        persisted.append(args)
+
+    monkeypatch.setattr(channel_detector, "persist_tp_value", _persist)
+
+    timeframe_sec = 60.0
+    entry_ts = datetime.utcnow().timestamp() - timeframe_sec * 2
+    channel_meta = {
+        "break_logged": False,
+        "slope": 0.0,
+        "intercept_mid": 100.0,
+        "width": 5.0,
+        "entry_index": 0.0,
+        "entry_ts": entry_ts,
+        "timeframe_sec": timeframe_sec,
+        "break_tolerance": channel_detector.CHANNEL_BREAK_TOLERANCE,
+        "lower_at_entry": 95.0,
+        "upper_at_entry": 105.0,
+        "entry_price": 100.0,
+    }
+
+    store_payload: dict[str, Any] = {"channel_meta": channel_meta}
+
+    channel_detector._maybe_log_channel_break(
+        symbol="BTCUSDT",
+        side="LONG",
+        current_price=94.0,
+        candle_close=96.0,
+        store_payload=store_payload,
+        position=None,
+    )
+
+    assert not captured_logs
+    assert not persisted
+    assert channel_meta.get("break_logged") is False
+
+    channel_detector._maybe_log_channel_break(
+        symbol="BTCUSDT",
+        side="LONG",
+        current_price=94.0,
+        candle_close=94.0,
+        store_payload=store_payload,
+        position=None,
+    )
+
+    assert captured_logs
+    assert captured_logs[0]["action"] == "channel_break"
+    assert captured_logs[0]["now"]["price"] == 94.0
+    assert persisted
 
 
 def test_precision_failure_bubbles_reason(monkeypatch):
