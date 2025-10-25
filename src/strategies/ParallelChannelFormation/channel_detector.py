@@ -9,10 +9,10 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from typing import Any, Mapping, Sequence
 
-from common.precision import format_decimal, to_decimal
+from common.precision import format_decimal, round_to_step, to_decimal
 from common.utils import sanitize_client_order_id
 from core.ports.broker import BrokerPort
 from core.ports.market_data import MarketDataPort
@@ -442,6 +442,9 @@ def _maybe_log_channel_break(
     candle_close: float | None = None,
     store_payload: Mapping[str, Any],
     position: Mapping[str, Any] | None,
+    exchange: BrokerPort | None = None,
+    qty: float | None = None,
+    filters: SymbolFilters | None = None,
 ) -> None:
     channel_meta = store_payload.get("channel_meta")
     if not isinstance(channel_meta, Mapping):
@@ -526,6 +529,59 @@ def _maybe_log_channel_break(
     if position_id is None:
         position_id = channel_meta.get("order_id")
 
+    close_status: str | None = None
+    close_error: str | None = None
+    close_qty: float | None = None
+
+    qty_active: float | None = None
+    if isinstance(position, Mapping):
+        try:
+            qty_active = abs(float(position.get("positionAmt", 0.0)))
+        except (TypeError, ValueError):
+            qty_active = None
+    if (qty_active is None or qty_active <= 0) and qty is not None:
+        try:
+            qty_active = abs(float(qty))
+        except (TypeError, ValueError):
+            qty_active = None
+
+    if exchange is not None and filters is not None:
+        qty_for_close = qty_active if qty_active is not None else 0.0
+        if qty_for_close <= 0:
+            close_status = "skipped"
+            close_error = "qty_non_positive"
+        else:
+            success, error_reason, qty_used = _close_position_market(
+                exchange=exchange,
+                symbol=symbol,
+                position_side=side_norm,
+                qty=qty_for_close,
+                filters=filters,
+            )
+            close_status = "success" if success else "failed"
+            close_error = error_reason
+            close_qty = qty_used
+    elif exchange is not None and filters is None:
+        close_status = "skipped"
+        close_error = "filters_missing"
+
+    if close_status is not None:
+        close_payload: dict[str, Any] = {
+            "action": "sl_structure_close",
+            "strategy": STRATEGY_NAME,
+            "symbol": symbol,
+            "position_id": position_id,
+            "side": side_norm,
+            "reason": "channel_break",
+            "status": close_status,
+            "time": now_dt.isoformat(timespec="seconds"),
+        }
+        if close_qty is not None:
+            close_payload["qty"] = close_qty
+        if close_error:
+            close_payload["error"] = close_error
+        _log(close_payload)
+
     log_payload = {
         "action": "channel_break",
         "strategy": STRATEGY_NAME,
@@ -551,6 +607,17 @@ def _maybe_log_channel_break(
     new_meta = dict(channel_meta)
     new_meta["break_logged"] = True
     new_meta["break_logged_at"] = now_dt.isoformat(timespec="seconds")
+    if close_status is not None:
+        structure_exit: dict[str, Any] = {
+            "status": close_status,
+            "time": now_dt.isoformat(timespec="seconds"),
+            "reason": "channel_break",
+        }
+        if close_qty is not None:
+            structure_exit["qty"] = close_qty
+        if close_error:
+            structure_exit["error"] = close_error
+        new_meta["structure_exit"] = structure_exit
 
     extra_payload: dict[str, Any] = {
         k: v
@@ -634,6 +701,140 @@ def _precision_with_retry(
         attempt_qty = (guard.qty or precision.qty_adjusted) + filters.step_size
 
     raise OrderPrecisionError("ORDER_PRECISION_FAILED", last_error or "precision_failed")
+
+
+def _place_fixed_stop_loss(
+    *,
+    exchange: BrokerPort,
+    symbol: str,
+    position_side: str,
+    entry_price: float,
+    qty: Decimal,
+    filters: SymbolFilters,
+    env: ChannelEnv,
+    position_id: Any | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not env.sl_enabled:
+        return None, "sl_disabled"
+
+    pct = float(env.fixed_sl_pct)
+    if pct <= 0:
+        return None, "sl_pct_non_positive"
+
+    side_norm = str(position_side or "").upper()
+    exit_side = "SELL" if side_norm == "LONG" else "BUY"
+
+    entry_dec = to_decimal(entry_price)
+    pct_dec = Decimal(str(pct)) / Decimal("100")
+    if exit_side == "SELL":
+        target_stop = entry_dec * (Decimal("1") - pct_dec)
+    else:
+        target_stop = entry_dec * (Decimal("1") + pct_dec)
+
+    if target_stop <= 0:
+        return None, "sl_price_non_positive"
+
+    try:
+        precision = compute_order_precision(
+            price_requested=None,
+            qty_requested=qty,
+            stop_requested=target_stop,
+            side=exit_side,
+            order_type="STOP_MARKET",
+            filters=filters,
+            exchange=exchange,
+            symbol=symbol,
+        )
+    except OrderPrecisionError as exc:
+        return None, exc.reason
+
+    stop_adjusted = precision.stop_adjusted
+    qty_adjusted = precision.qty_adjusted
+    if stop_adjusted is None or qty_adjusted is None:
+        return None, "precision_missing"
+
+    guard = apply_qty_guards(
+        symbol=symbol,
+        side=exit_side,
+        order_type="STOP_MARKET",
+        price_dec=entry_dec,
+        qty_dec=qty_adjusted,
+        filters=filters,
+        allow_increase=False,
+    )
+    if not guard.success or guard.qty is None:
+        return None, guard.reason or "qty_guard_failed"
+
+    client_id = _build_client_id(
+        "PCF",
+        symbol,
+        "SL",
+        int(datetime.utcnow().timestamp()),
+    )
+
+    stop_price = float(stop_adjusted)
+    qty_value = float(guard.qty)
+
+    try:
+        exchange.place_stop_reduce_only(
+            symbol=symbol,
+            side=exit_side,
+            stopPrice=stop_price,
+            qty=qty_value,
+            clientOrderId=client_id,
+        )
+    except Exception as exc:  # pragma: no cover - network failures
+        return None, str(exc)
+
+    payload = {
+        "price": stop_price,
+        "qty": qty_value,
+        "client_order_id": client_id,
+        "position_id": position_id,
+    }
+    return payload, None
+
+
+def _close_position_market(
+    *,
+    exchange: BrokerPort,
+    symbol: str,
+    position_side: str,
+    qty: float,
+    filters: SymbolFilters,
+) -> tuple[bool, str | None, float | None]:
+    qty_value = abs(float(qty))
+    if qty_value <= 0:
+        return False, "qty_non_positive", None
+
+    qty_dec = to_decimal(qty_value)
+    step = filters.step_size
+    if step > 0:
+        qty_dec = round_to_step(qty_dec, step, rounding=ROUND_DOWN)
+        if qty_dec <= 0 and step > 0:
+            qty_dec = step
+
+    qty_final = float(qty_dec)
+    exit_side = "SELL" if str(position_side or "").upper() == "LONG" else "BUY"
+    client_id = _build_client_id(
+        "PCF",
+        symbol,
+        "EXIT",
+        int(datetime.utcnow().timestamp()),
+    )
+
+    try:
+        exchange.place_entry_market(
+            symbol=symbol,
+            side=exit_side,
+            qty=qty_final,
+            clientOrderId=client_id,
+            reduceOnly=True,
+        )
+    except Exception as exc:  # pragma: no cover - network failures
+        return False, str(exc), qty_final
+
+    return True, None, qty_final
 
 
 def place_tp_if_missing(
@@ -1076,6 +1277,21 @@ def run(
         store_entry.setdefault("side", "LONG" if amt > 0 else "SHORT")
         store_entry.setdefault("qty", abs(amt))
 
+        filters_raw = get_symbol_filters(exchange, symbol)
+        filters = SymbolFilters(
+            tick_size=to_decimal(filters_raw.tick_size),
+            step_size=to_decimal(filters_raw.step_size),
+            min_notional=to_decimal(filters_raw.min_notional),
+            min_qty=to_decimal(filters_raw.min_qty),
+        )
+        filters = _apply_overrides(filters, env)
+
+        qty_target = store_entry.get("qty")
+        try:
+            qty_value = float(qty_target) if qty_target is not None else abs(amt)
+        except (TypeError, ValueError):
+            qty_value = abs(amt)
+
         current_price = None
         if market_data.candles:
             try:
@@ -1089,16 +1305,10 @@ def run(
             candle_close=current_price,
             store_payload=store_payload,
             position=position_raw,
+            exchange=exchange,
+            qty=qty_value,
+            filters=filters,
         )
-
-        filters_raw = get_symbol_filters(exchange, symbol)
-        filters = SymbolFilters(
-            tick_size=to_decimal(filters_raw.tick_size),
-            step_size=to_decimal(filters_raw.step_size),
-            min_notional=to_decimal(filters_raw.min_notional),
-            min_qty=to_decimal(filters_raw.min_qty),
-        )
-        filters = _apply_overrides(filters, env)
 
         tp_price = float(store_entry.get("tp_price") or 0.0)
         tp_exists = _tp_exists(open_orders, tp_price, filters)
@@ -1118,12 +1328,6 @@ def run(
                 }
             )
             return {"action": "monitor_tp", "state": "monitoring"}
-
-        qty_target = store_entry.get("qty")
-        try:
-            qty_value = float(qty_target) if qty_target is not None else abs(amt)
-        except (TypeError, ValueError):
-            qty_value = abs(amt)
 
         placed, reason, retried = place_tp_if_missing(
             exchange=exchange,
@@ -1456,6 +1660,68 @@ def run(
         order_response=order_response,
         client_id=client_id,
     )
+
+    position_id = None
+    if isinstance(channel_meta, Mapping):
+        position_id = channel_meta.get("order_id")
+    if position_id is None and isinstance(order_response, Mapping):
+        position_id = order_response.get("orderId")
+
+    sl_info, sl_error = _place_fixed_stop_loss(
+        exchange=exchange,
+        symbol=symbol,
+        position_side=channel["side"],
+        entry_price=float(price_final),
+        qty=qty_final,
+        filters=filters,
+        env=env,
+        position_id=position_id,
+    )
+
+    if channel_meta is not None:
+        channel_meta = dict(channel_meta)
+        if sl_info:
+            channel_meta["fixed_sl"] = {
+                "price": sl_info.get("price"),
+                "qty": sl_info.get("qty"),
+                "client_order_id": sl_info.get("client_order_id"),
+                "pct": float(env.fixed_sl_pct),
+            }
+        elif env.sl_enabled:
+            channel_meta.setdefault("fixed_sl", {})
+
+    now_iso = datetime.utcnow().isoformat(timespec="seconds")
+    if sl_info:
+        _log(
+            {
+                "action": "fixed_sl_set",
+                "strategy": STRATEGY_NAME,
+                "symbol": symbol,
+                "position_id": sl_info.get("position_id") or position_id,
+                "side": channel["side"],
+                "entry_price": float(price_final),
+                "sl_price": sl_info.get("price"),
+                "pct": float(env.fixed_sl_pct),
+                "qty": sl_info.get("qty"),
+                "time": now_iso,
+            }
+        )
+    elif env.sl_enabled:
+        action = "fixed_sl_skipped" if sl_error in {"sl_disabled", "sl_pct_non_positive"} else "fixed_sl_failed"
+        _log(
+            {
+                "action": action,
+                "strategy": STRATEGY_NAME,
+                "symbol": symbol,
+                "position_id": position_id,
+                "side": channel["side"],
+                "entry_price": float(price_final),
+                "pct": float(env.fixed_sl_pct),
+                "reason": sl_error,
+                "time": now_iso,
+            }
+        )
+
     _persist_channel_meta(symbol, tp_entry, channel_meta)
 
     _log(

@@ -20,6 +20,7 @@ class ChannelEnv:
     confidence_threshold: float
     tp_mode: str
     sl_enabled: bool
+    fixed_sl_pct: float
     price_tick_override: float | None
     qty_step_override: float | None
     min_notional_buffer_pct: float
@@ -89,6 +90,10 @@ def load_env(*, settings=None) -> ChannelEnv:
     buffer_pct = (
         _get_value("MIN_NOTIONAL_BUFFER_PCT", defaults=defaults, coerce=float) or 0.03
     )
+    fixed_sl_pct = (
+        _get_value("CHANNEL_FIXED_SL_PCT", defaults=defaults, coerce=float)
+        or 1.0
+    )
 
     return ChannelEnv(
         tolerance_slope=float(tol),
@@ -98,6 +103,7 @@ def load_env(*, settings=None) -> ChannelEnv:
         confidence_threshold=float(confidence),
         tp_mode=tp_mode,
         sl_enabled=bool(sl_enabled),
+        fixed_sl_pct=float(fixed_sl_pct),
         price_tick_override=float(price_override) if price_override else None,
         qty_step_override=float(qty_override) if qty_override else None,
         min_notional_buffer_pct=float(buffer_pct),

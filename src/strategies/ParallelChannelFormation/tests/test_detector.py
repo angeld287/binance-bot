@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import pytest
 from dataclasses import dataclass
 from decimal import Decimal
 import sys
@@ -95,10 +96,11 @@ if "strategies.wedge_formation.strategy" not in sys.modules:
     def compute_order_precision(**kwargs):
         price = kwargs.get("price_requested")
         qty = kwargs.get("qty_requested")
+        stop = kwargs.get("stop_requested")
         return PrecisionResult(
             price_requested=price,
             qty_requested=qty,
-            stop_requested=None,
+            stop_requested=stop,
             side=kwargs.get("side", ""),
             order_type=kwargs.get("order_type", ""),
             filters=kwargs.get("filters"),
@@ -106,6 +108,7 @@ if "strategies.wedge_formation.strategy" not in sys.modules:
             symbol=kwargs.get("symbol", ""),
             price_adjusted=price,
             qty_adjusted=qty,
+            stop_adjusted=stop,
         )
 
     def apply_qty_guards(**kwargs):
@@ -186,6 +189,8 @@ class FakeExchange:
         self.position: dict | None = None
         self.tp_orders: list[dict] = []
         self.entry_orders: list[dict] = []
+        self.stop_orders: list[dict] = []
+        self.market_orders: list[dict] = []
 
     def open_orders(self, symbol: str):
         return list(self._open_orders)
@@ -216,6 +221,36 @@ class FakeExchange:
             }
         )
         return {"status": "NEW"}
+
+    def place_stop_reduce_only(self, *, symbol: str, side: str, stopPrice: float, qty: float, clientOrderId: str):
+        self.stop_orders.append(
+            {
+                "symbol": symbol,
+                "side": side,
+                "stopPrice": stopPrice,
+                "qty": qty,
+                "clientOrderId": clientOrderId,
+            }
+        )
+        return {"status": "NEW"}
+
+    def place_entry_market(self, *, symbol: str, side: str, qty: float, clientOrderId: str, reduceOnly: bool = False):
+        self.market_orders.append(
+            {
+                "symbol": symbol,
+                "side": side,
+                "qty": qty,
+                "clientOrderId": clientOrderId,
+                "reduceOnly": reduceOnly,
+            }
+        )
+        return {"status": "FILLED"}
+
+    def round_price_to_tick(self, symbol: str, price: float) -> float:
+        return price
+
+    def round_qty_to_step(self, symbol: str, qty: float) -> float:
+        return qty
 
     def get_symbol_filters(self, symbol: str):
         return {
@@ -277,7 +312,8 @@ def _env() -> ChannelEnv:
         min_duration_bars=0,
         confidence_threshold=0.0,
         tp_mode="opuesto_inmediato",
-        sl_enabled=False,
+        sl_enabled=True,
+        fixed_sl_pct=1.0,
         price_tick_override=None,
         qty_step_override=None,
         min_notional_buffer_pct=0.0,
@@ -357,6 +393,7 @@ def test_detection_places_entry_and_persists_tp(monkeypatch):
     )
     assert result["action"] == "place_order"
     assert exchange.entry_orders
+    assert exchange.stop_orders
     stored = store.get("BTCUSDT")
     assert stored is not None
     assert math.isclose(stored["tp_value"], result["tp1"], rel_tol=1e-9)
@@ -392,6 +429,10 @@ def test_channel_meta_persisted(monkeypatch):
     assert meta.get("lower_at_entry") < meta.get("upper_at_entry")
     assert meta.get("anchor_start_hm")
     assert meta.get("anchor_end_hm")
+    fixed_sl_meta = meta.get("fixed_sl")
+    assert isinstance(fixed_sl_meta, dict)
+    assert fixed_sl_meta.get("price")
+    assert fixed_sl_meta.get("pct") == pytest.approx(1.0)
 
     utc_minus_four = timezone(timedelta(hours=-4))
     start_seconds = float(meta.get("anchor_start_ts", 0))
@@ -473,18 +514,26 @@ def test_channel_break_logged_once(monkeypatch, caplog):
     )
     assert result_monitor["action"] in {"monitor_tp", "reject", "monitoring"}
 
+    close_logs = []
+    
     break_logs = []
     for record in caplog.records:
         try:
             payload = json.loads(record.message)
         except Exception:
             continue
-        if payload.get("action") == "channel_break":
+        action = payload.get("action")
+        if action == "channel_break":
             break_logs.append(payload)
+        if action == "sl_structure_close":
+            close_logs.append(payload)
 
     assert len(break_logs) == 1
     assert break_logs[0]["now"]["price"] == break_price
     assert store["BTCUSDT"]["channel_meta"]["break_logged"] is True
+    assert close_logs
+    assert close_logs[0]["status"] == "success"
+    assert exchange.market_orders
 
     caplog.clear()
     caplog.set_level("INFO")
@@ -497,15 +546,21 @@ def test_channel_break_logged_once(monkeypatch, caplog):
     )
 
     repeat_logs = []
+    repeat_close = []
     for record in caplog.records:
         try:
             payload = json.loads(record.message)
         except Exception:
             continue
-        if payload.get("action") == "channel_break":
+        action = payload.get("action")
+        if action == "channel_break":
             repeat_logs.append(payload)
+        if action == "sl_structure_close":
+            repeat_close.append(payload)
 
     assert not repeat_logs
+    assert not repeat_close
+    assert len(exchange.market_orders) == 1
 
 
 def test_channel_break_requires_close_outside(monkeypatch):
