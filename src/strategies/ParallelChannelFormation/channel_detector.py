@@ -25,7 +25,12 @@ from strategies.wedge_formation.strategy import (
     OrderPrecisionError,
     WedgeFormationStrategy,
 )
-from utils.tp_store_s3 import load_tp_entry, persist_tp_value
+from utils.tp_store_s3 import (
+    load_channel_record,
+    load_tp_entry,
+    persist_channel_record,
+    persist_tp_value,
+)
 
 from .geometry_utils import (
     Line,
@@ -59,6 +64,106 @@ TIMEFRAME_BOUNDS: dict[str, tuple[int, int]] = {
     "5m": (30, 100),
     "15m": (40, 150),
 }
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat(timespec="seconds")
+
+
+def _channel_trade_limit(env: ChannelEnv) -> int:
+    raw_limit = getattr(env, "max_trades_per_channel", DEFAULT_MAX_TRADES_PER_CHANNEL)
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        limit = DEFAULT_MAX_TRADES_PER_CHANNEL
+    if limit <= 0:
+        limit = DEFAULT_MAX_TRADES_PER_CHANNEL
+    return limit
+
+
+def _get_or_init_channel_trade_record(
+    *, symbol: str, channel_id: str, env: ChannelEnv
+) -> dict[str, Any]:
+    existing = load_channel_record(channel_id)
+    limit = _channel_trade_limit(env)
+    now_iso = _now_iso()
+
+    if isinstance(existing, Mapping):
+        record = dict(existing)
+        changed = False
+
+        if record.get("channel_id") != channel_id:
+            record["channel_id"] = channel_id
+            changed = True
+        if record.get("symbol") != symbol:
+            record["symbol"] = symbol
+            changed = True
+        if record.get("strategy") != STRATEGY_NAME:
+            record["strategy"] = STRATEGY_NAME
+            changed = True
+
+        try:
+            lifetime = int(record.get("lifetime_trades_opened", 0))
+        except (TypeError, ValueError):
+            lifetime = 0
+            record["lifetime_trades_opened"] = lifetime
+            changed = True
+        else:
+            record["lifetime_trades_opened"] = lifetime
+
+        if record.get("max_trades_allowed") != limit:
+            record["max_trades_allowed"] = limit
+            changed = True
+
+        if not record.get("created_at"):
+            record["created_at"] = now_iso
+            changed = True
+        if not record.get("updated_at"):
+            record["updated_at"] = now_iso
+            changed = True
+
+        if changed:
+            record["updated_at"] = now_iso
+            persist_channel_record(record)
+        return record
+
+    record = {
+        "channel_id": channel_id,
+        "symbol": symbol,
+        "strategy": STRATEGY_NAME,
+        "lifetime_trades_opened": 0,
+        "max_trades_allowed": limit,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    persist_channel_record(record)
+    return record
+
+
+def _increment_channel_trade_record(
+    *, symbol: str, channel_id: str, env: ChannelEnv
+) -> dict[str, Any]:
+    record = _get_or_init_channel_trade_record(
+        symbol=symbol, channel_id=channel_id, env=env
+    )
+    now_iso = _now_iso()
+    try:
+        lifetime = int(record.get("lifetime_trades_opened", 0))
+    except (TypeError, ValueError):
+        lifetime = 0
+    lifetime += 1
+
+    updated_record = {
+        "channel_id": channel_id,
+        "symbol": symbol,
+        "strategy": STRATEGY_NAME,
+        "lifetime_trades_opened": lifetime,
+        "max_trades_allowed": _channel_trade_limit(env),
+        "created_at": record.get("created_at") or now_iso,
+        "updated_at": now_iso,
+    }
+    persist_channel_record(updated_record)
+    return updated_record
 
 
 @dataclass(slots=True)
@@ -282,30 +387,6 @@ def _extract_channel_id(entry: Mapping[str, Any], fallback: Mapping[str, Any]) -
     if fallback_id:
         return str(fallback_id)
     return None
-
-
-def get_active_trade_count_for_channel(
-    strategy_name: str, symbol: str, channel_id: str | None
-) -> int:
-    if not channel_id:
-        return 0
-
-    payload = load_tp_entry(symbol)
-    if not isinstance(payload, Mapping):
-        return 0
-
-    count = 0
-    entries = _iter_position_entries(payload)
-    for entry in entries:
-        strategy = entry.get("strategy") or payload.get("strategy")
-        if str(strategy or "").strip() != strategy_name:
-            continue
-        entry_channel_id = _extract_channel_id(entry, payload)
-        if entry_channel_id != channel_id:
-            continue
-        if _is_position_active(entry):
-            count += 1
-    return count
 
 
 def _channel_thresholds(env: ChannelEnv) -> dict[str, float | int | None]:
@@ -1591,6 +1672,70 @@ def run(
             }
         }
 
+    last_open_time = (
+        int(candles_all[-1][0]) if candles_all else int(datetime.utcnow().timestamp())
+    )
+    client_id = _build_client_id("PCF", symbol, last_open_time)
+
+    channel_meta_initial = _build_channel_meta(
+        symbol=symbol,
+        channel={
+            "side": channel["side"],
+            "entry_price": float(channel.get("entry_price", 0.0)),
+        },
+        upper_line=upper_line,
+        lower_line=lower_line,
+        candles=selected_candles,
+        timeframe=market_data.timeframe,
+        thresholds=pattern_thresholds,
+        order_response=None,
+        client_id=client_id,
+    )
+
+    channel_id: str | None = None
+    if isinstance(channel_meta_initial, Mapping):
+        raw_channel_id = channel_meta_initial.get("channel_id")
+        if raw_channel_id:
+            channel_id = str(raw_channel_id)
+
+    channel_record: dict[str, Any] | None = None
+    if channel_id:
+        channel_record = _get_or_init_channel_trade_record(
+            symbol=symbol, channel_id=channel_id, env=env
+        )
+        limit_raw = channel_record.get("max_trades_allowed")
+        try:
+            limit_value = int(limit_raw)
+        except (TypeError, ValueError):
+            limit_value = _channel_trade_limit(env)
+        if limit_value <= 0:
+            limit_value = _channel_trade_limit(env)
+
+        lifetime_raw = channel_record.get("lifetime_trades_opened", 0)
+        try:
+            lifetime_value = int(lifetime_raw)
+        except (TypeError, ValueError):
+            lifetime_value = 0
+
+        channel_record["lifetime_trades_opened"] = lifetime_value
+        channel_record["max_trades_allowed"] = limit_value
+
+        if lifetime_value >= limit_value:
+            _log(
+                {
+                    "action": "reject",
+                    "reason": "channel_trade_quota_exhausted",
+                    "strategy": STRATEGY_NAME,
+                    "symbol": symbol,
+                    "side": channel["side"],
+                    "channel_id": channel_id,
+                    "lifetime_trades_opened": lifetime_value,
+                    "max_trades_allowed": limit_value,
+                    "time": _now_iso(),
+                }
+            )
+            return {"action": "reject", "reason": "channel_trade_quota_exhausted"}
+
     filters_result, filter_reason = channel_filters.apply_filters(
         rr=channel.get("rr"),
         confidence_threshold=env.confidence_threshold,
@@ -1720,56 +1865,6 @@ def run(
         "finalQty": format_decimal(qty_final),
     }
 
-    candles = market_data.candles
-    last_open_time = int(candles[-1][0]) if candles else int(datetime.utcnow().timestamp())
-    client_id = _build_client_id("PCF", symbol, last_open_time)
-
-    channel_meta_initial = _build_channel_meta(
-        symbol=symbol,
-        channel={"side": channel["side"], "entry_price": float(price_final)},
-        upper_line=upper_line,
-        lower_line=lower_line,
-        candles=selected_candles,
-        timeframe=market_data.timeframe,
-        thresholds=pattern_thresholds,
-        order_response=None,
-        client_id=client_id,
-    )
-
-    channel_id: str | None = None
-    if isinstance(channel_meta_initial, Mapping):
-        raw_channel_id = channel_meta_initial.get("channel_id")
-        if raw_channel_id:
-            channel_id = str(raw_channel_id)
-
-    max_trades_allowed_raw = getattr(env, "max_trades_per_channel", DEFAULT_MAX_TRADES_PER_CHANNEL)
-    try:
-        max_trades_allowed = int(max_trades_allowed_raw)
-    except (TypeError, ValueError):
-        max_trades_allowed = DEFAULT_MAX_TRADES_PER_CHANNEL
-    if max_trades_allowed <= 0:
-        max_trades_allowed = DEFAULT_MAX_TRADES_PER_CHANNEL
-
-    active_trades_in_channel = get_active_trade_count_for_channel(
-        STRATEGY_NAME, symbol, channel_id
-    )
-    if channel_id and active_trades_in_channel >= max_trades_allowed:
-        reject_time = datetime.utcnow().isoformat(timespec="seconds")
-        _log(
-            {
-                "action": "reject",
-                "reason": "max_trades_per_channel",
-                "strategy": STRATEGY_NAME,
-                "symbol": symbol,
-                "side": channel["side"],
-                "channel_id": channel_id,
-                "current_open_trades_in_channel": active_trades_in_channel,
-                "allowed": max_trades_allowed,
-                "time": reject_time,
-            }
-        )
-        return {"action": "reject", "reason": "max_trades_per_channel"}
-
     opened_at_iso = datetime.utcnow().isoformat(timespec="seconds")
     tp_entry = {
         "strategy": STRATEGY_NAME,
@@ -1809,6 +1904,7 @@ def run(
     channel_meta: Mapping[str, Any] | None
     if isinstance(channel_meta_initial, Mapping):
         channel_meta = dict(channel_meta_initial)
+        channel_meta["entry_price"] = float(price_final)
     else:
         channel_meta = _build_channel_meta(
             symbol=symbol,
@@ -1832,6 +1928,38 @@ def run(
         position_id = channel_meta.get("order_id")
     if position_id is None and isinstance(order_response, Mapping):
         position_id = order_response.get("orderId")
+
+    channel_record_after: dict[str, Any] | None = None
+    if channel_id:
+        channel_record_after = _increment_channel_trade_record(
+            symbol=symbol, channel_id=channel_id, env=env
+        )
+
+    if channel_id and channel_record_after:
+        order_identifier = position_id
+        if not order_identifier and isinstance(order_response, Mapping):
+            order_identifier = (
+                order_response.get("orderId")
+                or order_response.get("order_id")
+            )
+        if not order_identifier:
+            order_identifier = client_id
+
+        _log(
+            {
+                "action": "channel_trade_recorded",
+                "strategy": STRATEGY_NAME,
+                "symbol": symbol,
+                "side": channel["side"],
+                "channel_id": channel_id,
+                "lifetime_trades_opened": channel_record_after.get(
+                    "lifetime_trades_opened"
+                ),
+                "max_trades_allowed": channel_record_after.get("max_trades_allowed"),
+                "order_id": order_identifier,
+                "time": _now_iso(),
+            }
+        )
 
     sl_info, sl_error = _place_fixed_stop_loss(
         exchange=exchange,
