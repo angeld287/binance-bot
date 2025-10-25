@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
@@ -25,12 +24,7 @@ from strategies.wedge_formation.strategy import (
     OrderPrecisionError,
     WedgeFormationStrategy,
 )
-from utils.tp_store_s3 import (
-    load_channel_record,
-    load_tp_entry,
-    persist_channel_record,
-    persist_tp_value,
-)
+from utils.tp_store_s3 import load_symbol_channel, load_tp_entry, persist_symbol_channel, persist_tp_value
 
 from .geometry_utils import (
     Line,
@@ -57,6 +51,36 @@ CHANNEL_SLOPE_EPSILON = 1e-5
 CHANNEL_BREAK_TOLERANCE = 0.0005
 DEFAULT_MAX_TRADES_PER_CHANNEL = 1
 
+
+def _env_float(key: str, default: float) -> float:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(value):  # type: ignore[arg-type]
+        return default
+    return value
+
+
+def _env_int(key: str, default: int) -> int:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        return default
+    return value
+
+
+CHANNEL_GEOM_SLOPE_TOLERANCE = _env_float("CHANNEL_SLOPE_TOLERANCE", 0.02)
+CHANNEL_GEOM_WIDTH_TOLERANCE = _env_float("CHANNEL_WIDTH_TOLERANCE", 0.02)
+CHANNEL_GEOM_EDGE_TOLERANCE_PCT = _env_float("CHANNEL_EDGE_TOLERANCE_PCT", 0.002)
+CHANNEL_GEOM_ANCHOR_TOLERANCE_MS = _env_int("CHANNEL_ANCHOR_TOLERANCE_MS", 120_000)
+
 UTC_MINUS_FOUR = timezone(timedelta(hours=-4))
 
 TIMEFRAME_BOUNDS: dict[str, tuple[int, int]] = {
@@ -81,89 +105,131 @@ def _channel_trade_limit(env: ChannelEnv) -> int:
     return limit
 
 
-def _get_or_init_channel_trade_record(
-    *, symbol: str, channel_id: str, env: ChannelEnv
-) -> dict[str, Any]:
-    existing = load_channel_record(channel_id)
-    limit = _channel_trade_limit(env)
-    now_iso = _now_iso()
-
-    if isinstance(existing, Mapping):
-        record = dict(existing)
-        changed = False
-
-        if record.get("channel_id") != channel_id:
-            record["channel_id"] = channel_id
-            changed = True
-        if record.get("symbol") != symbol:
-            record["symbol"] = symbol
-            changed = True
-        if record.get("strategy") != STRATEGY_NAME:
-            record["strategy"] = STRATEGY_NAME
-            changed = True
-
-        try:
-            lifetime = int(record.get("lifetime_trades_opened", 0))
-        except (TypeError, ValueError):
-            lifetime = 0
-            record["lifetime_trades_opened"] = lifetime
-            changed = True
-        else:
-            record["lifetime_trades_opened"] = lifetime
-
-        if record.get("max_trades_allowed") != limit:
-            record["max_trades_allowed"] = limit
-            changed = True
-
-        if not record.get("created_at"):
-            record["created_at"] = now_iso
-            changed = True
-        if not record.get("updated_at"):
-            record["updated_at"] = now_iso
-            changed = True
-
-        if changed:
-            record["updated_at"] = now_iso
-            persist_channel_record(record)
-        return record
-
-    record = {
-        "channel_id": channel_id,
-        "symbol": symbol,
-        "strategy": STRATEGY_NAME,
-        "lifetime_trades_opened": 0,
-        "max_trades_allowed": limit,
-        "created_at": now_iso,
-        "updated_at": now_iso,
-    }
-    persist_channel_record(record)
-    return record
-
-
-def _increment_channel_trade_record(
-    *, symbol: str, channel_id: str, env: ChannelEnv
-) -> dict[str, Any]:
-    record = _get_or_init_channel_trade_record(
-        symbol=symbol, channel_id=channel_id, env=env
-    )
-    now_iso = _now_iso()
+def _coerce_int(value: Any, default: int = 0) -> int:
     try:
-        lifetime = int(record.get("lifetime_trades_opened", 0))
+        return int(value)
     except (TypeError, ValueError):
-        lifetime = 0
-    lifetime += 1
+        return default
 
-    updated_record = {
-        "channel_id": channel_id,
+
+def _coerce_float(value: Any, default: float | None = None) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(number):  # type: ignore[arg-type]
+        return default
+    return number
+
+
+def _relative_close(a: float, b: float, tolerance: float) -> bool:
+    scale = max(1.0, abs(a), abs(b))
+    return abs(a - b) <= abs(tolerance) * scale
+
+
+def _anchors_close(a: Any, b: Any, tolerance_ms: int) -> bool:
+    first = _coerce_float(a)
+    second = _coerce_float(b)
+    if first is None or second is None:
+        return False
+    return abs(first - second) <= float(abs(tolerance_ms))
+
+
+def _load_active_symbol_channel(symbol: str) -> dict[str, Any] | None:
+    stored = load_symbol_channel(symbol)
+    if isinstance(stored, Mapping):
+        return dict(stored)
+    return None
+
+
+def _persist_symbol_channel_state(symbol: str, payload: Mapping[str, Any]) -> None:
+    persist_symbol_channel(symbol, payload)
+
+
+def _normalize_channel_payload(
+    *,
+    symbol: str,
+    side: str,
+    slope: float,
+    width: float,
+    anchor_start_ts: int,
+    anchor_end_ts: int,
+    high_level: float,
+    low_level: float,
+    entry_price: float,
+    lifetime_trades_opened: int,
+    max_trades_allowed: int,
+    tp_price: float | None = None,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "symbol": symbol,
-        "strategy": STRATEGY_NAME,
-        "lifetime_trades_opened": lifetime,
-        "max_trades_allowed": _channel_trade_limit(env),
-        "created_at": record.get("created_at") or now_iso,
-        "updated_at": now_iso,
+        "side": side,
+        "slope": float(slope),
+        "width": float(width),
+        "anchor_start_ts": int(anchor_start_ts),
+        "anchor_end_ts": int(anchor_end_ts),
+        "anchor_start_hm": _format_anchor_hm(anchor_start_ts),
+        "anchor_end_hm": _format_anchor_hm(anchor_end_ts),
+        "high_level": float(high_level),
+        "low_level": float(low_level),
+        "entry_price": float(entry_price),
+        "lifetime_trades_opened": int(lifetime_trades_opened),
+        "max_trades_allowed": int(max_trades_allowed),
     }
-    persist_channel_record(updated_record)
-    return updated_record
+    if tp_price is not None:
+        payload["tp_price"] = float(tp_price)
+    if extra:
+        for key, value in extra.items():
+            if key in {"channel_id", "client_order_id"}:
+                continue
+            payload[key] = value
+    return payload
+
+
+def _is_same_channel_geometry(
+    stored: Mapping[str, Any] | None,
+    candidate: Mapping[str, Any],
+) -> bool:
+    if not stored:
+        return False
+
+    stored_slope = _coerce_float(stored.get("slope"))
+    candidate_slope = _coerce_float(candidate.get("slope"))
+    if stored_slope is None or candidate_slope is None:
+        return False
+    if not _relative_close(stored_slope, candidate_slope, CHANNEL_GEOM_SLOPE_TOLERANCE):
+        return False
+
+    stored_width = _coerce_float(stored.get("width"))
+    candidate_width = _coerce_float(candidate.get("width"))
+    if stored_width is None or candidate_width is None:
+        return False
+    if not _relative_close(stored_width, candidate_width, CHANNEL_GEOM_WIDTH_TOLERANCE):
+        return False
+
+    if not _anchors_close(
+        stored.get("anchor_start_ts"), candidate.get("anchor_start_ts"), CHANNEL_GEOM_ANCHOR_TOLERANCE_MS
+    ):
+        return False
+    if not _anchors_close(
+        stored.get("anchor_end_ts"), candidate.get("anchor_end_ts"), CHANNEL_GEOM_ANCHOR_TOLERANCE_MS
+    ):
+        return False
+
+    stored_high = _coerce_float(stored.get("high_level"))
+    stored_low = _coerce_float(stored.get("low_level"))
+    candidate_high = _coerce_float(candidate.get("high_level"))
+    candidate_low = _coerce_float(candidate.get("low_level"))
+    if None in {stored_high, stored_low, candidate_high, candidate_low}:
+        return False
+
+    if not _relative_close(stored_high, candidate_high, CHANNEL_GEOM_EDGE_TOLERANCE_PCT):
+        return False
+    if not _relative_close(stored_low, candidate_low, CHANNEL_GEOM_EDGE_TOLERANCE_PCT):
+        return False
+
+    return True
 
 
 @dataclass(slots=True)
@@ -259,18 +325,12 @@ def _build_channel_meta(
         anchor_start_ts = entry_candle_ts
         anchor_end_ts = entry_candle_ts
 
-    channel_id_source = (
-        f"{symbol}:{anchor_start_ts}:{anchor_end_ts}:{slope_value:.8f}:{width:.8f}:{client_id}"
-    )
-    channel_id = hashlib.sha256(channel_id_source.encode()).hexdigest()[:16]
-
     timeframe_sec = _timeframe_to_seconds(timeframe)
     tolerance_pct = None
     if thresholds:
         tolerance_pct = thresholds.get("CHANNEL_TOLERANCE_PCT")
 
     meta: dict[str, Any] = {
-        "channel_id": channel_id,
         "side": channel.get("side"),
         "anchor_start_ts": int(anchor_start_ts),
         "anchor_end_ts": int(anchor_end_ts),
@@ -295,8 +355,6 @@ def _build_channel_meta(
         order_id = order_response.get("orderId") or order_response.get("order_id")
         if order_id is not None:
             meta["order_id"] = order_id
-    if client_id:
-        meta["client_order_id"] = client_id
 
     try:
         meta["entry_price"] = float(channel.get("entry_price", 0.0) or meta["lower_at_entry"])
@@ -367,26 +425,6 @@ def _is_position_active(entry: Mapping[str, Any]) -> bool:
             if structure_exit.get("time") and not exit_status_norm:
                 return False
     return True
-
-
-def _extract_channel_id(entry: Mapping[str, Any], fallback: Mapping[str, Any]) -> str | None:
-    channel_id = entry.get("channel_id")
-    if channel_id:
-        return str(channel_id)
-    channel_meta = entry.get("channel_meta")
-    if isinstance(channel_meta, Mapping):
-        meta_id = channel_meta.get("channel_id")
-        if meta_id:
-            return str(meta_id)
-    fallback_meta = fallback.get("channel_meta")
-    if isinstance(fallback_meta, Mapping):
-        fallback_id = fallback_meta.get("channel_id")
-        if fallback_id:
-            return str(fallback_id)
-    fallback_id = fallback.get("channel_id")
-    if fallback_id:
-        return str(fallback_id)
-    return None
 
 
 def _channel_thresholds(env: ChannelEnv) -> dict[str, float | int | None]:
@@ -532,7 +570,6 @@ def _persist_tp_entry(symbol: str, payload: Mapping[str, Any]) -> None:
         "source",
         "status",
         "opened_at",
-        "channel_id",
         "closed_at",
     ):
         value = payload.get(key)
@@ -579,7 +616,6 @@ def _persist_channel_meta(
         "source",
         "status",
         "opened_at",
-        "channel_id",
         "closed_at",
     ):
         value = tp_entry.get(key)
@@ -805,10 +841,6 @@ def _maybe_log_channel_break(
         if k not in {"symbol", "tp_value", "timestamp"}
     }
     extra_payload["channel_meta"] = new_meta
-    channel_meta_id = new_meta.get("channel_id")
-    if channel_meta_id is not None:
-        extra_payload["channel_id"] = channel_meta_id
-
     if close_status == "success":
         extra_payload["status"] = "CLOSED"
         extra_payload["closed_at"] = now_dt.isoformat(timespec="seconds")
@@ -1692,49 +1724,112 @@ def run(
         client_id=client_id,
     )
 
-    channel_id: str | None = None
+    max_trades_allowed = _channel_trade_limit(env)
+    stored_channel = _load_active_symbol_channel(symbol)
+    channel_state_payload: dict[str, Any] | None = None
+    channel_state_same_geometry = False
+    lifetime_trades = 0
+    channel_limit_active = max_trades_allowed
+
     if isinstance(channel_meta_initial, Mapping):
-        raw_channel_id = channel_meta_initial.get("channel_id")
-        if raw_channel_id:
-            channel_id = str(raw_channel_id)
-
-    channel_record: dict[str, Any] | None = None
-    if channel_id:
-        channel_record = _get_or_init_channel_trade_record(
-            symbol=symbol, channel_id=channel_id, env=env
-        )
-        limit_raw = channel_record.get("max_trades_allowed")
-        try:
-            limit_value = int(limit_raw)
-        except (TypeError, ValueError):
-            limit_value = _channel_trade_limit(env)
-        if limit_value <= 0:
-            limit_value = _channel_trade_limit(env)
-
-        lifetime_raw = channel_record.get("lifetime_trades_opened", 0)
-        try:
-            lifetime_value = int(lifetime_raw)
-        except (TypeError, ValueError):
-            lifetime_value = 0
-
-        channel_record["lifetime_trades_opened"] = lifetime_value
-        channel_record["max_trades_allowed"] = limit_value
-
-        if lifetime_value >= limit_value:
-            _log(
-                {
-                    "action": "reject",
-                    "reason": "channel_trade_quota_exhausted",
-                    "strategy": STRATEGY_NAME,
-                    "symbol": symbol,
-                    "side": channel["side"],
-                    "channel_id": channel_id,
-                    "lifetime_trades_opened": lifetime_value,
-                    "max_trades_allowed": limit_value,
-                    "time": _now_iso(),
-                }
+        extra_fields = {
+            key: channel_meta_initial[key]
+            for key in (
+                "intercept_mid",
+                "entry_ts",
+                "entry_index",
+                "entry_candle_ts",
+                "timeframe",
+                "timeframe_sec",
+                "break_logged",
+                "tolerance_pct",
+                "break_tolerance",
+                "lower_at_entry",
+                "upper_at_entry",
             )
-            return {"action": "reject", "reason": "channel_trade_quota_exhausted"}
+            if key in channel_meta_initial
+        }
+        normalized_payload = _normalize_channel_payload(
+            symbol=symbol,
+            side=str(channel.get("side", "")),
+            slope=_coerce_float(channel_meta_initial.get("slope"), slope_value) or slope_value,
+            width=_coerce_float(channel_meta_initial.get("width"), 0.0) or 0.0,
+            anchor_start_ts=int(channel_meta_initial.get("anchor_start_ts", 0)),
+            anchor_end_ts=int(channel_meta_initial.get("anchor_end_ts", 0)),
+            high_level=_coerce_float(
+                channel_meta_initial.get("upper_at_entry"), upper_val
+            )
+            or upper_val,
+            low_level=_coerce_float(
+                channel_meta_initial.get("lower_at_entry"), lower_val
+            )
+            or lower_val,
+            entry_price=_coerce_float(
+                channel_meta_initial.get("entry_price"), channel.get("entry_price")
+            )
+            or float(channel.get("entry_price", lower_val)),
+            lifetime_trades_opened=0,
+            max_trades_allowed=max_trades_allowed,
+            tp_price=_coerce_float(channel.get("tp_price")),
+            extra=extra_fields,
+        )
+    else:
+        normalized_payload = _normalize_channel_payload(
+            symbol=symbol,
+            side=str(channel.get("side", "")),
+            slope=slope_value,
+            width=float(abs(upper_val - lower_val) / 2.0),
+            anchor_start_ts=int(selected_candles[0][0]) if selected_candles else 0,
+            anchor_end_ts=int(selected_candles[-1][0]) if selected_candles else 0,
+            high_level=float(upper_val),
+            low_level=float(lower_val),
+            entry_price=float(channel.get("entry_price", lower_val)),
+            lifetime_trades_opened=0,
+            max_trades_allowed=max_trades_allowed,
+            tp_price=_coerce_float(channel.get("tp_price")),
+            extra=None,
+        )
+
+    if normalized_payload:
+        if _is_same_channel_geometry(stored_channel, normalized_payload):
+            channel_state_same_geometry = True
+            channel_state_payload = dict(stored_channel or {})
+        else:
+            channel_state_payload = dict(normalized_payload)
+            channel_state_payload["lifetime_trades_opened"] = 0
+            channel_state_payload["max_trades_allowed"] = max_trades_allowed
+            _persist_symbol_channel_state(symbol, channel_state_payload)
+        if channel_state_payload:
+            lifetime_trades = _coerce_int(channel_state_payload.get("lifetime_trades_opened"), 0)
+            channel_limit_active = _coerce_int(
+                channel_state_payload.get("max_trades_allowed"), max_trades_allowed
+            )
+            if channel_limit_active <= 0:
+                channel_limit_active = max_trades_allowed
+            channel_state_payload["max_trades_allowed"] = channel_limit_active
+            if channel_state_same_geometry and channel_state_payload is not None:
+                if lifetime_trades >= channel_limit_active:
+                    anchors_label = (
+                        f"{channel_state_payload.get('anchor_start_hm', '')}-"
+                        f"{channel_state_payload.get('anchor_end_hm', '')}"
+                    )
+                    _log(
+                        {
+                            "action": "reject",
+                            "reason": "channel_trade_limit",
+                            "strategy": STRATEGY_NAME,
+                            "symbol": symbol,
+                            "side": channel_state_payload.get("side"),
+                            "lifetime": lifetime_trades,
+                            "max": channel_limit_active,
+                            "slope": channel_state_payload.get("slope"),
+                            "width": channel_state_payload.get("width"),
+                            "anchors": anchors_label,
+                        }
+                    )
+                    return {"action": "reject", "reason": "channel_trade_limit"}
+    else:
+        channel_state_payload = None
 
     filters_result, filter_reason = channel_filters.apply_filters(
         rr=channel.get("rr"),
@@ -1876,8 +1971,6 @@ def run(
         "status": "OPEN",
         "opened_at": opened_at_iso,
     }
-    if channel_id:
-        tp_entry["channel_id"] = channel_id
     _persist_tp_entry(symbol, tp_entry)
 
     try:
@@ -1928,38 +2021,6 @@ def run(
         position_id = channel_meta.get("order_id")
     if position_id is None and isinstance(order_response, Mapping):
         position_id = order_response.get("orderId")
-
-    channel_record_after: dict[str, Any] | None = None
-    if channel_id:
-        channel_record_after = _increment_channel_trade_record(
-            symbol=symbol, channel_id=channel_id, env=env
-        )
-
-    if channel_id and channel_record_after:
-        order_identifier = position_id
-        if not order_identifier and isinstance(order_response, Mapping):
-            order_identifier = (
-                order_response.get("orderId")
-                or order_response.get("order_id")
-            )
-        if not order_identifier:
-            order_identifier = client_id
-
-        _log(
-            {
-                "action": "channel_trade_recorded",
-                "strategy": STRATEGY_NAME,
-                "symbol": symbol,
-                "side": channel["side"],
-                "channel_id": channel_id,
-                "lifetime_trades_opened": channel_record_after.get(
-                    "lifetime_trades_opened"
-                ),
-                "max_trades_allowed": channel_record_after.get("max_trades_allowed"),
-                "order_id": order_identifier,
-                "time": _now_iso(),
-            }
-        )
 
     sl_info, sl_error = _place_fixed_stop_loss(
         exchange=exchange,
@@ -2013,6 +2074,44 @@ def run(
                 "pct": float(env.fixed_sl_pct),
                 "reason": sl_error,
                 "time": now_iso,
+            }
+        )
+
+    if channel_state_payload is not None:
+        updated_channel_state = dict(channel_state_payload)
+        updated_channel_state["entry_price"] = float(price_final)
+        updated_channel_state["lifetime_trades_opened"] = lifetime_trades + 1
+        updated_channel_state["max_trades_allowed"] = channel_limit_active
+        if sl_info:
+            updated_channel_state["fixed_sl"] = {
+                "price": sl_info.get("price"),
+                "qty": sl_info.get("qty"),
+                "client_order_id": sl_info.get("client_order_id"),
+                "pct": float(env.fixed_sl_pct),
+            }
+        elif env.sl_enabled:
+            updated_channel_state.setdefault("fixed_sl", {})
+
+        channel_state_payload = updated_channel_state
+        lifetime_after = updated_channel_state["lifetime_trades_opened"]
+        _persist_symbol_channel_state(symbol, updated_channel_state)
+
+        anchors_label = (
+            f"{updated_channel_state.get('anchor_start_hm', '')}-"
+            f"{updated_channel_state.get('anchor_end_hm', '')}"
+        )
+        _log(
+            {
+                "action": "open",
+                "reason": "channel_entry",
+                "strategy": STRATEGY_NAME,
+                "symbol": symbol,
+                "side": channel["side"],
+                "lifetime_after": lifetime_after,
+                "max": updated_channel_state.get("max_trades_allowed"),
+                "slope": updated_channel_state.get("slope"),
+                "width": updated_channel_state.get("width"),
+                "anchors": anchors_label,
             }
         )
 
