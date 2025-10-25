@@ -14,6 +14,7 @@ logger = logging.getLogger("bot.tp_store_s3")
 
 _S3_BUCKET = "trading-bot-storage-aa"
 _S3_PREFIX = "tp"
+_S3_CHANNEL_PREFIX = "channels"
 
 
 def _build_key(symbol: str) -> str:
@@ -21,6 +22,13 @@ def _build_key(symbol: str) -> str:
     if not symbol_clean:
         raise ValueError("Symbol required to build S3 key")
     return f"{_S3_PREFIX}/{symbol_clean}.json"
+
+
+def _build_channel_key(channel_id: str) -> str:
+    channel_clean = str(channel_id or "").strip()
+    if not channel_clean:
+        raise ValueError("Channel ID required to build S3 key")
+    return f"{_S3_PREFIX}/{_S3_CHANNEL_PREFIX}/{channel_clean}.json"
 
 
 def persist_tp_value(
@@ -157,5 +165,108 @@ def load_tp_entry(symbol: str) -> dict[str, Any] | None:
     )
     return data
 
+def persist_channel_record(record: Mapping[str, Any]) -> bool:
+    """Persist a channel-level trade record in S3."""
 
-__all__ = ["persist_tp_value", "load_tp_value", "load_tp_entry"]
+    channel_id = record.get("channel_id")
+    if not channel_id:
+        raise ValueError("channel_id is required to persist channel record")
+
+    key = _build_channel_key(str(channel_id))
+    payload = dict(record)
+    payload["channel_id"] = str(channel_id)
+
+    body = json.dumps(payload).encode("utf-8")
+    client = boto3.client("s3")
+    try:
+        client.put_object(
+            Bucket=_S3_BUCKET,
+            Key=key,
+            Body=body,
+            ContentType="application/json",
+        )
+    except (ClientError, BotoCoreError) as exc:
+        logger.warning(
+            "channel_record.persist.error %s",
+            {"bucket": _S3_BUCKET, "key": key, "error": str(exc)},
+        )
+        return False
+
+    logger.info(
+        "channel_record.persist.success %s",
+        {
+            "bucket": _S3_BUCKET,
+            "key": key,
+            "channel_id": payload["channel_id"],
+            "fields": sorted(payload.keys()),
+        },
+    )
+    return True
+
+
+def load_channel_record(channel_id: str) -> dict[str, Any] | None:
+    """Load a channel-level trade record from S3."""
+
+    key = _build_channel_key(channel_id)
+    client = boto3.client("s3")
+    try:
+        response = client.get_object(Bucket=_S3_BUCKET, Key=key)
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "") if hasattr(exc, "response") else ""
+        if error_code in {"NoSuchKey", "404"}:
+            logger.info(
+                "channel_record.load.missing %s",
+                {"bucket": _S3_BUCKET, "key": key, "reason": "no_object"},
+            )
+            return None
+        logger.warning(
+            "channel_record.load.error %s",
+            {"bucket": _S3_BUCKET, "key": key, "error": str(exc)},
+        )
+        return None
+    except BotoCoreError as exc:
+        logger.warning(
+            "channel_record.load.error %s",
+            {"bucket": _S3_BUCKET, "key": key, "error": str(exc)},
+        )
+        return None
+
+    body = response.get("Body")
+    if body is None:
+        logger.info(
+            "channel_record.load.missing %s",
+            {"bucket": _S3_BUCKET, "key": key, "reason": "empty_body"},
+        )
+        return None
+
+    try:
+        raw = body.read()
+        data: Any = json.loads(raw.decode("utf-8"))
+    except (ValueError, AttributeError) as exc:
+        logger.warning(
+            "channel_record.load.error %s",
+            {"bucket": _S3_BUCKET, "key": key, "error": str(exc)},
+        )
+        return None
+
+    if not isinstance(data, dict):
+        logger.info(
+            "channel_record.load.missing %s",
+            {"bucket": _S3_BUCKET, "key": key, "reason": "invalid_payload"},
+        )
+        return None
+
+    logger.info(
+        "channel_record.load.success %s",
+        {"bucket": _S3_BUCKET, "key": key, "fields": sorted(data.keys())},
+    )
+    return data
+
+
+__all__ = [
+    "persist_tp_value",
+    "load_tp_value",
+    "load_tp_entry",
+    "persist_channel_record",
+    "load_channel_record",
+]

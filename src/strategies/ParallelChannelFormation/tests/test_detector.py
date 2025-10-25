@@ -274,6 +274,7 @@ def _candles() -> list[list[float]]:
 
 def _mock_tp_store(monkeypatch):
     storage: dict[str, dict[str, Any]] = {}
+    channel_storage: dict[str, dict[str, Any]] = {}
 
     def fake_load(symbol: str):
         entry = storage.get(symbol)
@@ -298,9 +299,26 @@ def _mock_tp_store(monkeypatch):
         storage[symbol] = payload
         return True
 
+    def fake_load_channel_record(channel_id: str):
+        record = channel_storage.get(channel_id)
+        if not record:
+            return None
+        return dict(record)
+
+    def fake_persist_channel_record(record: Mapping[str, Any]):
+        channel_id = record.get("channel_id")
+        if not channel_id:
+            raise ValueError("channel_id required")
+        channel_storage[str(channel_id)] = dict(record)
+        return True
+
     monkeypatch.setattr(channel_detector, "load_tp_value", fake_load, raising=False)
     monkeypatch.setattr(channel_detector, "load_tp_entry", fake_load_entry)
     monkeypatch.setattr(channel_detector, "persist_tp_value", fake_persist)
+    monkeypatch.setattr(channel_detector, "load_channel_record", fake_load_channel_record)
+    monkeypatch.setattr(channel_detector, "persist_channel_record", fake_persist_channel_record)
+
+    storage["__channel_records__"] = channel_storage
     return storage
 
 
@@ -405,6 +423,7 @@ def test_detection_places_entry_and_persists_tp(monkeypatch):
 
 def test_channel_meta_persisted(monkeypatch):
     store = _mock_tp_store(monkeypatch)
+    channel_records = store["__channel_records__"]
     exchange = FakeExchange()
     env = _env()
     snapshot = MarketSnapshot(
@@ -451,11 +470,16 @@ def test_channel_meta_persisted(monkeypatch):
     assert meta.get("anchor_start_hm") == expected_start
     assert meta.get("anchor_end_hm") == expected_end
 
+    channel_id = stored.get("channel_id")
+    assert channel_id
+    assert channel_records[channel_id]["lifetime_trades_opened"] == 1
 
-def test_rejects_when_channel_trade_limit_reached(monkeypatch):
+
+def test_channel_trade_record_logged(monkeypatch):
     store = _mock_tp_store(monkeypatch)
+    channel_records = store["__channel_records__"]
     exchange = FakeExchange()
-    env = replace(_env(), max_trades_per_channel=1)
+    env = _env()
     snapshot = MarketSnapshot(
         candles=_candles(),
         timeframe="15m",
@@ -470,14 +494,7 @@ def test_rejects_when_channel_trade_limit_reached(monkeypatch):
     def fake_log(payload: Mapping[str, Any]) -> None:
         logged.append(dict(payload))
 
-    def fake_count(strategy: str, symbol: str, channel_id: str | None) -> int:
-        assert channel_id
-        return 1
-
     monkeypatch.setattr(channel_detector, "_log", fake_log)
-    monkeypatch.setattr(
-        channel_detector, "get_active_trade_count_for_channel", fake_count
-    )
 
     result = run(
         "BTCUSDT",
@@ -487,11 +504,75 @@ def test_rejects_when_channel_trade_limit_reached(monkeypatch):
         exchange=exchange,
     )
 
-    assert result["action"] == "reject"
-    assert result["reason"] == "max_trades_per_channel"
-    assert "BTCUSDT" not in store
-    assert not exchange.entry_orders
-    assert any(log.get("reason") == "max_trades_per_channel" for log in logged)
+    assert result["action"] == "place_order"
+    stored = store.get("BTCUSDT")
+    assert stored is not None
+    channel_id = stored.get("channel_id")
+    assert channel_id
+    record = channel_records[channel_id]
+    assert record["lifetime_trades_opened"] == 1
+
+    trade_logs = [log for log in logged if log.get("action") == "channel_trade_recorded"]
+    assert trade_logs
+    trade_log = trade_logs[0]
+    assert trade_log["channel_id"] == channel_id
+    assert trade_log["lifetime_trades_opened"] == 1
+    assert trade_log["max_trades_allowed"] == env.max_trades_per_channel
+    assert trade_log.get("order_id")
+
+
+def test_rejects_when_channel_trade_limit_reached(monkeypatch):
+    store = _mock_tp_store(monkeypatch)
+    channel_records = store["__channel_records__"]
+    exchange = FakeExchange()
+    env = replace(_env(), max_trades_per_channel=1)
+    snapshot = MarketSnapshot(
+        candles=_candles(),
+        timeframe="15m",
+        atr=1.0,
+        ema_fast=100.0,
+        ema_slow=100.0,
+        volume_avg=10.0,
+    )
+
+    first_result = run(
+        "BTCUSDT",
+        snapshot,
+        {"qty": 1.0},
+        env,
+        exchange=exchange,
+    )
+
+    assert first_result["action"] == "place_order"
+    stored_entry = store.get("BTCUSDT")
+    assert stored_entry is not None
+    channel_id = stored_entry.get("channel_id")
+    assert channel_id
+    assert channel_records[channel_id]["lifetime_trades_opened"] == 1
+
+    exchange.entry_orders.clear()
+    exchange.stop_orders.clear()
+    exchange.tp_orders.clear()
+
+    logged: list[dict[str, Any]] = []
+
+    def fake_log(payload: Mapping[str, Any]) -> None:
+        logged.append(dict(payload))
+
+    monkeypatch.setattr(channel_detector, "_log", fake_log)
+
+    second_result = run(
+        "BTCUSDT",
+        snapshot,
+        {"qty": 1.0},
+        env,
+        exchange=exchange,
+    )
+
+    assert second_result["action"] == "reject"
+    assert second_result["reason"] == "channel_trade_quota_exhausted"
+    assert channel_records[channel_id]["lifetime_trades_opened"] == 1
+    assert any(log.get("reason") == "channel_trade_quota_exhausted" for log in logged)
 
 
 def test_channel_break_logged_once(monkeypatch, caplog):
