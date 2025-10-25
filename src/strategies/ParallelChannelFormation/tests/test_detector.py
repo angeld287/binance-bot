@@ -178,7 +178,7 @@ if "strategies.breakout_dual_tf.filters.ema_distance" not in sys.modules:
     ema_module.compute_ema_distance = compute_ema_distance
     sys.modules["strategies.breakout_dual_tf.filters.ema_distance"] = ema_module
 
-from strategies.ParallelChannelFormation import channel_detector
+from strategies.ParallelChannelFormation import channel_detector, stale_pending_orders
 from strategies.ParallelChannelFormation.channel_detector import ChannelEnv, MarketSnapshot, STRATEGY_NAME, run
 from strategies.wedge_formation.strategy import OrderPrecisionError
 
@@ -191,6 +191,8 @@ class FakeExchange:
         self.entry_orders: list[dict] = []
         self.stop_orders: list[dict] = []
         self.market_orders: list[dict] = []
+        self.cancelled_orders: list[dict] = []
+        self._order_seq = 1
 
     def open_orders(self, symbol: str):
         return list(self._open_orders)
@@ -211,6 +213,8 @@ class FakeExchange:
         return {"status": "NEW"}
 
     def place_entry_limit(self, *, symbol: str, side: str, price: float, qty: float, clientOrderId: str, timeInForce: str = "GTC"):
+        order_id = self._order_seq
+        self._order_seq += 1
         self.entry_orders.append(
             {
                 "symbol": symbol,
@@ -218,6 +222,18 @@ class FakeExchange:
                 "price": price,
                 "qty": qty,
                 "clientOrderId": clientOrderId,
+                "orderId": order_id,
+            }
+        )
+        self._open_orders.append(
+            {
+                "symbol": symbol,
+                "side": side,
+                "price": price,
+                "origQty": qty,
+                "clientOrderId": clientOrderId,
+                "orderId": order_id,
+                "status": "NEW",
             }
         )
         return {"status": "NEW"}
@@ -245,6 +261,23 @@ class FakeExchange:
             }
         )
         return {"status": "FILLED"}
+
+    def cancel_order(self, *, symbol: str, orderId: int | None = None, clientOrderId: str | None = None):
+        self.cancelled_orders.append(
+            {
+                "symbol": symbol,
+                "orderId": orderId,
+                "clientOrderId": clientOrderId,
+            }
+        )
+        remaining: list[dict] = []
+        for order in self._open_orders:
+            matches_id = orderId is not None and order.get("orderId") == orderId
+            matches_client = clientOrderId and order.get("clientOrderId") == clientOrderId
+            if matches_id or matches_client:
+                continue
+            remaining.append(order)
+        self._open_orders = remaining
 
     def round_price_to_tick(self, symbol: str, price: float) -> float:
         return price
@@ -313,6 +346,8 @@ def _mock_tp_store(monkeypatch):
     monkeypatch.setattr(channel_detector, "persist_tp_value", fake_persist)
     monkeypatch.setattr(channel_detector, "load_symbol_channel", fake_load_symbol_channel)
     monkeypatch.setattr(channel_detector, "persist_symbol_channel", fake_persist_symbol_channel)
+    monkeypatch.setattr(stale_pending_orders, "load_tp_entry", fake_load_entry)
+    monkeypatch.setattr(stale_pending_orders, "persist_tp_value", fake_persist)
 
     storage["__channel_records__"] = channel_storage
     return storage
@@ -475,6 +510,71 @@ def test_channel_meta_persisted(monkeypatch):
     assert state is not None
     assert state.get("lifetime_trades_opened") == 1
 
+    pending_order = stored.get("pending_order")
+    assert isinstance(pending_order, dict)
+    assert pending_order.get("client_order_id")
+    assert pending_order.get("timeframe") == "15m"
+    assert pending_order.get("side") in {"LONG", "SHORT"}
+    assert pending_order.get("candle_index_created") == len(_candles()) - 1
+    assert stored.get("timeframe") == "15m"
+    assert stored.get("entry_price")
+
+
+def test_sweep_stale_pending_order_cancels(monkeypatch):
+    store = _mock_tp_store(monkeypatch)
+    exchange = FakeExchange()
+    env = _env()
+    snapshot = MarketSnapshot(
+        candles=_candles(),
+        timeframe="15m",
+        atr=1.0,
+        ema_fast=100.0,
+        ema_slow=100.0,
+        volume_avg=10.0,
+    )
+
+    result = run(
+        "BTCUSDT",
+        snapshot,
+        {"qty": 1.0},
+        env,
+        exchange=exchange,
+    )
+    assert result["action"] == "place_order"
+
+    stored = dict(store.get("BTCUSDT") or {})
+    pending = dict(stored.get("pending_order") or {})
+    assert pending
+
+    pending["candle_index_created"] = int(pending.get("candle_index_created", 0)) - 5
+    if pending["candle_index_created"] < 0:
+        pending["candle_index_created"] = 0
+    limit_price = float(pending.get("limit_price", 0.0)) or 100.0
+    pending["limit_price"] = limit_price
+    stored["pending_order"] = pending
+    store["BTCUSDT"] = stored
+
+    monkeypatch.setenv("MAX_WAIT_CANDLES", "3")
+    monkeypatch.setenv("MAX_DRIFT_PCT", "0.001")
+
+    current_index = pending["candle_index_created"] + 10
+    current_price = limit_price * 1.01
+
+    stale_pending_orders.sweep_stale_pending_orders(
+        exchange=exchange,
+        symbol="BTCUSDT",
+        current_price=current_price,
+        current_candle_index=current_index,
+        timeframe="15m",
+    )
+
+    assert exchange.cancelled_orders
+    updated = store.get("BTCUSDT")
+    assert updated is not None
+    assert updated.get("status") == "CANCELLED"
+    assert updated.get("cancel_reason") == "expired"
+    assert "pending_order" not in updated
+
 
 def test_channel_trade_record_logged(monkeypatch):
     store = _mock_tp_store(monkeypatch)
@@ -556,6 +656,7 @@ def test_rejects_when_channel_trade_limit_reached(monkeypatch):
     exchange.entry_orders.clear()
     exchange.stop_orders.clear()
     exchange.tp_orders.clear()
+    exchange._open_orders.clear()
 
     logged: list[dict[str, Any]] = []
 
@@ -599,6 +700,7 @@ def test_channel_break_logged_once(monkeypatch, caplog):
         exchange=exchange,
     )
 
+    exchange._open_orders.clear()
     stored = store.get("BTCUSDT")
     assert stored is not None
     channel_meta = stored.get("channel_meta")
