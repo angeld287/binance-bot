@@ -50,6 +50,7 @@ LOG_CHANNEL_META = os.getenv("LOG_CHANNEL_META", "").strip().lower() in {
 }
 CHANNEL_SLOPE_EPSILON = 1e-5
 CHANNEL_BREAK_TOLERANCE = 0.0005
+DEFAULT_MAX_TRADES_PER_CHANNEL = 1
 
 UTC_MINUS_FOUR = timezone(timedelta(hours=-4))
 
@@ -227,6 +228,86 @@ def _safe_int_env(key: str) -> int | None:
         return None
 
 
+def _iter_position_entries(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    entries: list[Mapping[str, Any]] = []
+    positions = payload.get("open_positions")
+    if isinstance(positions, Sequence) and not isinstance(positions, (str, bytes)):
+        for item in positions:
+            if isinstance(item, Mapping):
+                entries.append(item)
+    if not entries and isinstance(payload, Mapping):
+        entries.append(payload)
+    return entries
+
+
+def _is_position_active(entry: Mapping[str, Any]) -> bool:
+    status_raw = entry.get("status")
+    if status_raw is not None:
+        status_norm = str(status_raw).strip().upper()
+        if status_norm in {"CLOSED", "FILLED", "CANCELED", "CANCELLED", "STOPPED"}:
+            return False
+    is_open = entry.get("is_open")
+    if isinstance(is_open, bool) and not is_open:
+        return False
+    if entry.get("closed_at") or entry.get("closedAt"):
+        return False
+    channel_meta = entry.get("channel_meta")
+    if isinstance(channel_meta, Mapping):
+        structure_exit = channel_meta.get("structure_exit")
+        if isinstance(structure_exit, Mapping):
+            exit_status = structure_exit.get("status")
+            exit_status_norm = str(exit_status or "").strip().upper()
+            if exit_status_norm in {"SUCCESS", "FILLED", "CLOSED"}:
+                return False
+            if structure_exit.get("time") and not exit_status_norm:
+                return False
+    return True
+
+
+def _extract_channel_id(entry: Mapping[str, Any], fallback: Mapping[str, Any]) -> str | None:
+    channel_id = entry.get("channel_id")
+    if channel_id:
+        return str(channel_id)
+    channel_meta = entry.get("channel_meta")
+    if isinstance(channel_meta, Mapping):
+        meta_id = channel_meta.get("channel_id")
+        if meta_id:
+            return str(meta_id)
+    fallback_meta = fallback.get("channel_meta")
+    if isinstance(fallback_meta, Mapping):
+        fallback_id = fallback_meta.get("channel_id")
+        if fallback_id:
+            return str(fallback_id)
+    fallback_id = fallback.get("channel_id")
+    if fallback_id:
+        return str(fallback_id)
+    return None
+
+
+def get_active_trade_count_for_channel(
+    strategy_name: str, symbol: str, channel_id: str | None
+) -> int:
+    if not channel_id:
+        return 0
+
+    payload = load_tp_entry(symbol)
+    if not isinstance(payload, Mapping):
+        return 0
+
+    count = 0
+    entries = _iter_position_entries(payload)
+    for entry in entries:
+        strategy = entry.get("strategy") or payload.get("strategy")
+        if str(strategy or "").strip() != strategy_name:
+            continue
+        entry_channel_id = _extract_channel_id(entry, payload)
+        if entry_channel_id != channel_id:
+            continue
+        if _is_position_active(entry):
+            count += 1
+    return count
+
+
 def _channel_thresholds(env: ChannelEnv) -> dict[str, float | int | None]:
     min_touches = _safe_int_env("CHANNEL_MIN_TOUCHES_PER_SIDE")
     min_bars = _safe_int_env("CHANNEL_MIN_BARS")
@@ -363,7 +444,16 @@ def _persist_tp_entry(symbol: str, payload: Mapping[str, Any]) -> None:
         tp_price = 0.0
 
     extra: dict[str, Any] = {}
-    for key in ("side", "qty", "source"):
+    for key in (
+        "strategy",
+        "side",
+        "qty",
+        "source",
+        "status",
+        "opened_at",
+        "channel_id",
+        "closed_at",
+    ):
         value = payload.get(key)
         if value is not None:
             extra[key] = value
@@ -401,7 +491,16 @@ def _persist_channel_meta(
         if k not in {"symbol", "tp_value", "timestamp"}
     }
 
-    for key in ("side", "qty", "source"):
+    for key in (
+        "strategy",
+        "side",
+        "qty",
+        "source",
+        "status",
+        "opened_at",
+        "channel_id",
+        "closed_at",
+    ):
         value = tp_entry.get(key)
         if value is not None:
             extra_payload[key] = value
@@ -625,6 +724,13 @@ def _maybe_log_channel_break(
         if k not in {"symbol", "tp_value", "timestamp"}
     }
     extra_payload["channel_meta"] = new_meta
+    channel_meta_id = new_meta.get("channel_id")
+    if channel_meta_id is not None:
+        extra_payload["channel_id"] = channel_meta_id
+
+    if close_status == "success":
+        extra_payload["status"] = "CLOSED"
+        extra_payload["closed_at"] = now_dt.isoformat(timespec="seconds")
 
     timestamp_value = store_payload.get("timestamp")
     if timestamp_value is None:
@@ -1614,19 +1720,70 @@ def run(
         "finalQty": format_decimal(qty_final),
     }
 
+    candles = market_data.candles
+    last_open_time = int(candles[-1][0]) if candles else int(datetime.utcnow().timestamp())
+    client_id = _build_client_id("PCF", symbol, last_open_time)
+
+    channel_meta_initial = _build_channel_meta(
+        symbol=symbol,
+        channel={"side": channel["side"], "entry_price": float(price_final)},
+        upper_line=upper_line,
+        lower_line=lower_line,
+        candles=selected_candles,
+        timeframe=market_data.timeframe,
+        thresholds=pattern_thresholds,
+        order_response=None,
+        client_id=client_id,
+    )
+
+    channel_id: str | None = None
+    if isinstance(channel_meta_initial, Mapping):
+        raw_channel_id = channel_meta_initial.get("channel_id")
+        if raw_channel_id:
+            channel_id = str(raw_channel_id)
+
+    max_trades_allowed_raw = getattr(env, "max_trades_per_channel", DEFAULT_MAX_TRADES_PER_CHANNEL)
+    try:
+        max_trades_allowed = int(max_trades_allowed_raw)
+    except (TypeError, ValueError):
+        max_trades_allowed = DEFAULT_MAX_TRADES_PER_CHANNEL
+    if max_trades_allowed <= 0:
+        max_trades_allowed = DEFAULT_MAX_TRADES_PER_CHANNEL
+
+    active_trades_in_channel = get_active_trade_count_for_channel(
+        STRATEGY_NAME, symbol, channel_id
+    )
+    if channel_id and active_trades_in_channel >= max_trades_allowed:
+        reject_time = datetime.utcnow().isoformat(timespec="seconds")
+        _log(
+            {
+                "action": "reject",
+                "reason": "max_trades_per_channel",
+                "strategy": STRATEGY_NAME,
+                "symbol": symbol,
+                "side": channel["side"],
+                "channel_id": channel_id,
+                "current_open_trades_in_channel": active_trades_in_channel,
+                "allowed": max_trades_allowed,
+                "time": reject_time,
+            }
+        )
+        return {"action": "reject", "reason": "max_trades_per_channel"}
+
+    opened_at_iso = datetime.utcnow().isoformat(timespec="seconds")
     tp_entry = {
         "strategy": STRATEGY_NAME,
         "tp_price": channel["tp_price"],
         "side": channel["side"],
-        "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
+        "timestamp": opened_at_iso,
         "source": "detector",
         "qty": float(qty_final),
+        "status": "OPEN",
+        "opened_at": opened_at_iso,
     }
+    if channel_id:
+        tp_entry["channel_id"] = channel_id
     _persist_tp_entry(symbol, tp_entry)
-
-    candles = market_data.candles
-    last_open_time = int(candles[-1][0]) if candles else int(datetime.utcnow().timestamp())
-    client_id = _build_client_id("PCF", symbol, last_open_time)
 
     try:
         order_response = exchange.place_entry_limit(
@@ -1649,20 +1806,29 @@ def run(
         )
         return {"action": "reject", "reason": "order_error"}
 
-    channel_meta = _build_channel_meta(
-        symbol=symbol,
-        channel={"side": channel["side"], "entry_price": float(price_final)},
-        upper_line=upper_line,
-        lower_line=lower_line,
-        candles=selected_candles,
-        timeframe=market_data.timeframe,
-        thresholds=pattern_thresholds,
-        order_response=order_response,
-        client_id=client_id,
-    )
+    channel_meta: Mapping[str, Any] | None
+    if isinstance(channel_meta_initial, Mapping):
+        channel_meta = dict(channel_meta_initial)
+    else:
+        channel_meta = _build_channel_meta(
+            symbol=symbol,
+            channel={"side": channel["side"], "entry_price": float(price_final)},
+            upper_line=upper_line,
+            lower_line=lower_line,
+            candles=selected_candles,
+            timeframe=market_data.timeframe,
+            thresholds=pattern_thresholds,
+            order_response=None,
+            client_id=client_id,
+        )
+        channel_meta = dict(channel_meta) if isinstance(channel_meta, Mapping) else None
 
     position_id = None
     if isinstance(channel_meta, Mapping):
+        if isinstance(order_response, Mapping):
+            order_id = order_response.get("orderId") or order_response.get("order_id")
+            if order_id is not None:
+                channel_meta["order_id"] = order_id
         position_id = channel_meta.get("order_id")
     if position_id is None and isinstance(order_response, Mapping):
         position_id = order_response.get("orderId")

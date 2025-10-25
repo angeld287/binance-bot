@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import pytest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 import sys
 import types
@@ -317,6 +317,7 @@ def _env() -> ChannelEnv:
         price_tick_override=None,
         qty_step_override=None,
         min_notional_buffer_pct=0.0,
+        max_trades_per_channel=1,
     )
 
 
@@ -397,6 +398,9 @@ def test_detection_places_entry_and_persists_tp(monkeypatch):
     stored = store.get("BTCUSDT")
     assert stored is not None
     assert math.isclose(stored["tp_value"], result["tp1"], rel_tol=1e-9)
+    assert stored.get("status") == "OPEN"
+    assert stored.get("channel_id")
+    assert stored.get("opened_at")
 
 
 def test_channel_meta_persisted(monkeypatch):
@@ -424,6 +428,7 @@ def test_channel_meta_persisted(monkeypatch):
     assert stored is not None
     meta = stored.get("channel_meta")
     assert meta is not None
+    assert stored.get("channel_id") == meta.get("channel_id")
     assert meta.get("break_logged") is False
     assert meta.get("channel_id")
     assert meta.get("lower_at_entry") < meta.get("upper_at_entry")
@@ -445,6 +450,48 @@ def test_channel_meta_persisted(monkeypatch):
     expected_end = datetime.fromtimestamp(end_seconds, tz=utc_minus_four).strftime("%H:%M")
     assert meta.get("anchor_start_hm") == expected_start
     assert meta.get("anchor_end_hm") == expected_end
+
+
+def test_rejects_when_channel_trade_limit_reached(monkeypatch):
+    store = _mock_tp_store(monkeypatch)
+    exchange = FakeExchange()
+    env = replace(_env(), max_trades_per_channel=1)
+    snapshot = MarketSnapshot(
+        candles=_candles(),
+        timeframe="15m",
+        atr=1.0,
+        ema_fast=100.0,
+        ema_slow=100.0,
+        volume_avg=10.0,
+    )
+
+    logged: list[dict[str, Any]] = []
+
+    def fake_log(payload: Mapping[str, Any]) -> None:
+        logged.append(dict(payload))
+
+    def fake_count(strategy: str, symbol: str, channel_id: str | None) -> int:
+        assert channel_id
+        return 1
+
+    monkeypatch.setattr(channel_detector, "_log", fake_log)
+    monkeypatch.setattr(
+        channel_detector, "get_active_trade_count_for_channel", fake_count
+    )
+
+    result = run(
+        "BTCUSDT",
+        snapshot,
+        {"qty": 1.0},
+        env,
+        exchange=exchange,
+    )
+
+    assert result["action"] == "reject"
+    assert result["reason"] == "max_trades_per_channel"
+    assert "BTCUSDT" not in store
+    assert not exchange.entry_orders
+    assert any(log.get("reason") == "max_trades_per_channel" for log in logged)
 
 
 def test_channel_break_logged_once(monkeypatch, caplog):

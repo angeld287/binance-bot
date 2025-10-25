@@ -42,5 +42,9 @@
   "MIN_NOTIONAL_BUFFER_PCT": {
     "default": 0.03,
     "description": "Extra percentage buffer applied over the exchange min notional."
+  },
+  "CHANNEL_MAX_TRADES_PER_CHANNEL": {
+    "default": 1,
+    "description": "Maximum number of simultaneous trades allowed per detected channel."
   }
 }
