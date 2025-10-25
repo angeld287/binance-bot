@@ -24,6 +24,7 @@ class ChannelEnv:
     price_tick_override: float | None
     qty_step_override: float | None
     min_notional_buffer_pct: float
+    max_trades_per_channel: int
 
 
 def _load_defaults() -> MutableMapping[str, Mapping[str, object]]:
@@ -94,6 +95,15 @@ def load_env(*, settings=None) -> ChannelEnv:
         _get_value("CHANNEL_FIXED_SL_PCT", defaults=defaults, coerce=float)
         or 1.0
     )
+    max_trades_channel_raw = _get_value(
+        "CHANNEL_MAX_TRADES_PER_CHANNEL", defaults=defaults, coerce=int
+    )
+    try:
+        max_trades_channel = int(max_trades_channel_raw or 1)
+    except (TypeError, ValueError):
+        max_trades_channel = 1
+    if max_trades_channel <= 0:
+        max_trades_channel = 1
 
     return ChannelEnv(
         tolerance_slope=float(tol),
@@ -107,6 +117,7 @@ def load_env(*, settings=None) -> ChannelEnv:
         price_tick_override=float(price_override) if price_override else None,
         qty_step_override=float(qty_override) if qty_override else None,
         min_notional_buffer_pct=float(buffer_pct),
+        max_trades_per_channel=int(max_trades_channel),
     )
 
 
