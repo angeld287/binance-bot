@@ -299,24 +299,20 @@ def _mock_tp_store(monkeypatch):
         storage[symbol] = payload
         return True
 
-    def fake_load_channel_record(channel_id: str):
-        record = channel_storage.get(channel_id)
+    def fake_load_symbol_channel(symbol: str):
+        record = channel_storage.get(symbol)
         if not record:
             return None
         return dict(record)
 
-    def fake_persist_channel_record(record: Mapping[str, Any]):
-        channel_id = record.get("channel_id")
-        if not channel_id:
-            raise ValueError("channel_id required")
-        channel_storage[str(channel_id)] = dict(record)
-        return True
+    def fake_persist_symbol_channel(symbol: str, payload: Mapping[str, Any]) -> None:
+        channel_storage[str(symbol)] = dict(payload)
 
     monkeypatch.setattr(channel_detector, "load_tp_value", fake_load, raising=False)
     monkeypatch.setattr(channel_detector, "load_tp_entry", fake_load_entry)
     monkeypatch.setattr(channel_detector, "persist_tp_value", fake_persist)
-    monkeypatch.setattr(channel_detector, "load_channel_record", fake_load_channel_record)
-    monkeypatch.setattr(channel_detector, "persist_channel_record", fake_persist_channel_record)
+    monkeypatch.setattr(channel_detector, "load_symbol_channel", fake_load_symbol_channel)
+    monkeypatch.setattr(channel_detector, "persist_symbol_channel", fake_persist_symbol_channel)
 
     storage["__channel_records__"] = channel_storage
     return storage
@@ -417,8 +413,13 @@ def test_detection_places_entry_and_persists_tp(monkeypatch):
     assert stored is not None
     assert math.isclose(stored["tp_value"], result["tp1"], rel_tol=1e-9)
     assert stored.get("status") == "OPEN"
-    assert stored.get("channel_id")
     assert stored.get("opened_at")
+    channel_records = store["__channel_records__"]
+    state = channel_records.get("BTCUSDT")
+    assert state is not None
+    assert state.get("symbol") == "BTCUSDT"
+    assert state.get("lifetime_trades_opened") == 1
+    assert "channel_id" not in state
 
 
 def test_channel_meta_persisted(monkeypatch):
@@ -447,9 +448,7 @@ def test_channel_meta_persisted(monkeypatch):
     assert stored is not None
     meta = stored.get("channel_meta")
     assert meta is not None
-    assert stored.get("channel_id") == meta.get("channel_id")
     assert meta.get("break_logged") is False
-    assert meta.get("channel_id")
     assert meta.get("lower_at_entry") < meta.get("upper_at_entry")
     assert meta.get("anchor_start_hm")
     assert meta.get("anchor_end_hm")
@@ -470,9 +469,11 @@ def test_channel_meta_persisted(monkeypatch):
     assert meta.get("anchor_start_hm") == expected_start
     assert meta.get("anchor_end_hm") == expected_end
 
-    channel_id = stored.get("channel_id")
-    assert channel_id
-    assert channel_records[channel_id]["lifetime_trades_opened"] == 1
+    assert "channel_id" not in stored
+    assert "channel_id" not in meta
+    state = channel_records.get("BTCUSDT")
+    assert state is not None
+    assert state.get("lifetime_trades_opened") == 1
 
 
 def test_channel_trade_record_logged(monkeypatch):
@@ -505,20 +506,22 @@ def test_channel_trade_record_logged(monkeypatch):
     )
 
     assert result["action"] == "place_order"
-    stored = store.get("BTCUSDT")
-    assert stored is not None
-    channel_id = stored.get("channel_id")
-    assert channel_id
-    record = channel_records[channel_id]
-    assert record["lifetime_trades_opened"] == 1
+    state = channel_records.get("BTCUSDT")
+    assert state is not None
+    assert state.get("lifetime_trades_opened") == 1
 
-    trade_logs = [log for log in logged if log.get("action") == "channel_trade_recorded"]
+    trade_logs = [
+        log
+        for log in logged
+        if log.get("action") == "open" and log.get("reason") == "channel_entry"
+    ]
     assert trade_logs
     trade_log = trade_logs[0]
-    assert trade_log["channel_id"] == channel_id
-    assert trade_log["lifetime_trades_opened"] == 1
-    assert trade_log["max_trades_allowed"] == env.max_trades_per_channel
-    assert trade_log.get("order_id")
+    assert trade_log.get("symbol") == "BTCUSDT"
+    assert trade_log.get("side") == state.get("side")
+    assert trade_log.get("lifetime_after") == 1
+    assert trade_log.get("max") == env.max_trades_per_channel
+    assert "channel_id" not in trade_log
 
 
 def test_rejects_when_channel_trade_limit_reached(monkeypatch):
@@ -546,9 +549,9 @@ def test_rejects_when_channel_trade_limit_reached(monkeypatch):
     assert first_result["action"] == "place_order"
     stored_entry = store.get("BTCUSDT")
     assert stored_entry is not None
-    channel_id = stored_entry.get("channel_id")
-    assert channel_id
-    assert channel_records[channel_id]["lifetime_trades_opened"] == 1
+    state = channel_records.get("BTCUSDT")
+    assert state is not None
+    assert state.get("lifetime_trades_opened") == 1
 
     exchange.entry_orders.clear()
     exchange.stop_orders.clear()
@@ -570,9 +573,9 @@ def test_rejects_when_channel_trade_limit_reached(monkeypatch):
     )
 
     assert second_result["action"] == "reject"
-    assert second_result["reason"] == "channel_trade_quota_exhausted"
-    assert channel_records[channel_id]["lifetime_trades_opened"] == 1
-    assert any(log.get("reason") == "channel_trade_quota_exhausted" for log in logged)
+    assert second_result["reason"] == "channel_trade_limit"
+    assert channel_records["BTCUSDT"]["lifetime_trades_opened"] == 1
+    assert any(log.get("reason") == "channel_trade_limit" for log in logged)
 
 
 def test_channel_break_logged_once(monkeypatch, caplog):
