@@ -36,6 +36,7 @@ from .geometry_utils import (
 )
 from .config.env_loader import ChannelEnv, load_env
 from . import filters as channel_filters
+from .stale_pending_orders import build_pending_order_payload, sweep_stale_pending_orders
 
 logger = logging.getLogger("bot.strategy.parallel_channel")
 
@@ -571,6 +572,9 @@ def _persist_tp_entry(symbol: str, payload: Mapping[str, Any]) -> None:
         "status",
         "opened_at",
         "closed_at",
+        "entry_price",
+        "timeframe",
+        "pending_order",
     ):
         value = payload.get(key)
         if value is not None:
@@ -1471,6 +1475,23 @@ def run(
     *,
     exchange: BrokerPort,
 ) -> dict[str, Any]:
+    candles_all = list(market_data.candles or [])
+    current_price_for_sweep: float | None = None
+    if candles_all:
+        try:
+            current_price_for_sweep = float(candles_all[-1][4])
+        except (TypeError, ValueError):
+            current_price_for_sweep = None
+    current_candle_index = len(candles_all) - 1 if candles_all else None
+
+    sweep_stale_pending_orders(
+        exchange=exchange,
+        symbol=symbol,
+        current_price=current_price_for_sweep,
+        current_candle_index=current_candle_index,
+        timeframe=market_data.timeframe,
+    )
+
     pending, count, open_orders = _check_open_orders(exchange, symbol)
     if pending:
         return {"action": "reject", "reason": "open_order_exists", "meta": {"open_orders": count}}
@@ -1493,6 +1514,12 @@ def run(
 
         store_entry, store_payload = loaded_entry
         store_entry = dict(store_entry)
+        store_payload = dict(store_payload)
+        if store_payload.get("pending_order"):
+            cleaned_payload = dict(store_payload)
+            cleaned_payload.pop("pending_order", None)
+            _persist_tp_entry(symbol, cleaned_payload)
+            store_payload = cleaned_payload
         store_entry.setdefault("side", "LONG" if amt > 0 else "SHORT")
         store_entry.setdefault("qty", abs(amt))
 
@@ -1591,7 +1618,6 @@ def run(
         )
         return {"action": "reject", "reason": reason or "precision_error_on_tp"}
 
-    candles_all = list(market_data.candles or [])
     pattern_metrics: dict[str, Any] = {}
     pattern_thresholds = _channel_thresholds(env)
     pattern_reason: dict[str, Any] | None = None
@@ -1961,17 +1987,16 @@ def run(
     }
 
     opened_at_iso = datetime.utcnow().isoformat(timespec="seconds")
-    tp_entry = {
-        "strategy": STRATEGY_NAME,
-        "tp_price": channel["tp_price"],
-        "side": channel["side"],
-        "timestamp": opened_at_iso,
-        "source": "detector",
-        "qty": float(qty_final),
-        "status": "OPEN",
-        "opened_at": opened_at_iso,
-    }
-    _persist_tp_entry(symbol, tp_entry)
+    candle_index_created = current_candle_index if current_candle_index is not None else 0
+    pending_order_payload = build_pending_order_payload(
+        client_order_id=client_id,
+        side=channel["side"],
+        limit_price=float(price_final),
+        qty=float(qty_final),
+        timeframe=market_data.timeframe,
+        candle_index_created=candle_index_created,
+        created_at=opened_at_iso,
+    )
 
     try:
         order_response = exchange.place_entry_limit(
@@ -1993,6 +2018,26 @@ def run(
             }
         )
         return {"action": "reject", "reason": "order_error"}
+
+    if isinstance(order_response, Mapping):
+        order_id_resp = order_response.get("orderId") or order_response.get("order_id")
+        if order_id_resp is not None:
+            pending_order_payload["order_id"] = order_id_resp
+
+    tp_entry = {
+        "strategy": STRATEGY_NAME,
+        "tp_price": channel["tp_price"],
+        "side": channel["side"],
+        "timestamp": opened_at_iso,
+        "source": "detector",
+        "qty": float(qty_final),
+        "status": "OPEN",
+        "opened_at": opened_at_iso,
+        "entry_price": float(price_final),
+        "timeframe": market_data.timeframe,
+        "pending_order": pending_order_payload,
+    }
+    _persist_tp_entry(symbol, tp_entry)
 
     channel_meta: Mapping[str, Any] | None
     if isinstance(channel_meta_initial, Mapping):
