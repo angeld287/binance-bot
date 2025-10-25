@@ -27,6 +27,10 @@
     "default": false,
     "description": "Toggle for stop-loss placement (kept off by default)."
   },
+  "CHANNEL_FIXED_SL_PCT": {
+    "default": 1.0,
+    "description": "Fixed percentage distance from entry used for stop-loss placement."
+  },
   "PRICE_TICK_OVERRIDE": {
     "default": null,
     "description": "Optional explicit tick size override for precision troubleshooting."
