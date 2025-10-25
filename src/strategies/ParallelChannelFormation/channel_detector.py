@@ -53,6 +53,12 @@ CHANNEL_BREAK_TOLERANCE = 0.0005
 
 UTC_MINUS_FOUR = timezone(timedelta(hours=-4))
 
+TIMEFRAME_BOUNDS: dict[str, tuple[int, int]] = {
+    "1m": (20, 60),
+    "5m": (30, 100),
+    "15m": (40, 150),
+}
+
 
 @dataclass(slots=True)
 class MarketSnapshot:
@@ -756,6 +762,57 @@ def _tp_exists(
     return False
 
 
+def _resolve_timeframe_bounds(env: ChannelEnv, snapshot: MarketSnapshot) -> tuple[int, int]:
+    fallback_min_bars = int(env.min_duration_bars)
+    fallback_max_bars = fallback_min_bars * 4
+    timeframe_raw = (snapshot.timeframe or "").strip().lower()
+    timeframe_key = timeframe_raw
+    bounds = TIMEFRAME_BOUNDS.get(timeframe_key)
+    if bounds is None:
+        timeframe_seconds_map = {60: "1m", 300: "5m", 900: "15m"}
+        timeframe_seconds = int(_timeframe_to_seconds(timeframe_raw) or 0)
+        alias = timeframe_seconds_map.get(timeframe_seconds)
+        if alias is not None:
+            bounds = TIMEFRAME_BOUNDS.get(alias)
+    if bounds is None:
+        bounds = (fallback_min_bars, fallback_max_bars)
+    return bounds
+
+
+def _resolve_scan_window_bounds(
+    env: ChannelEnv,
+    snapshot: MarketSnapshot,
+    total_candles: int,
+) -> tuple[int, int]:
+    min_duration_bars, max_duration_bars = _resolve_timeframe_bounds(env, snapshot)
+    min_window = _safe_int_env("CHANNEL_MIN_BARS")
+    max_window = _safe_int_env("CHANNEL_MAX_BARS")
+
+    scan_min = min_window if min_window is not None else min_duration_bars
+    scan_max = max_window if max_window is not None else max_duration_bars
+
+    if scan_min <= 0:
+        scan_min = 1
+    if scan_max <= 0:
+        scan_max = scan_min
+    if scan_max < scan_min:
+        scan_max = scan_min
+
+    total = max(int(total_candles), 0)
+    if total > 0:
+        scan_max = min(scan_max, total)
+        scan_min = min(scan_min, total)
+        if scan_min <= 0:
+            scan_min = 1
+        if scan_max < scan_min:
+            scan_max = scan_min
+    else:
+        scan_min = 1
+        scan_max = 1
+
+    return scan_min, scan_max
+
+
 def _channel_pattern(
     candles: Sequence[Sequence[float]],
     env: ChannelEnv,
@@ -776,25 +833,7 @@ def _channel_pattern(
         else 0
     )
 
-    timeframe_bounds_table: dict[str, tuple[int, int]] = {
-        "1m": (20, 60),
-        "5m": (30, 100),
-        "15m": (40, 150),
-    }
-    fallback_min_bars = int(env.min_duration_bars)
-    fallback_max_bars = fallback_min_bars * 4
-    timeframe_raw = (snapshot.timeframe or "").strip().lower()
-    timeframe_key = timeframe_raw
-    bounds = timeframe_bounds_table.get(timeframe_key)
-    if bounds is None:
-        timeframe_seconds_map = {60: "1m", 300: "5m", 900: "15m"}
-        timeframe_seconds = int(_timeframe_to_seconds(timeframe_raw) or 0)
-        alias = timeframe_seconds_map.get(timeframe_seconds)
-        if alias is not None:
-            bounds = timeframe_bounds_table.get(alias)
-    if bounds is None:
-        bounds = (fallback_min_bars, fallback_max_bars)
-    min_duration_bars, max_duration_bars = bounds
+    min_duration_bars, max_duration_bars = _resolve_timeframe_bounds(env, snapshot)
 
     last_close = float(candles[-1][4]) if candles else 0.0
     atr_value = float(snapshot.atr or 0.0)
@@ -904,24 +943,7 @@ def _channel_pattern(
         }
         return None, metrics, thresholds, reason_detail
 
-    has_min_duration_span = bars_span >= min_duration_bars
-    has_max_duration_span = bars_span <= max_duration_bars
-    if not has_min_duration_span:
-        reason_detail = {
-            "reason": "bars_span_below_min",
-            "measured": bars_span,
-            "min_bars": min_duration_bars,
-            "max_bars": max_duration_bars,
-        }
-        return None, metrics, thresholds, reason_detail
-    if not has_max_duration_span:
-        reason_detail = {
-            "reason": "bars_span_above_max",
-            "measured": bars_span,
-            "min_bars": min_duration_bars,
-            "max_bars": max_duration_bars,
-        }
-        return None, metrics, thresholds, reason_detail
+    # Duration span validation is now handled by the scanning logic in ``run``.
 
     return (upper, lower), metrics, thresholds, None
 
@@ -1146,13 +1168,66 @@ def run(
         )
         return {"action": "reject", "reason": reason or "precision_error_on_tp"}
 
-    (
-        lines,
-        pattern_metrics,
-        pattern_thresholds,
-        pattern_reason,
-    ) = _channel_pattern(market_data.candles, env, market_data)
-    if lines is None:
+    candles_all = list(market_data.candles or [])
+    pattern_metrics: dict[str, Any] = {}
+    pattern_thresholds = _channel_thresholds(env)
+    pattern_reason: dict[str, Any] | None = None
+
+    selected_candles: Sequence[Sequence[float]] | None = None
+    lines: tuple[Line, Line] | None = None
+
+    if not candles_all:
+        (
+            lines,
+            pattern_metrics,
+            pattern_thresholds,
+            pattern_reason,
+        ) = _channel_pattern(candles_all, env, market_data)
+        if lines is not None:
+            selected_candles = candles_all
+    else:
+        scan_min, scan_max = _resolve_scan_window_bounds(
+            env, market_data, len(candles_all)
+        )
+        first_metrics: dict[str, Any] | None = None
+        first_thresholds: dict[str, float | int | None] | None = None
+        first_reason: dict[str, Any] | None = None
+
+        for window_size in range(scan_max, scan_min - 1, -1):
+            if window_size <= 0 or window_size > len(candles_all):
+                continue
+            start_limit = len(candles_all) - window_size
+            for start_idx in range(start_limit, -1, -1):
+                window = candles_all[start_idx : start_idx + window_size]
+                (
+                    candidate_lines,
+                    metrics,
+                    thresholds,
+                    reason,
+                ) = _channel_pattern(window, env, market_data)
+
+                if first_metrics is None:
+                    first_metrics = metrics
+                    first_thresholds = thresholds
+                    first_reason = reason
+
+                pattern_metrics = metrics
+                pattern_thresholds = thresholds
+                pattern_reason = reason
+
+                if candidate_lines is not None:
+                    lines = candidate_lines
+                    selected_candles = window
+                    break
+            if lines is not None:
+                break
+
+        if lines is None and first_metrics is not None:
+            pattern_metrics = first_metrics
+            pattern_thresholds = first_thresholds or pattern_thresholds
+            pattern_reason = first_reason
+
+    if lines is None or selected_candles is None:
         log_payload: dict[str, Any] = {
             "strategy": STRATEGY_NAME,
             "symbol": symbol,
@@ -1167,13 +1242,13 @@ def run(
         _log(log_payload)
         return {"action": "reject", "reason": "pattern_invalid"}
 
-    channel = compute_channel_entry_tp(market_data.candles, lines=lines, snapshot=market_data)
+    channel = compute_channel_entry_tp(selected_candles, lines=lines, snapshot=market_data)
 
-    last_idx = len(market_data.candles) - 1
-    last_close = float(market_data.candles[-1][4]) if market_data.candles else 0.0
+    last_idx = len(selected_candles) - 1
+    last_close = float(selected_candles[-1][4]) if selected_candles else 0.0
     upper_line, lower_line = lines
-    lower_val = lower_line.value_at(last_idx) if market_data.candles else 0.0
-    upper_val = upper_line.value_at(last_idx) if market_data.candles else 0.0
+    lower_val = lower_line.value_at(last_idx) if selected_candles else 0.0
+    upper_val = upper_line.value_at(last_idx) if selected_candles else 0.0
     distance_to_lower = abs(last_close - lower_val)
     distance_to_upper = abs(upper_val - last_close)
     slope_value = float(upper_line.slope)
@@ -1194,7 +1269,7 @@ def run(
         distance_to_edge_pct = distance_to_edge / abs(last_close)
     width_pct = pattern_metrics.get("width_pct")
 
-    last_candle = market_data.candles[-1] if market_data.candles else None
+    last_candle = selected_candles[-1] if selected_candles else None
     ohlc_meta = {}
     if last_candle:
         ohlc_meta = {
@@ -1337,7 +1412,7 @@ def run(
         channel={"side": channel["side"], "entry_price": float(price_final)},
         upper_line=upper_line,
         lower_line=lower_line,
-        candles=market_data.candles,
+        candles=selected_candles,
         timeframe=market_data.timeframe,
         thresholds=pattern_thresholds,
         order_response=order_response,
