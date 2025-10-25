@@ -1296,6 +1296,34 @@ def run(
         ema_ok = filter_reason != "ema_filter"
         if filters_result:
             ema_ok = True
+
+        pivots_high, pivots_low = find_pivots(selected_candles)
+        combined_pivots = sorted(pivots_high + pivots_low, key=lambda item: item[0])
+        anchor_start_idx = combined_pivots[0][0] if combined_pivots else 0
+        anchor_end_idx = combined_pivots[-1][0] if combined_pivots else last_idx
+
+        def _safe_ts(idx: int) -> float | None:
+            try:
+                return float(selected_candles[idx][0])
+            except (IndexError, TypeError, ValueError):
+                return None
+
+        anchor_start_ts_raw = _safe_ts(anchor_start_idx)
+        anchor_end_ts_raw = _safe_ts(anchor_end_idx)
+        anchor_start_ts = int(anchor_start_ts_raw) if anchor_start_ts_raw is not None else None
+        anchor_end_ts = int(anchor_end_ts_raw) if anchor_end_ts_raw is not None else None
+
+        upper_meta = {
+            "slope": float(upper_line.slope),
+            "intercept": float(upper_line.intercept),
+            "value_at_last": float(upper_val),
+        }
+        lower_meta = {
+            "slope": float(lower_line.slope),
+            "intercept": float(lower_line.intercept),
+            "value_at_last": float(lower_val),
+        }
+
         log_payload = {
             "strategy": STRATEGY_NAME,
             "symbol": symbol,
@@ -1304,6 +1332,16 @@ def run(
                 "slope": float(slope_value),
                 "direction": channel_direction,
                 "width_pct": float(width_pct) if width_pct is not None else None,
+                "anchor_start_idx": int(anchor_start_idx),
+                "anchor_end_idx": int(anchor_end_idx),
+                "anchor_start_ts": anchor_start_ts,
+                "anchor_end_ts": anchor_end_ts,
+                "upper_line": upper_meta,
+                "lower_line": lower_meta,
+                "pivots": {
+                    "high": [(int(idx), float(price)) for idx, price in pivots_high],
+                    "low": [(int(idx), float(price)) for idx, price in pivots_low],
+                },
             },
             "edge": edge,
             "distance_to_edge_pct": float(distance_to_edge_pct) if distance_to_edge_pct is not None else None,
