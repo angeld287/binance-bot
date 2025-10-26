@@ -37,6 +37,7 @@ from .geometry_utils import (
 from .config.env_loader import ChannelEnv, load_env
 from . import filters as channel_filters
 from .stale_pending_orders import build_pending_order_payload, sweep_stale_pending_orders
+from .validators import check_ema_distance
 
 logger = logging.getLogger("bot.strategy.parallel_channel")
 
@@ -2059,6 +2060,30 @@ def run(
             }
         )
         return {"action": "reject", "reason": filter_reason or "filter_reject"}
+
+    side_norm = str(channel.get("side", "")).upper()
+    mark_price = current_price_for_sweep
+    decision, decision_meta = check_ema_distance(
+        symbol=symbol,
+        side=side_norm,
+        mark_price=mark_price,
+        ema_fast=market_data.ema_fast,
+        enabled=env.ema_distance_filter_enabled,
+        threshold_pct=env.ema_distance_threshold_pct,
+        logger=logger,
+    )
+    if decision == "reject":
+        _log(
+            {
+                "strategy": STRATEGY_NAME,
+                "symbol": symbol,
+                "state": "filter_reject",
+                "action": "reject",
+                "reason": "ema_distance_filter",
+                "filter_meta": decision_meta,
+            }
+        )
+        return {"action": "reject", "reason": "ema_distance_filter"}
 
     filters_raw = get_symbol_filters(exchange, symbol)
     filters = SymbolFilters(

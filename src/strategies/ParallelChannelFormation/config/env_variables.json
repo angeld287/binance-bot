@@ -46,5 +46,13 @@
   "CHANNEL_MAX_TRADES_PER_CHANNEL": {
     "default": 1,
     "description": "Maximum number of simultaneous trades allowed per detected channel."
+  },
+  "PARALLEL_CHANNEL_EMA_DISTANCE_FILTER_ENABLED": {
+    "default": true,
+    "description": "Toggle for rejecting entries when price is too far from the fast EMA."
+  },
+  "PARALLEL_CHANNEL_EMA_DISTANCE_THRESHOLD_PCT": {
+    "default": 0.8,
+    "description": "Maximum allowed percentage distance from price to the fast EMA before rejecting an entry."
   }
 }

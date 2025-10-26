@@ -18,6 +18,8 @@ class ChannelEnv:
     min_vertical_gap_pct: float
     min_duration_bars: int
     confidence_threshold: float
+    ema_distance_filter_enabled: bool
+    ema_distance_threshold_pct: float
     tp_mode: str
     sl_enabled: bool
     fixed_sl_pct: float
@@ -74,6 +76,20 @@ def load_env(*, settings=None) -> ChannelEnv:
     confidence = (
         _get_value("CHANNEL_CONFIDENCE_THRESHOLD", defaults=defaults, coerce=float) or 0.0
     )
+    ema_distance_enabled = parse_bool(
+        os.getenv("PARALLEL_CHANNEL_EMA_DISTANCE_FILTER_ENABLED"),
+        default=True,
+    )
+    ema_distance_threshold_raw = _get_value(
+        "PARALLEL_CHANNEL_EMA_DISTANCE_THRESHOLD_PCT",
+        defaults=defaults,
+        coerce=float,
+    )
+    ema_distance_threshold = (
+        float(ema_distance_threshold_raw)
+        if ema_distance_threshold_raw is not None
+        else 0.8
+    )
     tp_mode = str(
         os.getenv("TP_MODE")
         or defaults.get("TP_MODE", {}).get("default")
@@ -116,6 +132,8 @@ def load_env(*, settings=None) -> ChannelEnv:
         min_vertical_gap_pct=float(gap_pct),
         min_duration_bars=int(duration),
         confidence_threshold=float(confidence),
+        ema_distance_filter_enabled=bool(ema_distance_enabled),
+        ema_distance_threshold_pct=float(ema_distance_threshold),
         tp_mode=tp_mode,
         sl_enabled=bool(sl_enabled),
         fixed_sl_pct=float(fixed_sl_pct),
