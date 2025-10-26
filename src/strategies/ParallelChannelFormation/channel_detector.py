@@ -346,6 +346,100 @@ def _select_candles_for_ema(
     return base_candles, base_tf_norm or base_timeframe
 
 
+def _coerce_float_sequence(values: Any) -> list[float]:
+    result: list[float] = []
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return result
+    for item in values:
+        try:
+            result.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _window_average(values: Sequence[float], length: int, offset: int = 0) -> float | None:
+    if length <= 0:
+        return None
+    end_idx = len(values) - offset
+    start_idx = end_idx - length
+    if start_idx < 0 or end_idx > len(values):
+        return None
+    window = values[start_idx:end_idx]
+    if len(window) != length:
+        return None
+    return sum(window) / length if window else None
+
+
+def _should_close_on_higher_tf_ema_cross(
+    *,
+    side: str,
+    indicators: Mapping[str, Any] | None,
+) -> tuple[bool, dict[str, float | str]]:
+    if not indicators:
+        return False, {}
+
+    timeframe_raw = indicators.get("ema_timeframe")
+    timeframe = str(timeframe_raw or "").strip().lower()
+    if timeframe != "15m":
+        return False, {}
+
+    closes = _coerce_float_sequence(indicators.get("ema_closes"))
+    if not closes:
+        return False, {}
+
+    try:
+        fast_length = int(indicators.get("ema_fast_length", 7))
+    except (TypeError, ValueError):
+        fast_length = 7
+    try:
+        slow_length = int(indicators.get("ema_slow_length", 25))
+    except (TypeError, ValueError):
+        slow_length = 25
+
+    fast_now = _window_average(closes, fast_length, 0)
+    fast_prev = _window_average(closes, fast_length, 1)
+    slow_now = _window_average(closes, slow_length, 0)
+    slow_prev = _window_average(closes, slow_length, 1)
+
+    if None in {fast_now, fast_prev, slow_now, slow_prev}:
+        return False, {}
+
+    side_norm = str(side or "").strip().upper()
+    bearish_cross = (
+        side_norm == "LONG"
+        and fast_prev is not None
+        and slow_prev is not None
+        and fast_now is not None
+        and slow_now is not None
+        and fast_prev >= slow_prev
+        and fast_now < slow_now
+    )
+    bullish_cross = (
+        side_norm == "SHORT"
+        and fast_prev is not None
+        and slow_prev is not None
+        and fast_now is not None
+        and slow_now is not None
+        and fast_prev <= slow_prev
+        and fast_now > slow_now
+    )
+
+    if not (bearish_cross or bullish_cross):
+        return False, {}
+
+    meta: dict[str, float | str] = {
+        "timeframe": timeframe,
+        "fast_now": float(fast_now),
+        "fast_prev": float(fast_prev),
+        "slow_now": float(slow_now),
+        "slow_prev": float(slow_prev),
+        "side": side_norm,
+        "signal": "bearish" if bearish_cross else "bullish",
+    }
+    return True, meta
+
+
 def _format_anchor_hm(timestamp_raw: Any) -> str:
     try:
         timestamp_value = float(timestamp_raw)
@@ -763,6 +857,114 @@ def _persist_channel_meta(
         timestamp_float,
         extra=extra_payload,
     )
+
+
+def _maybe_execute_higher_tf_ema_exit(
+    *,
+    symbol: str,
+    exchange: BrokerPort,
+    position_side: str,
+    qty: float,
+    filters: SymbolFilters,
+    indicators: Mapping[str, Any] | None,
+    store_entry: Mapping[str, Any],
+    store_payload: Mapping[str, Any],
+) -> tuple[bool, dict[str, Any] | None]:
+    should_exit, ema_meta = _should_close_on_higher_tf_ema_cross(
+        side=position_side, indicators=indicators
+    )
+    if not should_exit:
+        return False, None
+
+    side_norm = str(position_side or "").strip().upper()
+    qty_value = abs(float(qty)) if qty is not None else 0.0
+    if qty_value <= 0:
+        _log(
+            {
+                "action": "ema_cross_exit",
+                "strategy": STRATEGY_NAME,
+                "symbol": symbol,
+                "side": side_norm,
+                "status": "skipped",
+                "reason": "qty_non_positive",
+                "time": _now_iso(),
+                "ema": ema_meta,
+            }
+        )
+        return False, {"reason": "qty_non_positive", "ema": ema_meta}
+
+    success, error_reason, qty_used = _close_position_market(
+        exchange=exchange,
+        symbol=symbol,
+        position_side=side_norm,
+        qty=qty_value,
+        filters=filters,
+    )
+
+    exit_time = _now_iso()
+    log_payload: dict[str, Any] = {
+        "action": "ema_cross_exit",
+        "strategy": STRATEGY_NAME,
+        "symbol": symbol,
+        "side": side_norm,
+        "status": "success" if success else "failed",
+        "time": exit_time,
+        "ema": ema_meta,
+    }
+    if qty_used is not None:
+        log_payload["qty"] = qty_used
+    if error_reason:
+        log_payload["error"] = error_reason
+    _log(log_payload)
+
+    if not success:
+        return False, {"reason": error_reason, "ema": ema_meta}
+
+    updated_payload = dict(store_payload)
+    updated_payload["status"] = "CLOSED"
+    updated_payload["closed_at"] = exit_time
+    updated_payload.setdefault("side", side_norm)
+
+    entry_price = store_entry.get("entry_price")
+    if entry_price is not None:
+        updated_payload.setdefault("entry_price", entry_price)
+
+    channel_meta = updated_payload.get("channel_meta")
+    if isinstance(channel_meta, Mapping):
+        channel_meta = dict(channel_meta)
+    else:
+        channel_meta = {}
+
+    structure_exit: dict[str, Any] = {
+        "status": "success",
+        "time": exit_time,
+        "reason": "ema_cross_opposite",
+        "ema_timeframe": ema_meta.get("timeframe"),
+        "signal": ema_meta.get("signal"),
+    }
+    if qty_used is not None:
+        structure_exit["qty"] = qty_used
+
+    channel_meta["structure_exit"] = structure_exit
+    channel_meta["ema_cross_exit"] = {
+        "time": exit_time,
+        "timeframe": ema_meta.get("timeframe"),
+        "signal": ema_meta.get("signal"),
+        "fast_now": ema_meta.get("fast_now"),
+        "fast_prev": ema_meta.get("fast_prev"),
+        "slow_now": ema_meta.get("slow_now"),
+        "slow_prev": ema_meta.get("slow_prev"),
+    }
+    updated_payload["channel_meta"] = channel_meta
+
+    _persist_tp_entry(symbol, updated_payload)
+    _persist_channel_meta(symbol, updated_payload, channel_meta)
+
+    return True, {
+        "qty_closed": qty_used,
+        "time": exit_time,
+        "ema": ema_meta,
+    }
 
 
 def _maybe_log_channel_break(
@@ -1724,6 +1926,22 @@ def run(
                 current_price = float(market_data.candles[-1][4])
             except (TypeError, ValueError):
                 current_price = None
+        ema_exit_triggered, ema_exit_meta = _maybe_execute_higher_tf_ema_exit(
+            symbol=symbol,
+            exchange=exchange,
+            position_side=store_entry.get("side", "LONG" if amt > 0 else "SHORT"),
+            qty=qty_value,
+            filters=filters,
+            indicators=indicators,
+            store_entry=store_entry,
+            store_payload=store_payload,
+        )
+        if ema_exit_triggered:
+            return {
+                "action": "monitor_tp",
+                "state": "ema_exit",
+                "meta": ema_exit_meta,
+            }
         _maybe_log_channel_break(
             symbol=symbol,
             side=store_entry.get("side", "LONG" if amt > 0 else "SHORT"),
@@ -2482,7 +2700,13 @@ class ParallelChannelFormationStrategy:
             ema_fast_slope=ema_fast_slope,
         )
 
-        indicators = {"qty": 1.0, "ema_timeframe": ema_timeframe}
+        indicators = {
+            "qty": 1.0,
+            "ema_timeframe": ema_timeframe,
+            "ema_closes": closes,
+            "ema_fast_length": 7,
+            "ema_slow_length": 25,
+        }
 
         return run(
             symbol,
