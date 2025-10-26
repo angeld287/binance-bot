@@ -471,14 +471,14 @@ def _log_ema_fast_distance(
 
     _log(
         {
-            "action": "ema_fast_distance_snapshot",
-            "strategy": STRATEGY_NAME,
-            "symbol": symbol,
             "price_current": price_value,
             "ema_fast_value": ema_value,
             "distance_abs": distance_abs,
             "distance_pct": distance_pct,
             "time": _now_iso(),
+            "action": "ema_fast_distance_snapshot",
+            "strategy": STRATEGY_NAME,
+            "symbol": symbol,
         }
     )
 
