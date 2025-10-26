@@ -493,6 +493,57 @@ def test_place_tp_for_existing_position(monkeypatch):
     assert len(exchange.tp_orders) == 1
 
 
+def test_ema_cross_exit_closes_position(monkeypatch):
+    store = _mock_tp_store(monkeypatch)
+    now_ts = datetime.utcnow().timestamp()
+    store["BTCUSDT"] = {
+        "tp_value": 110.0,
+        "timestamp": now_ts,
+        "channel_meta": {"lower_at_entry": 99.0, "upper_at_entry": 101.0},
+    }
+
+    exchange = FakeExchange()
+    exchange.position = {"positionAmt": "1", "entryPrice": "100"}
+
+    env = _env()
+
+    closes = [100.0] * 29 + [50.0]
+    snapshot = MarketSnapshot(
+        candles=_candles(),
+        timeframe="5m",
+        atr=1.0,
+        ema_fast=92.0,
+        ema_slow=98.0,
+        volume_avg=10.0,
+    )
+
+    indicators = {
+        "qty": 1.0,
+        "ema_timeframe": "15m",
+        "ema_closes": closes,
+        "ema_fast_length": 7,
+        "ema_slow_length": 25,
+    }
+
+    result = run(
+        "BTCUSDT",
+        snapshot,
+        indicators,
+        env,
+        exchange=exchange,
+    )
+
+    assert result["action"] == "monitor_tp"
+    assert result.get("state") == "ema_exit"
+    assert exchange.market_orders, "market close order should be placed"
+    stored = store.get("BTCUSDT")
+    assert stored is not None
+    assert stored.get("status") == "CLOSED"
+    channel_meta = stored.get("channel_meta") or {}
+    structure_exit = channel_meta.get("structure_exit") or {}
+    assert structure_exit.get("reason") == "ema_cross_opposite"
+
+
 def test_detection_places_entry_and_persists_tp(monkeypatch):
     store = _mock_tp_store(monkeypatch)
     store["ADAUSDT"] = {"tp_value": 1.0, "timestamp": datetime.utcnow().timestamp()}
