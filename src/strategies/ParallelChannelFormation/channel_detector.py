@@ -453,6 +453,36 @@ def _log(payload: Mapping[str, Any]) -> None:
         logger.info(str(payload))
 
 
+def _log_ema_fast_distance(
+    *,
+    symbol: str,
+    price_current: float | None,
+    ema_fast_value: float | None,
+) -> None:
+    price_value = _coerce_float(price_current)
+    ema_value = _coerce_float(ema_fast_value)
+    distance_abs: float | None = None
+    distance_pct: float | None = None
+
+    if price_value is not None and ema_value is not None:
+        distance_abs = price_value - ema_value
+        if not math.isclose(ema_value, 0.0, abs_tol=1e-12):
+            distance_pct = (distance_abs / ema_value) * 100.0
+
+    _log(
+        {
+            "action": "ema_fast_distance_snapshot",
+            "strategy": STRATEGY_NAME,
+            "symbol": symbol,
+            "price_current": price_value,
+            "ema_fast_value": ema_value,
+            "distance_abs": distance_abs,
+            "distance_pct": distance_pct,
+            "time": _now_iso(),
+        }
+    )
+
+
 def _safe_float_env(key: str) -> float | None:
     raw = os.getenv(key)
     if raw is None:
@@ -1607,6 +1637,12 @@ def run(
         except (TypeError, ValueError):
             current_price_for_sweep = None
     current_candle_index = len(candles_all) - 1 if candles_all else None
+
+    _log_ema_fast_distance(
+        symbol=symbol,
+        price_current=current_price_for_sweep,
+        ema_fast_value=market_data.ema_fast,
+    )
 
     sweep_stale_pending_orders(
         exchange=exchange,
