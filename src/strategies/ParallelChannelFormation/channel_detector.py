@@ -843,27 +843,47 @@ def _maybe_log_channel_break(
 
     side_norm = str(side or "").upper()
     channel_boundary: float | None = None
+    channel_boundary_base: float | None = None
+    channel_boundary_origin: str | None = None
     stop_threshold: float | None = None
     broke_long = False
     broke_short = False
+
+    lower_entry = _coerce_float(channel_meta.get("lower_at_entry"))
+    upper_entry = _coerce_float(channel_meta.get("upper_at_entry"))
+
     if side_norm == "LONG":
-        channel_boundary = lower_now * (1 - tolerance)
-        stop_threshold = channel_boundary * (1 - exit_buffer_pct)
-        broke_long = price_reference < stop_threshold
+        channel_boundary_base = lower_entry
+        channel_boundary_origin = "entry_lower"
+        if channel_boundary_base is None:
+            channel_boundary_base = lower_now
+            channel_boundary_origin = "projected_lower"
+        if channel_boundary_base is not None:
+            channel_boundary = channel_boundary_base * (1 - tolerance)
+            stop_threshold = channel_boundary * (1 - exit_buffer_pct)
+            broke_long = price_reference < stop_threshold
     elif side_norm == "SHORT":
-        channel_boundary = upper_now * (1 + tolerance)
-        stop_threshold = channel_boundary * (1 + exit_buffer_pct)
-        broke_short = price_reference > stop_threshold
+        channel_boundary_base = upper_entry
+        channel_boundary_origin = "entry_upper"
+        if channel_boundary_base is None:
+            channel_boundary_base = upper_now
+            channel_boundary_origin = "projected_upper"
+        if channel_boundary_base is not None:
+            channel_boundary = channel_boundary_base * (1 + tolerance)
+            stop_threshold = channel_boundary * (1 + exit_buffer_pct)
+            broke_short = price_reference > stop_threshold
 
     if channel_boundary is not None and stop_threshold is not None:
         logger.info(
-            "EXIT BUFFER CHECK | symbol=%s side=%s channel_boundary=%.8f exit_buffer_pct=%.6f stop_threshold_final=%.8f close_price=%.8f",
+            "EXIT BUFFER CHECK | symbol=%s side=%s channel_boundary=%.8f exit_buffer_pct=%.6f stop_threshold_final=%.8f close_price=%.8f channel_boundary_base=%.8f channel_boundary_origin=%s",
             symbol,
             side_norm,
             channel_boundary,
             exit_buffer_pct,
             stop_threshold,
             price_reference,
+            channel_boundary_base if channel_boundary_base is not None else float("nan"),
+            channel_boundary_origin,
         )
 
     if not (broke_long or broke_short):
