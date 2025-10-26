@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from typing import Any, Mapping
 
 from strategies.breakout_dual_tf.filters.ema_distance import compute_ema_distance
@@ -22,6 +24,9 @@ def apply_filters(
 
     if rr is not None and rr < confidence_threshold:
         return False, "rr_filter"
+
+    if os.getenv("PCF_EMA_FILTER_ENABLED", "1") == "0":
+        return True, "ema_filter_skipped"
 
     side_norm = (side or "").upper()
     ohlc = meta.get("ohlc") if isinstance(meta, Mapping) else None
