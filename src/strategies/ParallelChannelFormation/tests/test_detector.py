@@ -183,6 +183,75 @@ from strategies.ParallelChannelFormation.channel_detector import ChannelEnv, Mar
 from strategies.wedge_formation.strategy import OrderPrecisionError
 
 
+def test_select_candles_for_ema_disabled(monkeypatch):
+    monkeypatch.setenv("EMA_HIGHER_TF_ENABLED", "0")
+
+    class DummyMarketData:
+        def fetch_ohlcv(self, *args, **kwargs):  # pragma: no cover - should not be called
+            raise AssertionError("fetch_ohlcv should not be called when disabled")
+
+    base_candles = [[0, 0, 0, 0, 1.0, 1.0]]
+    selected, tf_used = channel_detector._select_candles_for_ema(
+        DummyMarketData(),
+        symbol="BTCUSDT",
+        base_timeframe="1m",
+        limit=200,
+        base_candles=base_candles,
+    )
+
+    assert selected == base_candles
+    assert tf_used == "1m"
+
+
+def test_select_candles_for_ema_enabled(monkeypatch):
+    monkeypatch.setenv("EMA_HIGHER_TF_ENABLED", "1")
+
+    class DummyMarketData:
+        def __init__(self) -> None:
+            self.requested: list[str] = []
+
+        def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int):
+            self.requested.append(timeframe)
+            if timeframe == "15m":
+                return [[0, 0, 0, 0, 2.0, 1.0]]
+            raise AssertionError(f"unexpected timeframe requested: {timeframe}")
+
+    base_candles = [[0, 0, 0, 0, 1.0, 1.0]]
+    dummy_md = DummyMarketData()
+    selected, tf_used = channel_detector._select_candles_for_ema(
+        dummy_md,
+        symbol="BTCUSDT",
+        base_timeframe="1m",
+        limit=200,
+        base_candles=base_candles,
+    )
+
+    assert dummy_md.requested == ["15m"]
+    assert tf_used == "15m"
+    assert selected != base_candles
+    assert selected[0][4] == 2.0
+
+
+def test_select_candles_for_ema_fallback_when_empty(monkeypatch):
+    monkeypatch.setenv("EMA_HIGHER_TF_ENABLED", "1")
+
+    class DummyMarketData:
+        def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int):
+            return []
+
+    base_candles = [[0, 0, 0, 0, 1.0, 1.0]]
+    selected, tf_used = channel_detector._select_candles_for_ema(
+        DummyMarketData(),
+        symbol="BTCUSDT",
+        base_timeframe="1m",
+        limit=200,
+        base_candles=base_candles,
+    )
+
+    assert selected == base_candles
+    assert tf_used == "1m"
+
+
 class FakeExchange:
     def __init__(self) -> None:
         self._open_orders: list[dict] = []

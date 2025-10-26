@@ -91,6 +91,26 @@ TIMEFRAME_BOUNDS: dict[str, tuple[int, int]] = {
 }
 
 
+EMA_HIGHER_TIMEFRAME_MAP: dict[str, str] = {
+    "1m": "15m",
+    "3m": "15m",
+    "5m": "30m",
+    "15m": "1h",
+    "30m": "2h",
+    "45m": "3h",
+    "1h": "4h",
+    "2h": "6h",
+    "3h": "6h",
+    "4h": "1d",
+    "6h": "1d",
+    "8h": "1d",
+    "12h": "1d",
+    "1d": "1w",
+    "3d": "1w",
+    "1w": "1M",
+}
+
+
 def _now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="seconds")
 
@@ -263,6 +283,61 @@ def _timeframe_to_seconds(timeframe: str | None) -> float:
     if multiplier <= 0:
         return 0.0
     return value * multiplier
+
+
+def _normalise_timeframe_label(timeframe: str | None) -> str:
+    return str(timeframe or "").strip().lower()
+
+
+def _resolve_higher_timeframe(timeframe: str | None) -> str:
+    base_tf = _normalise_timeframe_label(timeframe)
+    if not base_tf:
+        return base_tf
+    return EMA_HIGHER_TIMEFRAME_MAP.get(base_tf, base_tf)
+
+
+def _higher_tf_env_enabled() -> bool:
+    return os.getenv("EMA_HIGHER_TF_ENABLED", "").strip() == "1"
+
+
+def _select_candles_for_ema(
+    market_data: MarketDataPort,
+    *,
+    symbol: str,
+    base_timeframe: str,
+    limit: int,
+    base_candles: Sequence[Sequence[float]],
+) -> tuple[Sequence[Sequence[float]], str]:
+    base_tf_norm = _normalise_timeframe_label(base_timeframe)
+    if not _higher_tf_env_enabled():
+        return base_candles, base_tf_norm or base_timeframe
+
+    higher_tf = _resolve_higher_timeframe(base_timeframe)
+    if not higher_tf or higher_tf == base_tf_norm:
+        return base_candles, base_tf_norm or base_timeframe
+
+    try:
+        higher_candles = market_data.fetch_ohlcv(
+            symbol=symbol,
+            timeframe=higher_tf,
+            limit=limit,
+        )
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        logger.warning(
+            "[ChannelDetector] ema_higher_tf_fetch_failed: timeframe=%s reason=%s",
+            higher_tf,
+            exc,
+        )
+        return base_candles, base_tf_norm or base_timeframe
+
+    if higher_candles:
+        return higher_candles, higher_tf
+
+    logger.info(
+        "[ChannelDetector] ema_higher_tf_fallback: timeframe=%s reason=no_data",
+        higher_tf,
+    )
+    return base_candles, base_tf_norm or base_timeframe
 
 
 def _format_anchor_hm(timestamp_raw: Any) -> str:
@@ -2211,12 +2286,20 @@ class ParallelChannelFormationStrategy:
 
         env = load_env(settings=settings)
 
-        candles = md.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=200)
+        candles_limit = 200
+        candles = md.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=candles_limit)
         atr = WedgeFormationStrategy._compute_atr(candles)
 
         ema_fast = None
         ema_slow = None
-        closes = [float(c[4]) for c in candles]
+        ema_candles, ema_timeframe = _select_candles_for_ema(
+            md,
+            symbol=symbol,
+            base_timeframe=timeframe,
+            limit=candles_limit,
+            base_candles=candles,
+        )
+        closes = [float(c[4]) for c in ema_candles]
         if len(closes) >= 25:
             ema_fast = sum(closes[-7:]) / 7
             ema_slow = sum(closes[-25:]) / 25
@@ -2235,7 +2318,7 @@ class ParallelChannelFormationStrategy:
             volume_avg=volume_avg,
         )
 
-        indicators = {"qty": 1.0}
+        indicators = {"qty": 1.0, "ema_timeframe": ema_timeframe}
 
         return run(
             symbol,
