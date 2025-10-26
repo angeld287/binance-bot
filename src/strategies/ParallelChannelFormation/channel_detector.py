@@ -2068,8 +2068,7 @@ def run(
         side=side_norm,
         mark_price=mark_price,
         ema_fast=market_data.ema_fast,
-        enabled=env.ema_distance_filter_enabled,
-        threshold_pct=env.ema_distance_threshold_pct,
+        env_config=env,
         logger=logger,
     )
     if decision == "reject":

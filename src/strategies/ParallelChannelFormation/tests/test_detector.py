@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import pytest
 from dataclasses import dataclass, replace
@@ -429,6 +430,8 @@ def _env() -> ChannelEnv:
         min_vertical_gap_pct=0.0,
         min_duration_bars=0,
         confidence_threshold=0.0,
+        ema_distance_filter_enabled=True,
+        ema_distance_threshold_pct=100.0,
         tp_mode="opuesto_inmediato",
         sl_enabled=True,
         fixed_sl_pct=1.0,
@@ -951,3 +954,28 @@ def test_precision_failure_bubbles_reason(monkeypatch):
     )
     assert result["action"] == "reject"
     assert result["reason"] == "precision_error_on_entry"
+
+
+def test_ema_distance_filter_rejects(caplog):
+    env = replace(
+        _env(),
+        ema_distance_filter_enabled=True,
+        ema_distance_threshold_pct=0.5,
+    )
+    logger = logging.getLogger("pcf.test")
+
+    from strategies.ParallelChannelFormation.validators import check_ema_distance
+
+    with caplog.at_level(logging.INFO):
+        decision, meta = check_ema_distance(
+            symbol="BTCUSDT",
+            side="long",
+            mark_price=110.0,
+            ema_fast=100.0,
+            env_config=env,
+            logger=logger,
+        )
+
+    assert decision == "reject"
+    assert meta is not None and meta.get("reason") == "ema_distance_filter"
+    assert "Rejected by EMA Distance Filter" in caplog.text
