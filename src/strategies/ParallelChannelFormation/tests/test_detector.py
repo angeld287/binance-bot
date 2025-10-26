@@ -436,6 +436,7 @@ def _env() -> ChannelEnv:
         qty_step_override=None,
         min_notional_buffer_pct=0.0,
         max_trades_per_channel=1,
+        exit_buffer_pct=0.0,
     )
 
 
