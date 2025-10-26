@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import pytest
 from dataclasses import dataclass, replace
@@ -232,7 +233,7 @@ def test_select_candles_for_ema_enabled(monkeypatch):
     assert selected[0][4] == 2.0
 
 
-def test_select_candles_for_ema_fallback_when_empty(monkeypatch):
+def test_select_candles_for_ema_fallback_when_empty(monkeypatch, caplog):
     monkeypatch.setenv("EMA_HIGHER_TF_ENABLED", "1")
 
     class DummyMarketData:
@@ -240,16 +241,26 @@ def test_select_candles_for_ema_fallback_when_empty(monkeypatch):
             return []
 
     base_candles = [[0, 0, 0, 0, 1.0, 1.0]]
-    selected, tf_used = channel_detector._select_candles_for_ema(
-        DummyMarketData(),
-        symbol="BTCUSDT",
-        base_timeframe="1m",
-        limit=200,
-        base_candles=base_candles,
-    )
+    with caplog.at_level(logging.WARNING):
+        selected, tf_used = channel_detector._select_candles_for_ema(
+            DummyMarketData(),
+            symbol="BTCUSDT",
+            base_timeframe="1m",
+            limit=200,
+            base_candles=base_candles,
+        )
 
     assert selected == base_candles
     assert tf_used == "1m"
+    assert any(
+        record.levelno == logging.WARNING
+        and "[ChannelDetector] higher_tf_unavailable" in record.getMessage()
+        and "symbol=BTCUSDT" in record.getMessage()
+        and "requested_tf=15m" in record.getMessage()
+        and "falling_back_to=1m" in record.getMessage()
+        and "reason=empty_candles" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 class FakeExchange:

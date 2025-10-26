@@ -315,12 +315,13 @@ def _select_candles_for_ema(
     base_candles: Sequence[Sequence[float]],
 ) -> tuple[Sequence[Sequence[float]], str]:
     base_tf_norm = _normalise_timeframe_label(base_timeframe)
+    fallback_tf = base_tf_norm or base_timeframe
     if not _higher_tf_env_enabled():
-        return base_candles, base_tf_norm or base_timeframe
+        return base_candles, fallback_tf
 
     higher_tf = _resolve_higher_timeframe(base_timeframe)
     if not higher_tf or higher_tf == base_tf_norm:
-        return base_candles, base_tf_norm or base_timeframe
+        return base_candles, fallback_tf
 
     try:
         higher_candles = market_data.fetch_ohlcv(
@@ -330,20 +331,27 @@ def _select_candles_for_ema(
         )
     except Exception as exc:  # pragma: no cover - defensive fallback
         logger.warning(
-            "[ChannelDetector] ema_higher_tf_fetch_failed: timeframe=%s reason=%s",
+            "[ChannelDetector] higher_tf_unavailable symbol=%s requested_tf=%s "
+            "falling_back_to=%s reason=%s",
+            symbol,
             higher_tf,
-            exc,
+            fallback_tf,
+            f"exception={exc!r}",
         )
-        return base_candles, base_tf_norm or base_timeframe
+        return base_candles, fallback_tf
 
     if higher_candles:
         return higher_candles, higher_tf
 
-    logger.info(
-        "[ChannelDetector] ema_higher_tf_fallback: timeframe=%s reason=no_data",
+    logger.warning(
+        "[ChannelDetector] higher_tf_unavailable symbol=%s requested_tf=%s "
+        "falling_back_to=%s reason=%s",
+        symbol,
         higher_tf,
+        fallback_tf,
+        "empty_candles",
     )
-    return base_candles, base_tf_norm or base_timeframe
+    return base_candles, fallback_tf
 
 
 def _coerce_float_sequence(values: Any) -> list[float]:
