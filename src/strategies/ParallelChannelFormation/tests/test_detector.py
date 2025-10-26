@@ -429,6 +429,8 @@ def _env() -> ChannelEnv:
         min_vertical_gap_pct=0.0,
         min_duration_bars=0,
         confidence_threshold=0.0,
+        ema_distance_filter_enabled=False,
+        ema_distance_threshold_pct=1.0,
         tp_mode="opuesto_inmediato",
         sl_enabled=True,
         fixed_sl_pct=1.0,
