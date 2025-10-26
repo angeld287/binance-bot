@@ -54,5 +54,13 @@
   "PARALLEL_CHANNEL_EMA_DISTANCE_THRESHOLD_PCT": {
     "default": 0.8,
     "description": "Maximum allowed percentage distance from price to the fast EMA before rejecting an entry."
+  },
+  "EMA_TransitionFilter_Enabled": {
+    "default": true,
+    "description": "Toggle to enable the EMA transition entry filter that avoids trades in transition zones."
+  },
+  "EMA_Fast_Slope_Threshold": {
+    "default": 0.0005,
+    "description": "Minimum absolute slope for the fast EMA required to consider there is enough momentum to trade."
   }
 }

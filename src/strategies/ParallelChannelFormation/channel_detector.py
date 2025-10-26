@@ -37,7 +37,11 @@ from .geometry_utils import (
 from .config.env_loader import ChannelEnv, load_env
 from . import filters as channel_filters
 from .stale_pending_orders import build_pending_order_payload, sweep_stale_pending_orders
-from .validators import check_ema_distance
+from .validators import (
+    calculate_ema_fast_slope,
+    check_ema_distance,
+    ema_transition_filter_allows_entry,
+)
 
 logger = logging.getLogger("bot.strategy.parallel_channel")
 
@@ -262,6 +266,7 @@ class MarketSnapshot:
     ema_fast: float | None
     ema_slow: float | None
     volume_avg: float | None
+    ema_fast_slope: float | None = None
 
 
 def _timeframe_to_seconds(timeframe: str | None) -> float:
@@ -2085,6 +2090,24 @@ def run(
         )
         return {"action": "reject", "reason": "ema_distance_filter"}
 
+    transition_allowed = ema_transition_filter_allows_entry(
+        price_current=mark_price,
+        ema_fast_value=market_data.ema_fast,
+        ema_slow_value=market_data.ema_slow,
+        ema_fast_slope=market_data.ema_fast_slope,
+    )
+    if not transition_allowed:
+        _log(
+            {
+                "strategy": STRATEGY_NAME,
+                "symbol": symbol,
+                "state": "filter_reject",
+                "action": "reject",
+                "reason": "ema_transition_filter",
+            }
+        )
+        return {"action": "reject", "reason": "ema_transition_filter"}
+
     filters_raw = get_symbol_filters(exchange, symbol)
     filters = SymbolFilters(
         tick_size=filters_raw.tick_size,
@@ -2363,6 +2386,7 @@ class ParallelChannelFormationStrategy:
 
         ema_fast = None
         ema_slow = None
+        ema_fast_slope = None
         ema_candles, ema_timeframe = _select_candles_for_ema(
             md,
             symbol=symbol,
@@ -2374,6 +2398,18 @@ class ParallelChannelFormationStrategy:
         if len(closes) >= 25:
             ema_fast = sum(closes[-7:]) / 7
             ema_slow = sum(closes[-25:]) / 25
+        if len(closes) >= 9:
+            ema_history: list[float] = []
+            total_closes = len(closes)
+            for offset in range(2, -1, -1):
+                end_idx = total_closes - offset
+                start_idx = end_idx - 7
+                if start_idx < 0 or end_idx > total_closes:
+                    continue
+                window = closes[start_idx:end_idx]
+                if len(window) == 7:
+                    ema_history.append(sum(window) / 7)
+            ema_fast_slope = calculate_ema_fast_slope(ema_history)
 
         volume_avg = None
         volumes = [float(c[5]) for c in candles]
@@ -2387,6 +2423,7 @@ class ParallelChannelFormationStrategy:
             ema_fast=ema_fast,
             ema_slow=ema_slow,
             volume_avg=volume_avg,
+            ema_fast_slope=ema_fast_slope,
         )
 
         indicators = {"qty": 1.0, "ema_timeframe": ema_timeframe}
