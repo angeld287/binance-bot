@@ -25,6 +25,7 @@ class ChannelEnv:
     qty_step_override: float | None
     min_notional_buffer_pct: float
     max_trades_per_channel: int
+    exit_buffer_pct: float
 
 
 def _load_defaults() -> MutableMapping[str, Mapping[str, object]]:
@@ -95,6 +96,10 @@ def load_env(*, settings=None) -> ChannelEnv:
         _get_value("CHANNEL_FIXED_SL_PCT", defaults=defaults, coerce=float)
         or 1.0
     )
+    exit_buffer_pct = (
+        _get_value("EXIT_BUFFER_PCT", defaults=defaults, coerce=float, allow_none=True)
+        or 0.0
+    )
     max_trades_channel_raw = _get_value(
         "CHANNEL_MAX_TRADES_PER_CHANNEL", defaults=defaults, coerce=int
     )
@@ -118,6 +123,7 @@ def load_env(*, settings=None) -> ChannelEnv:
         qty_step_override=float(qty_override) if qty_override else None,
         min_notional_buffer_pct=float(buffer_pct),
         max_trades_per_channel=int(max_trades_channel),
+        exit_buffer_pct=float(exit_buffer_pct),
     )
 
 

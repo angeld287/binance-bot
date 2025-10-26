@@ -740,6 +740,7 @@ def _maybe_log_channel_break(
     exchange: BrokerPort | None = None,
     qty: float | None = None,
     filters: SymbolFilters | None = None,
+    env: ChannelEnv | None = None,
 ) -> None:
     channel_meta = store_payload.get("channel_meta")
     if not isinstance(channel_meta, Mapping):
@@ -794,9 +795,41 @@ def _maybe_log_channel_break(
     except (TypeError, ValueError):
         tolerance = CHANNEL_BREAK_TOLERANCE
 
+    exit_buffer_pct = 0.0
+    if env is not None:
+        try:
+            exit_buffer_pct = float(getattr(env, "exit_buffer_pct", 0.0))
+        except (TypeError, ValueError):
+            exit_buffer_pct = 0.0
+    if math.isnan(exit_buffer_pct):  # type: ignore[arg-type]
+        exit_buffer_pct = 0.0
+    exit_buffer_pct = max(exit_buffer_pct, 0.0)
+
     side_norm = str(side or "").upper()
-    broke_long = side_norm == "LONG" and price_reference < lower_now * (1 - tolerance)
-    broke_short = side_norm == "SHORT" and price_reference > upper_now * (1 + tolerance)
+    channel_boundary: float | None = None
+    stop_threshold: float | None = None
+    broke_long = False
+    broke_short = False
+    if side_norm == "LONG":
+        channel_boundary = lower_now * (1 - tolerance)
+        stop_threshold = channel_boundary * (1 - exit_buffer_pct)
+        broke_long = price_reference < stop_threshold
+    elif side_norm == "SHORT":
+        channel_boundary = upper_now * (1 + tolerance)
+        stop_threshold = channel_boundary * (1 + exit_buffer_pct)
+        broke_short = price_reference > stop_threshold
+
+    if channel_boundary is not None and stop_threshold is not None:
+        logger.info(
+            "EXIT BUFFER CHECK | symbol=%s side=%s channel_boundary=%.8f exit_buffer_pct=%.6f stop_threshold_final=%.8f close_price=%.8f",
+            symbol,
+            side_norm,
+            channel_boundary,
+            exit_buffer_pct,
+            stop_threshold,
+            price_reference,
+        )
+
     if not (broke_long or broke_short):
         return
 
@@ -898,6 +931,16 @@ def _maybe_log_channel_break(
         },
     }
     _log(log_payload)
+
+    if stop_threshold is not None:
+        logger.info(
+            "STOP LOSS ACTIVADO POR RUPTURA + BUFFER | symbol=%s side=%s close_price=%.8f stop_threshold_final=%.8f exit_buffer_pct=%.6f",
+            symbol,
+            side_norm,
+            price_reference,
+            stop_threshold,
+            exit_buffer_pct,
+        )
 
     new_meta = dict(channel_meta)
     new_meta["break_logged"] = True
@@ -1629,6 +1672,7 @@ def run(
             exchange=exchange,
             qty=qty_value,
             filters=filters,
+            env=env,
         )
 
         tp_price = float(store_entry.get("tp_price") or 0.0)
