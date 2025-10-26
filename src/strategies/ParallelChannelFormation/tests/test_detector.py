@@ -585,6 +585,7 @@ def test_channel_meta_persisted(monkeypatch):
     assert pending_order.get("timeframe") == "15m"
     assert pending_order.get("side") in {"LONG", "SHORT"}
     assert pending_order.get("candle_index_created") == len(_candles()) - 1
+    assert float(pending_order.get("created_at_ts", 0.0)) > 0.0
     assert stored.get("timeframe") == "15m"
     assert stored.get("entry_price")
 
@@ -615,25 +616,22 @@ def test_sweep_stale_pending_order_cancels(monkeypatch):
     pending = dict(stored.get("pending_order") or {})
     assert pending
 
-    pending["candle_index_created"] = int(pending.get("candle_index_created", 0)) - 5
-    if pending["candle_index_created"] < 0:
-        pending["candle_index_created"] = 0
     limit_price = float(pending.get("limit_price", 0.0)) or 100.0
     pending["limit_price"] = limit_price
+    stale_seconds = 600
+    old_ts = datetime.utcnow().timestamp() - stale_seconds
+    pending["created_at_ts"] = old_ts
+    pending["created_at"] = datetime.utcfromtimestamp(old_ts).isoformat(timespec="seconds")
     stored["pending_order"] = pending
     store["BTCUSDT"] = stored
 
-    monkeypatch.setenv("MAX_WAIT_CANDLES", "3")
-    monkeypatch.setenv("MAX_DRIFT_PCT", "0.001")
-
-    current_index = pending["candle_index_created"] + 10
-    current_price = limit_price * 1.01
+    monkeypatch.setenv("STALE_ORDER_MAX_AGE_SEC", "300")
 
     stale_pending_orders.sweep_stale_pending_orders(
         exchange=exchange,
         symbol="BTCUSDT",
-        current_price=current_price,
-        current_candle_index=current_index,
+        current_price=None,
+        current_candle_index=None,
         timeframe="15m",
     )
 
@@ -641,7 +639,7 @@ def test_sweep_stale_pending_order_cancels(monkeypatch):
     updated = store.get("BTCUSDT")
     assert updated is not None
     assert updated.get("status") == "CANCELLED"
-    assert updated.get("cancel_reason") == "expired"
+    assert updated.get("cancel_reason") == "stale_timeout"
     assert "pending_order" not in updated
 
 

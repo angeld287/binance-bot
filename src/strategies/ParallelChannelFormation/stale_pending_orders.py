@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 from datetime import datetime
 from typing import Any, Mapping
@@ -14,8 +13,7 @@ from utils.tp_store_s3 import load_tp_entry, persist_tp_value
 
 logger = logging.getLogger("bot.strategy.parallel_channel.pending")
 
-DEFAULT_MAX_WAIT_CANDLES = 5
-DEFAULT_MAX_DRIFT_PCT = 0.005
+DEFAULT_STALE_ORDER_MAX_AGE_SEC = 300
 
 
 def _log(payload: Mapping[str, Any]) -> None:
@@ -34,19 +32,6 @@ def _env_int(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return value if value >= 0 else default
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return default
-    if math.isnan(value):  # type: ignore[arg-type]
-        return default
-    return abs(value)
 
 
 def _persist_payload(symbol: str, payload: Mapping[str, Any]) -> None:
@@ -112,6 +97,7 @@ def build_pending_order_payload(
     timeframe: str | None,
     candle_index_created: int,
     created_at: str,
+    created_at_ts: float | None = None,
     order_id: Any | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -123,6 +109,12 @@ def build_pending_order_payload(
         "candle_index_created": int(candle_index_created),
         "created_at": created_at,
     }
+    if created_at_ts is None:
+        try:
+            created_at_ts = datetime.fromisoformat(created_at).timestamp()
+        except Exception:
+            created_at_ts = datetime.utcnow().timestamp()
+    payload["created_at_ts"] = float(created_at_ts)
     if order_id is not None:
         payload["order_id"] = order_id
     return payload
@@ -136,9 +128,6 @@ def sweep_stale_pending_orders(
     current_candle_index: int | None,
     timeframe: str,
 ) -> None:
-    if current_price is None or current_candle_index is None:
-        return
-
     store_payload = load_tp_entry(symbol)
     if not isinstance(store_payload, Mapping):
         return
@@ -151,16 +140,39 @@ def sweep_stale_pending_orders(
     if status_raw and str(status_raw).strip().upper() not in {"OPEN", "PENDING", "NEW"}:
         return
 
-    limit_price = pending_payload.get("limit_price")
-    if not limit_price:
-        return
+    created_at_ts_raw = pending_payload.get("created_at_ts")
+    created_at_ts: float | None
+    try:
+        created_at_ts = float(created_at_ts_raw)
+    except (TypeError, ValueError, OverflowError):
+        created_at_ts = None
 
-    candle_created = int(pending_payload.get("candle_index_created", 0))
-    age_candles = max(current_candle_index - candle_created, 0)
-    drift_pct = abs(current_price - limit_price) / limit_price
+    if created_at_ts is None:
+        created_at_raw = pending_payload.get("created_at")
+        if isinstance(created_at_raw, (int, float)):
+            try:
+                created_at_ts = float(created_at_raw)
+            except (TypeError, ValueError, OverflowError):
+                created_at_ts = None
+        elif isinstance(created_at_raw, str) and created_at_raw:
+            try:
+                created_at_ts = datetime.fromisoformat(created_at_raw).timestamp()
+            except ValueError:
+                created_at_ts = None
 
-    max_wait = _env_int("MAX_WAIT_CANDLES", DEFAULT_MAX_WAIT_CANDLES)
-    max_drift = _env_float("MAX_DRIFT_PCT", DEFAULT_MAX_DRIFT_PCT)
+    if created_at_ts is None:
+        timestamp_raw = store_payload.get("timestamp")
+        try:
+            created_at_ts = float(timestamp_raw)
+        except (TypeError, ValueError, OverflowError):
+            created_at_ts = None
+
+    if created_at_ts is None:
+        created_at_ts = datetime.utcnow().timestamp()
+
+    now_ts = datetime.utcnow().timestamp()
+    age_seconds = max(now_ts - created_at_ts, 0.0)
+    max_age_seconds = _env_int("STALE_ORDER_MAX_AGE_SEC", DEFAULT_STALE_ORDER_MAX_AGE_SEC)
 
     try:
         open_orders = exchange.open_orders(symbol)
@@ -182,7 +194,7 @@ def sweep_stale_pending_orders(
         if not isinstance(order, Mapping):
             continue
         status = str(order.get("status", "")).upper()
-        if status and status not in {"NEW", "PARTIALLY_FILLED"}:
+        if status and status not in {"NEW", "ACCEPTED", "PENDING", "PENDING_NEW", "PARTIALLY_FILLED"}:
             continue
         client_order_id = str(order.get("clientOrderId", ""))
         if client_order_id and client_order_id.upper() == client_id.upper():
@@ -198,13 +210,17 @@ def sweep_stale_pending_orders(
         return
 
     exchange_order_id = matching_order.get("orderId")
+    order_status = str(matching_order.get("status", "")).upper()
     if exchange_order_id is not None and exchange_order_id != order_id:
         pending_payload["order_id"] = exchange_order_id
         updated_payload = dict(store_payload)
         updated_payload["pending_order"] = dict(pending_payload)
         _persist_payload(symbol, updated_payload)
 
-    if age_candles < max_wait or drift_pct < max_drift:
+    if order_status == "PARTIALLY_FILLED":
+        return
+
+    if age_seconds < max_age_seconds:
         return
 
     cancel_kwargs: dict[str, Any] = {"symbol": symbol}
@@ -221,28 +237,29 @@ def sweep_stale_pending_orders(
                 "action": "cancel_pending_order_failed",
                 "symbol": symbol,
                 "side": pending_payload.get("side"),
-                "limit_price": limit_price,
-                "current_price": current_price,
-                "age_candles": age_candles,
-                "drift_pct": drift_pct,
+                "order_id": exchange_order_id,
+                "client_order_id": client_id,
+                "age_seconds": age_seconds,
+                "max_age_seconds": max_age_seconds,
                 "error": str(exc),
             }
         )
         return
 
-    _clear_pending(symbol, dict(store_payload), status="CANCELLED", reason="expired")
+    _clear_pending(symbol, dict(store_payload), status="CANCELLED", reason="stale_timeout")
 
     _log(
         {
             "action": "cancel_pending_order",
             "symbol": symbol,
             "side": pending_payload.get("side"),
-            "limit_price": limit_price,
-            "current_price": current_price,
-            "age_candles": age_candles,
-            "drift_pct": drift_pct,
+            "order_id": exchange_order_id,
+            "client_order_id": client_id,
+            "age_seconds": age_seconds,
+            "max_age_seconds": max_age_seconds,
             "timeframe": timeframe,
-            "reason": "expired",
+            "reason": "stale_timeout",
+            "message": "CANCELADA POR TIMEOUT DE ORDEN PENDIENTE",
         }
     )
 

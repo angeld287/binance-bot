@@ -2061,7 +2061,8 @@ def run(
         "finalQty": format_decimal(qty_final),
     }
 
-    opened_at_iso = datetime.utcnow().isoformat(timespec="seconds")
+    opened_at_dt = datetime.utcnow()
+    opened_at_iso = opened_at_dt.isoformat(timespec="seconds")
     candle_index_created = current_candle_index if current_candle_index is not None else 0
     pending_order_payload = build_pending_order_payload(
         client_order_id=client_id,
@@ -2071,6 +2072,7 @@ def run(
         timeframe=market_data.timeframe,
         candle_index_created=candle_index_created,
         created_at=opened_at_iso,
+        created_at_ts=opened_at_dt.timestamp(),
     )
 
     try:
