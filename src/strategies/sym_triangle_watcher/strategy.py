@@ -49,7 +49,25 @@ ALERT_REMIND_INTERVAL_MIN = int(_get_env("ALERT_REMIND_INTERVAL_MIN", "5"))
 REMIND_WHILE_ACTIVE = parse_bool(_get_env("REMIND_WHILE_ACTIVE", "true"), default=True)
 ALERT_EMAIL_TO = _get_env("ALERT_EMAIL_TO", "")
 ALERT_EMAIL_FROM = _get_env("ALERT_EMAIL_FROM", "")
-AWS_REGION = _get_env("AWS_REGION", "")
+def _resolve_aws_region() -> str:
+    """Return the AWS region to use for SES notifications."""
+
+    explicit_region = _get_env("AWS_REGION", "")
+    if explicit_region:
+        return explicit_region
+
+    default_region = _get_env("AWS_DEFAULT_REGION", "")
+    if default_region:
+        return default_region
+
+    session_region = boto3.session.Session().region_name
+    if session_region:
+        return session_region
+
+    return ""
+
+
+AWS_REGION = _resolve_aws_region()
 
 
 STATE_KEY = f"sym-triangle-watcher/{SYMBOL.lower()}-{TIMEFRAME}.json"
