@@ -75,3 +75,10 @@ jobs:
             --function-name bot-breakout-ada \
             --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
             --s3-key trading-bot.zip
+
+      - name: Update Lambda function "sym-triangle-watcher" from S3
+        run: |
+          aws lambda update-function-code \
+            --function-name sym-triangle-watcher \
+            --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
+            --s3-key trading-bot.zip
