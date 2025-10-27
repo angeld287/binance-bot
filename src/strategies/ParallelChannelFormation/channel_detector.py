@@ -2264,7 +2264,7 @@ def run(
     else:
         channel_state_payload = None
 
-    filters_result, filter_reason = channel_filters.apply_filters(
+    filters_result, filter_reason, ema_meta = channel_filters.apply_filters(
         rr=channel.get("rr"),
         confidence_threshold=env.confidence_threshold,
         ema_fast=market_data.ema_fast,
@@ -2337,15 +2337,16 @@ def run(
         }
         _log(log_payload)
     if not filters_result:
-        _log(
-            {
-                "strategy": STRATEGY_NAME,
-                "symbol": symbol,
-                "state": "filter_reject",
-                "action": "reject",
-                "reason": filter_reason,
-            }
-        )
+        reject_payload = {
+            "strategy": STRATEGY_NAME,
+            "symbol": symbol,
+            "state": "filter_reject",
+            "action": "reject",
+            "reason": filter_reason,
+        }
+        if filter_reason == "ema_filter" and ema_meta:
+            reject_payload["ema_meta"] = ema_meta
+        _log(reject_payload)
         return {"action": "reject", "reason": filter_reason or "filter_reject"}
 
     side_norm = str(channel.get("side", "")).upper()
