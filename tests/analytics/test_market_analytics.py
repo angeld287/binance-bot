@@ -66,7 +66,7 @@ def _build_test_data():
 def test_enrich_roundtrip_with_market_data(monkeypatch):
     monkeypatch.setenv("EMA_TF", "15m")
     monkeypatch.setenv("EMA_FAST", "7")
-    monkeypatch.setenv("EMA_SLOW", "45")
+    monkeypatch.setenv("EMA_SLOW", "25")
     monkeypatch.setenv("K_SLOPE", "3")
     monkeypatch.setenv("TH_NEUTRO_FAST", "0.0005")
     monkeypatch.setenv("TH_NEUTRO_SLOW", "0.0002")
