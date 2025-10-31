@@ -82,3 +82,10 @@ jobs:
             --function-name sym-triangle-watcher \
             --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
             --s3-key trading-bot.zip
+
+      - name: Update Lambda function "reports-daily-activity-job" from S3
+        run: |
+          aws lambda update-function-code \
+            --function-name reports-daily-activity-job \
+            --s3-bucket lambda-functions-dev-serverlessdeploymentbucket-irlanda \
+            --s3-key trading-bot.zip
