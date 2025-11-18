@@ -41,11 +41,27 @@ class _PositionState:
     direction: str | None = None
     net_size: float = 0.0
     trades: list[dict[str, Any]] = field(default_factory=list)
+    is_open: bool = False
 
     def reset(self) -> None:
         self.direction = None
         self.net_size = 0.0
         self.trades.clear()
+        self.is_open = False
+
+    def mark_open(self, sign: int) -> None:
+        self.direction = "LONG" if sign > 0 else "SHORT"
+        self.is_open = True
+
+    def is_flat(self) -> bool:
+        return abs(self.net_size) <= _EPSILON
+
+    def active_sign(self) -> int:
+        if self.net_size > _EPSILON:
+            return 1
+        if self.net_size < -_EPSILON:
+            return -1
+        return 0
 
 
 def _iter_orchestrators() -> Iterable[tuple[Orchestrator, str]]:
@@ -365,6 +381,7 @@ def _summarize_roundtrip(
 
     entry_price = entry_value / entry_qty
     exit_price = exit_value / exit_qty
+    qty_closed = min(entry_qty, exit_qty)
 
     open_ts = min(int(_to_float(t.get("time"))) for t in trades if t.get("time") is not None)
     close_ts = max(int(_to_float(t.get("time"))) for t in trades if t.get("time") is not None)
@@ -372,6 +389,7 @@ def _summarize_roundtrip(
     commission_total = sum(_to_float(t.get("commission")) for t in trades)
     realized_pnl = sum(_to_float(t.get("realizedPnl")) for t in trades)
     net_pnl = realized_pnl + commission_total
+    total_pnl_with_income = net_pnl
     roi_pct = (realized_pnl / entry_value) * 100.0
     roi_net_pct = (net_pnl / entry_value) * 100.0
 
@@ -389,6 +407,8 @@ def _summarize_roundtrip(
             income_total += income_value
             income_type = str(income.get("incomeType") or "UNKNOWN").upper()
             income_breakdown[income_type] = income_breakdown.get(income_type, 0.0) + income_value
+
+    total_pnl_with_income += income_total
 
     order_ids = sorted({str(trade.get("orderId")) for trade in trades if trade.get("orderId") is not None})
     order_details = []
@@ -416,12 +436,15 @@ def _summarize_roundtrip(
         "direction": direction,
         "entryQty": entry_qty,
         "exitQty": exit_qty,
+        "qty": qty_closed,
         "entryPrice": entry_price,
         "exitPrice": exit_price,
         "entryValue": entry_value,
         "exitValue": exit_value,
         "openAt": open_ts,
         "closeAt": close_ts,
+        "openTimestamp": open_ts,
+        "closeTimestamp": close_ts,
         "openAtIso": open_dt_local.isoformat(),
         "closeAtIso": close_dt_local.isoformat(),
         "durationMs": duration_ms,
@@ -430,6 +453,7 @@ def _summarize_roundtrip(
         "realizedPnl": realized_pnl,
         "commissionPaid": commission_total,
         "netPnl": net_pnl,
+        "pnl": total_pnl_with_income,
         "incomeRealized": income_total,
         "incomeBreakdown": income_breakdown,
         "tradeIds": sorted(set(trade_ids)),
@@ -472,11 +496,10 @@ def _consume_trade(
     remaining = total_qty
 
     while remaining > _EPSILON:
-        if abs(state.net_size) <= _EPSILON:
-            state.direction = "LONG" if sign > 0 else "SHORT"
+        if not state.is_open or state.is_flat():
+            state.mark_open(sign)
 
-        # Determine whether this slice continues the current position or offsets it.
-        position_sign = 1 if state.net_size > _EPSILON else -1 if state.net_size < -_EPSILON else 0
+        position_sign = state.active_sign()
         incoming_same_direction = position_sign == 0 or position_sign == sign
 
         qty_to_use = remaining if incoming_same_direction else min(remaining, abs(state.net_size))
@@ -489,15 +512,13 @@ def _consume_trade(
         state.net_size += sign * qty_to_use
         remaining -= qty_to_use
 
-        if abs(state.net_size) <= _EPSILON:
+        if state.is_flat():
             roundtrip = _summarize_roundtrip(symbol, state.trades, state.direction, income_index, orders_lookup)
             if roundtrip is None:
                 skipped += 1
             else:
                 produced.append(roundtrip)
             state.reset()
-            if remaining > _EPSILON:
-                state.direction = "LONG" if sign > 0 else "SHORT"
 
     return produced, skipped
 
@@ -690,17 +711,26 @@ def run(event_in: dict | None = None, now: datetime | None = None) -> dict[str, 
                 continue
 
             roundtrips_payload.append(enriched)
-            qty_closed = min(
-                _to_float(enriched.get("entryQty")),
-                _to_float(enriched.get("exitQty")),
-            )
-            open_ts = int(_to_float(enriched.get("openTimestamp"))) if enriched.get("openTimestamp") is not None else None
-            close_ts = int(_to_float(enriched.get("closeTimestamp"))) if enriched.get("closeTimestamp") is not None else None
-            pnl_value = (
-                _to_float(enriched.get("netPnl"))
-                if enriched.get("netPnl") is not None
-                else _to_float(enriched.get("realizedPnl"))
-            )
+            qty_closed = _to_float(enriched.get("qty"))
+            if qty_closed <= _EPSILON:
+                qty_closed = min(
+                    _to_float(enriched.get("entryQty")),
+                    _to_float(enriched.get("exitQty")),
+                )
+            open_ts_raw = enriched.get("openTimestamp")
+            if open_ts_raw is None:
+                open_ts_raw = enriched.get("openAt")
+            open_ts = int(_to_float(open_ts_raw)) if open_ts_raw is not None else None
+            close_ts_raw = enriched.get("closeTimestamp")
+            if close_ts_raw is None:
+                close_ts_raw = enriched.get("closeAt")
+            close_ts = int(_to_float(close_ts_raw)) if close_ts_raw is not None else None
+            pnl_value = enriched.get("pnl")
+            if pnl_value is None:
+                pnl_value = enriched.get("netPnl")
+            if pnl_value is None:
+                pnl_value = enriched.get("realizedPnl")
+            pnl_value = _to_float(pnl_value)
             entry_price = _to_float(enriched.get("entryPrice"))
             exit_price = _to_float(enriched.get("exitPrice"))
             logger.info(

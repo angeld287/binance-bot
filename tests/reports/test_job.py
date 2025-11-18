@@ -180,3 +180,54 @@ def test_run_persists_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert exec_store.started
     assert exec_store.metrics
     assert exec_store.finalized
+
+
+def test_build_roundtrips_closes_every_cycle() -> None:
+    symbol = "ADAUSDT"
+    trades = []
+    base_ts = 1_000_000
+    trade_id = 1
+    order_id = 100
+    for cycle in range(3):
+        open_trade = {
+            "id": trade_id,
+            "orderId": order_id,
+            "symbol": symbol,
+            "side": "BUY",
+            "price": "0.25",
+            "qty": "9",
+            "realizedPnl": "0",
+            "commission": "-0.0001",
+            "time": base_ts + cycle * 10_000 + 1000,
+        }
+        close_trade = {
+            "id": trade_id + 1,
+            "orderId": order_id + 1,
+            "symbol": symbol,
+            "side": "SELL",
+            "price": "0.26",
+            "qty": "9",
+            "realizedPnl": "0.09",
+            "commission": "-0.0001",
+            "time": base_ts + cycle * 10_000 + 5000,
+        }
+        trades.extend([open_trade, close_trade])
+        trade_id += 2
+        order_id += 2
+
+    roundtrips, skipped, leftovers = job._build_roundtrips(
+        [symbol],
+        {symbol: trades},
+        {},
+        {},
+    )
+
+    assert skipped == 0
+    assert not leftovers
+    assert len(roundtrips) == 3
+    for idx, rt in enumerate(roundtrips):
+        assert rt["symbol"] == symbol
+        assert rt["qty"] == pytest.approx(9.0)
+        assert rt["direction"] == "LONG"
+        assert rt["openTimestamp"] < rt["closeTimestamp"]
+        assert rt["pnl"] == pytest.approx(rt["netPnl"] + rt.get("incomeRealized", 0.0))
