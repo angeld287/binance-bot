@@ -687,6 +687,26 @@ def run(event_in: dict | None = None, now: datetime | None = None) -> dict[str, 
                 continue
 
             roundtrips_payload.append(enriched)
+            qty_closed = min(
+                _to_float(enriched.get("entryQty")),
+                _to_float(enriched.get("exitQty")),
+            )
+            open_ts = int(_to_float(enriched.get("openTimestamp"))) if enriched.get("openTimestamp") is not None else None
+            close_ts = int(_to_float(enriched.get("closeTimestamp"))) if enriched.get("closeTimestamp") is not None else None
+            pnl_value = (
+                _to_float(enriched.get("netPnl"))
+                if enriched.get("netPnl") is not None
+                else _to_float(enriched.get("realizedPnl"))
+            )
+            logger.info(
+                "reports.job.roundtrip_debug symbol=%s side=%s qty=%s open_ts=%s close_ts=%s pnl=%s",
+                enriched.get("symbol"),
+                enriched.get("direction"),
+                qty_closed,
+                open_ts,
+                close_ts,
+                pnl_value,
+            )
             if dry_run:
                 logger.info(
                     "reports.job.dry_run.roundtrip",
