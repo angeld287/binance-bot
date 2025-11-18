@@ -365,3 +365,78 @@ def test_trades_are_sorted_by_trade_id() -> None:
     assert rt["openTimestamp"] == trades[1]["time"]
     assert rt["closeTimestamp"] == trades[0]["time"]
     assert rt["tradeIds"] == ["1", "2"]
+
+
+def test_roundtrip_closes_on_every_net_zero_cycle() -> None:
+    symbol = "BNBUSDT"
+    base_ts = 5_000_000
+    trades = [
+        {
+            "id": 1,
+            "orderId": 3001,
+            "symbol": symbol,
+            "side": "BUY",
+            "price": "200",
+            "qty": "1",
+            "realizedPnl": "0",
+            "commission": "-0.01",
+            "time": base_ts + 1_000,
+        },
+        {
+            "id": 2,
+            "orderId": 3002,
+            "symbol": symbol,
+            "side": "BUY",
+            "price": "201",
+            "qty": "1",
+            "realizedPnl": "0",
+            "commission": "-0.01",
+            "time": base_ts + 2_000,
+        },
+        {
+            "id": 3,
+            "orderId": 3003,
+            "symbol": symbol,
+            "side": "SELL",
+            "price": "202",
+            "qty": "2",
+            "realizedPnl": "2",
+            "commission": "-0.01",
+            "time": base_ts + 3_000,
+        },
+        {
+            "id": 4,
+            "orderId": 3004,
+            "symbol": symbol,
+            "side": "BUY",
+            "price": "203",
+            "qty": "1",
+            "realizedPnl": "0",
+            "commission": "-0.01",
+            "time": base_ts + 4_000,
+        },
+        {
+            "id": 5,
+            "orderId": 3005,
+            "symbol": symbol,
+            "side": "SELL",
+            "price": "204",
+            "qty": "1",
+            "realizedPnl": "1",
+            "commission": "-0.01",
+            "time": base_ts + 5_000,
+        },
+    ]
+
+    roundtrips, skipped, leftovers = job._build_roundtrips(
+        [symbol],
+        {symbol: trades},
+        {},
+        {},
+    )
+
+    assert skipped == 0
+    assert not leftovers
+    assert len(roundtrips) == 2
+    assert roundtrips[0]["tradeIds"] == ["1", "2", "3"]
+    assert roundtrips[1]["tradeIds"] == ["4", "5"]

@@ -701,6 +701,30 @@ def _consume_trade(
     produced: list[dict[str, Any]] = []
     skipped = 0
 
+    def _finalize_cycle() -> None:
+        nonlocal skipped
+        net_at_close = state.net_size
+        trades_count = len(state.trades)
+        roundtrip_index = state.completed_roundtrips + 1
+        roundtrip = _summarize_roundtrip(symbol, state.trades, state.direction, income_index, orders_lookup)
+        if roundtrip is None:
+            skipped += 1
+        else:
+            logger.info(
+                "reports.job.roundtrip_state symbol=%s idx=%s trades_count=%s net_at_close=%s open_ts=%s close_ts=%s pnl=%s qty=%s",
+                symbol,
+                roundtrip_index,
+                trades_count,
+                net_at_close,
+                roundtrip.get("openTimestamp"),
+                roundtrip.get("closeTimestamp"),
+                roundtrip.get("pnl"),
+                roundtrip.get("qty"),
+            )
+            produced.append(roundtrip)
+            state.completed_roundtrips = roundtrip_index
+        state.reset()
+
     side = str(trade.get("side") or "BUY").upper()
     sign = 1 if side == "BUY" else -1
     total_qty = abs(_to_float(trade.get("qty") or trade.get("origQty")))
@@ -746,27 +770,7 @@ def _consume_trade(
         )
 
         if state.is_flat():
-            net_at_close = state.net_size
-            trades_count = len(state.trades)
-            roundtrip_index = state.completed_roundtrips + 1
-            roundtrip = _summarize_roundtrip(symbol, state.trades, state.direction, income_index, orders_lookup)
-            if roundtrip is None:
-                skipped += 1
-            else:
-                logger.info(
-                    "reports.job.roundtrip_state symbol=%s idx=%s trades_count=%s net_at_close=%s open_ts=%s close_ts=%s pnl=%s qty=%s",
-                    symbol,
-                    roundtrip_index,
-                    trades_count,
-                    net_at_close,
-                    roundtrip.get("openTimestamp"),
-                    roundtrip.get("closeTimestamp"),
-                    roundtrip.get("pnl"),
-                    roundtrip.get("qty"),
-                )
-                produced.append(roundtrip)
-                state.completed_roundtrips = roundtrip_index
-            state.reset()
+            _finalize_cycle()
 
     return produced, skipped
 
