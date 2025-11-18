@@ -321,3 +321,47 @@ def test_open_position_is_discarded_at_range_end() -> None:
         "firstTs": open_trade["time"],
         "lastTs": open_trade["time"],
     }]
+
+
+def test_trades_are_sorted_by_trade_id() -> None:
+    symbol = "DOTUSDT"
+    base_ts = 4_000_000
+    trades = [
+        {
+            "id": 2,
+            "orderId": 2002,
+            "symbol": symbol,
+            "side": "SELL",
+            "price": "11",
+            "qty": "1",
+            "realizedPnl": "1",
+            "commission": "-0.01",
+            "time": base_ts + 5_000,  # later timestamp but lower tradeId
+        },
+        {
+            "id": 1,
+            "orderId": 2001,
+            "symbol": symbol,
+            "side": "BUY",
+            "price": "10",
+            "qty": "1",
+            "realizedPnl": "0",
+            "commission": "-0.01",
+            "time": base_ts + 10_000,  # higher timestamp but should be first after sort
+        },
+    ]
+
+    roundtrips, skipped, leftovers = job._build_roundtrips(
+        [symbol],
+        {symbol: trades},
+        {},
+        {},
+    )
+
+    assert skipped == 0
+    assert not leftovers
+    assert len(roundtrips) == 1
+    rt = roundtrips[0]
+    assert rt["openTimestamp"] == trades[1]["time"]
+    assert rt["closeTimestamp"] == trades[0]["time"]
+    assert rt["tradeIds"] == ["1", "2"]

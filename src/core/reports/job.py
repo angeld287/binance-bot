@@ -473,10 +473,17 @@ def _summarize_roundtrip(
     return roundtrip
 
 
-def _trade_sort_key(trade: Mapping[str, Any]) -> tuple[int, str]:
-    ts = int(_to_float(trade.get("time")))
-    trade_id = trade.get("id") or trade.get("tradeId") or trade.get("orderId") or ""
-    return ts, str(trade_id)
+def _trade_sort_key(trade: Mapping[str, Any]) -> tuple[int, int, int]:
+    def _as_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    trade_id = _as_int(trade.get("id") or trade.get("tradeId") or trade.get("orderId"))
+    ts = _as_int(trade.get("time"))
+    update_ts = _as_int(trade.get("updateTime"))
+    return trade_id, ts, update_ts
 
 
 def _should_enter_retrospective(trade: Mapping[str, Any]) -> bool:
@@ -782,6 +789,16 @@ def _build_roundtrips(
         if not trades:
             continue
         sorted_trades = sorted(trades, key=_trade_sort_key)
+        if sorted_trades:
+            first_tid = _trade_sort_key(sorted_trades[0])[0]
+            last_tid = _trade_sort_key(sorted_trades[-1])[0]
+            logger.info(
+                "reports.job.trades_sorted symbol=%s first_trade_id=%s last_trade_id=%s total=%s",
+                symbol,
+                first_tid,
+                last_tid,
+                len(sorted_trades),
+            )
         state, boot_meta = _bootstrap_state(
             symbol,
             sorted_trades,
