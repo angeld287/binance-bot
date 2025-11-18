@@ -42,6 +42,7 @@ class _PositionState:
     net_size: float = 0.0
     trades: list[dict[str, Any]] = field(default_factory=list)
     is_open: bool = False
+    completed_roundtrips: int = 0
 
     def reset(self) -> None:
         self.direction = None
@@ -508,16 +509,50 @@ def _consume_trade(
 
         partial_trade = _slice_trade(trade, qty_to_use)
         partial_trade["side"] = side
+        net_before = state.net_size
         state.trades.append(partial_trade)
         state.net_size += sign * qty_to_use
+        net_after = state.net_size
         remaining -= qty_to_use
 
+        current_roundtrip_index = state.completed_roundtrips + 1
+        trade_id = trade.get("id") or trade.get("tradeId")
+        trade_time = trade.get("time")
+        trade_position_side = trade.get("positionSide")
+        logger.info(
+            "reports.job.position_trace symbol=%s trade_id=%s time=%s side=%s qty=%s position_side=%s net_before=%s net_after=%s roundtrip_index=%s",
+            symbol,
+            trade_id,
+            trade_time,
+            side,
+            qty_to_use,
+            trade_position_side,
+            net_before,
+            net_after,
+            current_roundtrip_index,
+        )
+
         if state.is_flat():
+            net_at_close = state.net_size
+            trades_count = len(state.trades)
+            roundtrip_index = state.completed_roundtrips + 1
             roundtrip = _summarize_roundtrip(symbol, state.trades, state.direction, income_index, orders_lookup)
             if roundtrip is None:
                 skipped += 1
             else:
+                logger.info(
+                    "reports.job.roundtrip_state symbol=%s idx=%s trades_count=%s net_at_close=%s open_ts=%s close_ts=%s pnl=%s qty=%s",
+                    symbol,
+                    roundtrip_index,
+                    trades_count,
+                    net_at_close,
+                    roundtrip.get("openTimestamp"),
+                    roundtrip.get("closeTimestamp"),
+                    roundtrip.get("pnl"),
+                    roundtrip.get("qty"),
+                )
                 produced.append(roundtrip)
+                state.completed_roundtrips = roundtrip_index
             state.reset()
 
     return produced, skipped
