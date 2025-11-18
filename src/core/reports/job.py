@@ -810,11 +810,25 @@ def _build_roundtrips(
             roundtrips.extend(produced)
             skipped += skipped_count
         if state.trades:
+            first_ts = min(int(_to_float(t.get("time"))) for t in state.trades if t.get("time") is not None)
+            last_ts = max(int(_to_float(t.get("time"))) for t in state.trades if t.get("time") is not None)
+            logger.info(
+                "Position discarded: ended with net != 0 at end of range",
+                extra={
+                    "symbol": symbol,
+                    "net": state.net_size,
+                    "trades": len(state.trades),
+                    "firstTs": first_ts,
+                    "lastTs": last_ts,
+                },
+            )
             leftovers.append({
                 "symbol": symbol,
                 "direction": state.direction,
                 "openTrades": len(state.trades),
                 "openQty": abs(state.net_size),
+                "firstTs": first_ts,
+                "lastTs": last_ts,
             })
 
     return roundtrips, skipped, leftovers

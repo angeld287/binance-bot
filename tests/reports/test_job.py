@@ -287,3 +287,37 @@ def test_build_roundtrips_bootstrap_position_before_range() -> None:
     assert rt["closeTimestamp"] == closing_trade["time"]
     assert rt["qty"] == pytest.approx(2.0)
     assert rt["direction"] == "LONG"
+
+
+def test_open_position_is_discarded_at_range_end() -> None:
+    symbol = "XRPUSDT"
+    base_ts = 3_000_000
+    open_trade = {
+        "id": 42,
+        "orderId": 9001,
+        "symbol": symbol,
+        "side": "BUY",
+        "price": "0.5",
+        "qty": "100",
+        "realizedPnl": "0",
+        "commission": "-0.1",
+        "time": base_ts + 1_000,
+    }
+
+    roundtrips, skipped, leftovers = job._build_roundtrips(
+        [symbol],
+        {symbol: [open_trade]},
+        {},
+        {},
+    )
+
+    assert skipped == 0
+    assert not roundtrips
+    assert leftovers == [{
+        "symbol": symbol,
+        "direction": "LONG",
+        "openTrades": 1,
+        "openQty": pytest.approx(100.0),
+        "firstTs": open_trade["time"],
+        "lastTs": open_trade["time"],
+    }]
