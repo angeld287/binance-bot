@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from typing import Any
 
+from config.logging import setup_logging
 from core.reports.job import resolve_orchestrator
 
 
@@ -34,6 +36,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     event = _build_event(args)
+    log_level = os.getenv("LOG_LEVEL", "INFO")
+    setup_logging(level=log_level, mode="plain")
     orchestrator, path = resolve_orchestrator()
     result = orchestrator(event or None, now=None)
     print(json.dumps({"path": path, "result": result}, default=str))

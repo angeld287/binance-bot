@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, time as time_cls, timedelta, timezone
 from typing import Any
 
 from zoneinfo import ZoneInfo
 
 from common.symbols import normalize_symbol
+from config.logging import setup_logging
 from core.reports.job import resolve_orchestrator
 
 logger = logging.getLogger(__name__)
@@ -148,6 +150,9 @@ def _resolve_overrides(event: dict | None, *, now: datetime | None = None) -> di
 
 def handler(event=None, context=None):  # pragma: no cover - entry point
     """AWS Lambda entry point for the reporting job."""
+
+    log_level = os.getenv("LOG_LEVEL", "INFO")
+    setup_logging(level=log_level, mode="plain")
 
     orchestrator, path = resolve_orchestrator()
     overrides = _resolve_overrides(event)
