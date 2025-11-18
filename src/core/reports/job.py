@@ -254,7 +254,14 @@ def _call_client_method(client: Any, names: Sequence[str], **params: Any) -> Any
     raise AttributeError(f"Client does not expose any of {', '.join(names)}")
 
 
-def _log_fetch_count(symbol: str, category: str, payload: Any) -> None:
+def _log_fetch_count(
+    symbol: str,
+    category: str,
+    payload: Any,
+    *,
+    from_ts: int | None = None,
+    to_ts: int | None = None,
+) -> None:
     """Emit a structured log message with the raw count for a fetch call."""
 
     try:
@@ -262,10 +269,22 @@ def _log_fetch_count(symbol: str, category: str, payload: Any) -> None:
     except TypeError:
         count = 0
 
-    logger.info(
-        "reports.job.fetch_counts",
-        extra={"symbol": symbol, "category": category, "count": count},
-    )
+    if from_ts is not None or to_ts is not None:
+        logger.info(
+            "reports.job.fetch_counts symbol=%s category=%s count=%s from_ts=%s to_ts=%s",
+            symbol,
+            category,
+            count,
+            from_ts,
+            to_ts,
+        )
+    else:
+        logger.info(
+            "reports.job.fetch_counts symbol=%s category=%s count=%s",
+            symbol,
+            category,
+            count,
+        )
 
 
 def _to_float(value: Any) -> float:
@@ -561,23 +580,26 @@ def run(event_in: dict | None = None, now: datetime | None = None) -> dict[str, 
         income_map: dict[str, list[Mapping[str, Any]]] = {}
         api_calls = 0
 
+        from_ts = params["from_ts"]
+        to_ts = params["to_ts"]
+
         for symbol in symbols:
-            fetch_args = {"symbol": symbol, "startTime": params["from_ts"], "endTime": params["to_ts"], "limit": 1000}
+            fetch_args = {"symbol": symbol, "startTime": from_ts, "endTime": to_ts, "limit": 1000}
             orders = _call_client_method(client, ("futures_all_orders", "get_all_orders", "all_orders"), **fetch_args)
-            _log_fetch_count(symbol, "orders", orders or [])
+            _log_fetch_count(symbol, "orders", orders or [], from_ts=from_ts, to_ts=to_ts)
             trades = _call_client_method(client, ("futures_account_trades", "get_my_trades", "user_trades"), **fetch_args)
-            _log_fetch_count(symbol, "account_trades", trades or [])
+            _log_fetch_count(symbol, "account_trades", trades or [], from_ts=from_ts, to_ts=to_ts)
             income = []
             try:
                 income = _call_client_method(
                     client,
                     ("futures_income_history",),
                     symbol=symbol,
-                    startTime=params["from_ts"],
-                    endTime=params["to_ts"],
+                    startTime=from_ts,
+                    endTime=to_ts,
                     limit=1000,
                 )
-                _log_fetch_count(symbol, "income", income or [])
+                _log_fetch_count(symbol, "income", income or [], from_ts=from_ts, to_ts=to_ts)
             except AttributeError:
                 income = []
             klines = _call_client_method(
@@ -585,11 +607,11 @@ def run(event_in: dict | None = None, now: datetime | None = None) -> dict[str, 
                 ("futures_klines", "get_klines", "klines"),
                 symbol=symbol,
                 interval="1m",
-                startTime=params["from_ts"],
-                endTime=params["to_ts"],
+                startTime=from_ts,
+                endTime=to_ts,
                 limit=1500,
             )
-            _log_fetch_count(symbol, "klines", klines or [])
+            _log_fetch_count(symbol, "klines", klines or [], from_ts=from_ts, to_ts=to_ts)
             orders_map[symbol] = list(orders or [])
             trades_map[symbol] = list(trades or [])
             income_map[symbol] = list(income or [])
