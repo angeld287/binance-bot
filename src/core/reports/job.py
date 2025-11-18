@@ -39,12 +39,12 @@ _CANDIDATES: tuple[tuple[str, str], ...] = (
 @dataclass
 class _PositionState:
     direction: str | None = None
-    position: float = 0.0
+    net_size: float = 0.0
     trades: list[dict[str, Any]] = field(default_factory=list)
 
     def reset(self) -> None:
         self.direction = None
-        self.position = 0.0
+        self.net_size = 0.0
         self.trades.clear()
 
 
@@ -454,6 +454,12 @@ def _consume_trade(
     income_index: Mapping[tuple[str, str], Sequence[Mapping[str, Any]]],
     orders_lookup: Mapping[tuple[str, str], Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], int]:
+    """Apply ``trade`` into ``state`` and return any completed roundtrips.
+
+    The net position for the symbol is tracked in ``state.net_size``. Every time
+    it moves 0 -> non-zero -> 0 we close a roundtrip, even if multiple positions
+    share the same direction or size.
+    """
     produced: list[dict[str, Any]] = []
     skipped = 0
 
@@ -466,27 +472,24 @@ def _consume_trade(
     remaining = total_qty
 
     while remaining > _EPSILON:
-        if state.direction is None:
+        if abs(state.net_size) <= _EPSILON:
             state.direction = "LONG" if sign > 0 else "SHORT"
 
-        same_direction = (state.direction == "LONG" and sign > 0) or (state.direction == "SHORT" and sign < 0)
+        # Determine whether this slice continues the current position or offsets it.
+        position_sign = 1 if state.net_size > _EPSILON else -1 if state.net_size < -_EPSILON else 0
+        incoming_same_direction = position_sign == 0 or position_sign == sign
 
-        if same_direction or abs(state.position) <= _EPSILON:
-            qty_to_use = remaining
-        else:
-            qty_to_use = min(remaining, abs(state.position))
-            if qty_to_use <= _EPSILON:
-                state.reset()
-                state.direction = "LONG" if sign > 0 else "SHORT"
-                qty_to_use = remaining
+        qty_to_use = remaining if incoming_same_direction else min(remaining, abs(state.net_size))
+        if qty_to_use <= _EPSILON:
+            break
 
         partial_trade = _slice_trade(trade, qty_to_use)
         partial_trade["side"] = side
         state.trades.append(partial_trade)
-        state.position += sign * qty_to_use
+        state.net_size += sign * qty_to_use
         remaining -= qty_to_use
 
-        if abs(state.position) <= _EPSILON:
+        if abs(state.net_size) <= _EPSILON:
             roundtrip = _summarize_roundtrip(symbol, state.trades, state.direction, income_index, orders_lookup)
             if roundtrip is None:
                 skipped += 1
@@ -530,7 +533,7 @@ def _build_roundtrips(
                 "symbol": symbol,
                 "direction": state.direction,
                 "openTrades": len(state.trades),
-                "openQty": abs(state.position),
+                "openQty": abs(state.net_size),
             })
 
     return roundtrips, skipped, leftovers
@@ -698,14 +701,18 @@ def run(event_in: dict | None = None, now: datetime | None = None) -> dict[str, 
                 if enriched.get("netPnl") is not None
                 else _to_float(enriched.get("realizedPnl"))
             )
+            entry_price = _to_float(enriched.get("entryPrice"))
+            exit_price = _to_float(enriched.get("exitPrice"))
             logger.info(
-                "reports.job.roundtrip_debug symbol=%s side=%s qty=%s open_ts=%s close_ts=%s pnl=%s",
+                "reports.job.roundtrip_debug symbol=%s side=%s qty=%s open_ts=%s close_ts=%s pnl=%s entry_price=%s exit_price=%s",
                 enriched.get("symbol"),
                 enriched.get("direction"),
                 qty_closed,
                 open_ts,
                 close_ts,
                 pnl_value,
+                entry_price,
+                exit_price,
             )
             if dry_run:
                 logger.info(
