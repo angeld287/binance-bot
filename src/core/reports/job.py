@@ -254,6 +254,20 @@ def _call_client_method(client: Any, names: Sequence[str], **params: Any) -> Any
     raise AttributeError(f"Client does not expose any of {', '.join(names)}")
 
 
+def _log_fetch_count(symbol: str, category: str, payload: Any) -> None:
+    """Emit a structured log message with the raw count for a fetch call."""
+
+    try:
+        count = len(payload)  # type: ignore[arg-type]
+    except TypeError:
+        count = 0
+
+    logger.info(
+        "reports.job.fetch_counts",
+        extra={"symbol": symbol, "category": category, "count": count},
+    )
+
+
 def _to_float(value: Any) -> float:
     try:
         return float(value)
@@ -550,7 +564,9 @@ def run(event_in: dict | None = None, now: datetime | None = None) -> dict[str, 
         for symbol in symbols:
             fetch_args = {"symbol": symbol, "startTime": params["from_ts"], "endTime": params["to_ts"], "limit": 1000}
             orders = _call_client_method(client, ("futures_all_orders", "get_all_orders", "all_orders"), **fetch_args)
+            _log_fetch_count(symbol, "orders", orders or [])
             trades = _call_client_method(client, ("futures_account_trades", "get_my_trades", "user_trades"), **fetch_args)
+            _log_fetch_count(symbol, "account_trades", trades or [])
             income = []
             try:
                 income = _call_client_method(
@@ -561,6 +577,7 @@ def run(event_in: dict | None = None, now: datetime | None = None) -> dict[str, 
                     endTime=params["to_ts"],
                     limit=1000,
                 )
+                _log_fetch_count(symbol, "income", income or [])
             except AttributeError:
                 income = []
             klines = _call_client_method(
@@ -572,6 +589,7 @@ def run(event_in: dict | None = None, now: datetime | None = None) -> dict[str, 
                 endTime=params["to_ts"],
                 limit=1500,
             )
+            _log_fetch_count(symbol, "klines", klines or [])
             orders_map[symbol] = list(orders or [])
             trades_map[symbol] = list(trades or [])
             income_map[symbol] = list(income or [])
