@@ -231,3 +231,59 @@ def test_build_roundtrips_closes_every_cycle() -> None:
         assert rt["direction"] == "LONG"
         assert rt["openTimestamp"] < rt["closeTimestamp"]
         assert rt["pnl"] == pytest.approx(rt["netPnl"] + rt.get("incomeRealized", 0.0))
+
+
+def test_build_roundtrips_bootstrap_position_before_range() -> None:
+    symbol = "SOLUSDT"
+    start_ts = 2_000_000
+    lookback_trade = {
+        "id": 9001,
+        "orderId": 5001,
+        "symbol": symbol,
+        "side": "BUY",
+        "price": "10",
+        "qty": "2",
+        "realizedPnl": "0",
+        "commission": "-0.0002",
+        "time": start_ts - 1_000,
+    }
+    closing_trade = {
+        "id": 9002,
+        "orderId": 5002,
+        "symbol": symbol,
+        "side": "SELL",
+        "price": "12",
+        "qty": "2",
+        "realizedPnl": "4",  # ensure retrospective is triggered
+        "commission": "-0.0002",
+        "time": start_ts + 1_000,
+    }
+
+    class RetroClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, int]] = []
+
+        def futures_account_trades(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append((kwargs.get("startTime"), kwargs.get("endTime")))
+            end = kwargs.get("endTime")
+            if end == start_ts:
+                return [lookback_trade]
+            return []
+
+    roundtrips, skipped, leftovers = job._build_roundtrips(
+        [symbol],
+        {symbol: [closing_trade]},
+        {},
+        {},
+        client=RetroClient(),
+        range_start=start_ts,
+    )
+
+    assert skipped == 0
+    assert not leftovers
+    assert len(roundtrips) == 1
+    rt = roundtrips[0]
+    assert rt["openTimestamp"] == lookback_trade["time"]
+    assert rt["closeTimestamp"] == closing_trade["time"]
+    assert rt["qty"] == pytest.approx(2.0)
+    assert rt["direction"] == "LONG"

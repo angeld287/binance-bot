@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TZ_NAME = "America/Santo_Domingo"
 _DEFAULT_TZ = ZoneInfo(_DEFAULT_TZ_NAME)
 _EPSILON = 1e-12
+_RETROSPECTIVE_BLOCK_MS = 2 * 60 * 60 * 1000  # 2 hours
+_RETROSPECTIVE_MAX_BLOCKS = 24  # 48 hours total lookback cap
 
 _CANDIDATES: tuple[tuple[str, str], ...] = (
     ("core.reports.pipeline", "run"),
@@ -471,6 +473,210 @@ def _summarize_roundtrip(
     return roundtrip
 
 
+def _trade_sort_key(trade: Mapping[str, Any]) -> tuple[int, str]:
+    ts = int(_to_float(trade.get("time")))
+    trade_id = trade.get("id") or trade.get("tradeId") or trade.get("orderId") or ""
+    return ts, str(trade_id)
+
+
+def _should_enter_retrospective(trade: Mapping[str, Any]) -> bool:
+    qty = abs(_to_float(trade.get("qty") or trade.get("origQty")))
+    if qty <= _EPSILON:
+        return False
+    side = str(trade.get("side") or "BUY").upper()
+    position_side = str(trade.get("positionSide") or "").upper()
+    realized_pnl = abs(_to_float(trade.get("realizedPnl"))) > _EPSILON
+
+    if realized_pnl:
+        return True
+    if position_side == "LONG" and side == "SELL":
+        return True
+    if position_side == "SHORT" and side == "BUY":
+        return True
+    if position_side in {"", "BOTH"} and side == "SELL":
+        return True
+    if position_side in {"", "BOTH"} and side == "BUY" and trade.get("reduceOnly"):
+        return True
+    return False
+
+
+def _replay_trades_for_state(
+    symbol: str,
+    trades: Sequence[Mapping[str, Any]],
+    income_index: Mapping[tuple[str, str], Sequence[Mapping[str, Any]]],
+    orders_lookup: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> tuple[_PositionState, int | None, str | None, bool]:
+    state = _PositionState()
+    last_zero_ts: int | None = None
+    last_zero_trade_id: str | None = None
+    zero_seen = False
+
+    for trade in trades:
+        produced, _skipped = _consume_trade(
+            state,
+            trade,
+            symbol=symbol,
+            income_index=income_index,
+            orders_lookup=orders_lookup,
+        )
+        if produced:
+            zero_seen = True
+            last_zero_ts = produced[-1].get("closeTimestamp")
+            trade_id = trade.get("id") or trade.get("tradeId")
+            if trade_id is not None:
+                last_zero_trade_id = str(trade_id)
+
+    return state, last_zero_ts, last_zero_trade_id, zero_seen
+
+
+def _retrospective_search(
+    symbol: str,
+    *,
+    client: Any,
+    range_start: int,
+    income_index: Mapping[tuple[str, str], Sequence[Mapping[str, Any]]],
+    orders_lookup: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> tuple[_PositionState, dict[str, Any]]:
+    lookback_trades: list[Mapping[str, Any]] = []
+    seen: set[tuple[str | int | None, int]] = set()
+    blocks_used = 0
+    last_zero_ts: int | None = None
+    last_zero_trade_id: str | None = None
+    found_zero = False
+    state: _PositionState | None = None
+
+    logger.info("reports.job.retrospective.enter symbol=%s start_ts=%s", symbol, range_start)
+
+    while blocks_used < _RETROSPECTIVE_MAX_BLOCKS:
+        block_end = range_start - blocks_used * _RETROSPECTIVE_BLOCK_MS
+        block_start = max(block_end - _RETROSPECTIVE_BLOCK_MS, 0)
+        blocks_used += 1
+
+        block = _call_client_method(
+            client,
+            ("futures_account_trades", "get_my_trades", "user_trades"),
+            symbol=symbol,
+            startTime=block_start,
+            endTime=block_end,
+            limit=1000,
+        )
+        _log_fetch_count(
+            symbol,
+            "account_trades_retrospective",
+            block or [],
+            from_ts=block_start,
+            to_ts=block_end,
+        )
+
+        new_trades: list[Mapping[str, Any]] = []
+        for trade in block or []:
+            trade_id = trade.get("id") or trade.get("tradeId") or trade.get("orderId")
+            key = (trade_id, int(_to_float(trade.get("time"))))
+            if key in seen:
+                continue
+            seen.add(key)
+            new_trades.append(trade)
+
+        if new_trades:
+            lookback_trades.extend(new_trades)
+
+        if not lookback_trades and not new_trades:
+            logger.info(
+                "reports.job.retrospective.no_trades symbol=%s block=%s block_start=%s block_end=%s",
+                symbol,
+                blocks_used,
+                block_start,
+                block_end,
+            )
+            break
+
+        sorted_history = sorted(lookback_trades, key=_trade_sort_key)
+        state, last_zero_ts, last_zero_trade_id, zero_seen = _replay_trades_for_state(
+            symbol,
+            sorted_history,
+            income_index,
+            orders_lookup,
+        )
+        found_zero = found_zero or zero_seen
+        logger.info(
+            "reports.job.retrospective.progress symbol=%s block=%s accumulated_trades=%s net_after=%s found_zero=%s zero_trade_id=%s zero_ts=%s block_start=%s block_end=%s",
+            symbol,
+            blocks_used,
+            len(sorted_history),
+            state.net_size,
+            found_zero,
+            last_zero_trade_id,
+            last_zero_ts,
+            block_start,
+            block_end,
+        )
+
+        if found_zero:
+            break
+        if not block:
+            # Stop when server returned no more trades to avoid looping forever
+            break
+
+    if state is None:
+        state = _PositionState()
+
+    logger.info(
+        "reports.job.retrospective.exit symbol=%s blocks_used=%s found_zero=%s zero_trade_id=%s zero_ts=%s net_at_start=%s",
+        symbol,
+        blocks_used,
+        found_zero,
+        last_zero_trade_id,
+        last_zero_ts,
+        state.net_size,
+    )
+
+    metadata = {
+        "blocksUsed": blocks_used,
+        "foundZero": found_zero,
+        "zeroTradeId": last_zero_trade_id,
+        "zeroTimestamp": last_zero_ts,
+        "netAtStart": state.net_size,
+    }
+    return state, metadata
+
+
+def _bootstrap_state(
+    symbol: str,
+    trades: Sequence[Mapping[str, Any]],
+    *,
+    client: Any | None,
+    range_start: int | None,
+    income_index: Mapping[tuple[str, str], Sequence[Mapping[str, Any]]],
+    orders_lookup: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> tuple[_PositionState, dict[str, Any]]:
+    state = _PositionState()
+    meta: dict[str, Any] = {"retrospective": False}
+
+    if not trades or client is None or range_start is None:
+        return state, meta
+
+    first_trade = trades[0]
+    if not _should_enter_retrospective(first_trade):
+        return state, meta
+
+    logger.info(
+        "reports.job.retrospective.trigger symbol=%s first_trade_id=%s first_trade_time=%s",
+        symbol,
+        first_trade.get("id") or first_trade.get("tradeId"),
+        first_trade.get("time"),
+    )
+    state, metadata = _retrospective_search(
+        symbol,
+        client=client,
+        range_start=range_start,
+        income_index=income_index,
+        orders_lookup=orders_lookup,
+    )
+    meta.update(metadata)
+    meta["retrospective"] = True
+    return state, meta
+
+
 def _consume_trade(
     state: _PositionState,
     trade: Mapping[str, Any],
@@ -563,6 +769,9 @@ def _build_roundtrips(
     trades_map: Mapping[str, Sequence[Mapping[str, Any]]],
     income_index: Mapping[tuple[str, str], Sequence[Mapping[str, Any]]],
     orders_lookup: Mapping[tuple[str, str], Mapping[str, Any]],
+    *,
+    client: Any | None = None,
+    range_start: int | None = None,
 ) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
     roundtrips: list[dict[str, Any]] = []
     skipped = 0
@@ -572,8 +781,24 @@ def _build_roundtrips(
         trades = trades_map.get(symbol) or []
         if not trades:
             continue
-        sorted_trades = sorted(trades, key=lambda t: int(_to_float(t.get("time"))))
-        state = _PositionState()
+        sorted_trades = sorted(trades, key=_trade_sort_key)
+        state, boot_meta = _bootstrap_state(
+            symbol,
+            sorted_trades,
+            client=client,
+            range_start=range_start,
+            income_index=income_index,
+            orders_lookup=orders_lookup,
+        )
+        if boot_meta.get("retrospective"):
+            logger.info(
+                "reports.job.retrospective.state_ready symbol=%s net_at_start=%s blocks_used=%s found_zero=%s zero_ts=%s",
+                symbol,
+                boot_meta.get("netAtStart"),
+                boot_meta.get("blocksUsed"),
+                boot_meta.get("foundZero"),
+                boot_meta.get("zeroTimestamp"),
+            )
         for trade in sorted_trades:
             produced, skipped_count = _consume_trade(
                 state,
@@ -697,7 +922,14 @@ def run(event_in: dict | None = None, now: datetime | None = None) -> dict[str, 
 
         orders_lookup = _build_orders_lookup(orders_map)
         income_index = _build_income_index(income_map)
-        base_roundtrips, skipped_roundtrips, leftovers = _build_roundtrips(symbols, trades_map, income_index, orders_lookup)
+        base_roundtrips, skipped_roundtrips, leftovers = _build_roundtrips(
+            symbols,
+            trades_map,
+            income_index,
+            orders_lookup,
+            client=client,
+            range_start=from_ts,
+        )
         skipped += skipped_roundtrips
         processed = len(base_roundtrips)
 
