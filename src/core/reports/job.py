@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, time as time_cls, timedelta, timezone
 from importlib import import_module
@@ -691,6 +692,7 @@ def _consume_trade(
     symbol: str,
     income_index: Mapping[tuple[str, str], Sequence[Mapping[str, Any]]],
     orders_lookup: Mapping[tuple[str, str], Mapping[str, Any]],
+    order_counts: Mapping[str, int] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Apply ``trade`` into ``state`` and return any completed roundtrips.
 
@@ -756,8 +758,13 @@ def _consume_trade(
         trade_id = trade.get("id") or trade.get("tradeId")
         trade_time = trade.get("time")
         trade_position_side = trade.get("positionSide")
+        order_id = trade.get("orderId")
+        is_fill = False
+        if order_id is not None and order_counts is not None:
+            order_id_str = str(order_id)
+            is_fill = order_counts.get(order_id_str, 0) > 1
         logger.info(
-            "reports.job.position_trace symbol=%s trade_id=%s time=%s side=%s qty=%s position_side=%s net_before=%s net_after=%s roundtrip_index=%s",
+            "reports.job.position_trace symbol=%s trade_id=%s time=%s side=%s qty=%s position_side=%s net_before=%s net_after=%s roundtrip_index=%s is_fill=%s",
             symbol,
             trade_id,
             trade_time,
@@ -767,6 +774,7 @@ def _consume_trade(
             net_before,
             net_after,
             current_roundtrip_index,
+            is_fill,
         )
 
         if state.is_flat():
@@ -783,6 +791,7 @@ def _build_roundtrips(
     *,
     client: Any | None = None,
     range_start: int | None = None,
+    order_counts: Mapping[str, Mapping[str, int]] | None = None,
 ) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
     roundtrips: list[dict[str, Any]] = []
     skipped = 0
@@ -827,6 +836,7 @@ def _build_roundtrips(
                 symbol=symbol,
                 income_index=income_index,
                 orders_lookup=orders_lookup,
+                order_counts=(order_counts or {}).get(symbol),
             )
             roundtrips.extend(produced)
             skipped += skipped_count
@@ -897,6 +907,7 @@ def run(event_in: dict | None = None, now: datetime | None = None) -> dict[str, 
         orders_map: dict[str, list[Mapping[str, Any]]] = {}
         trades_map: dict[str, list[Mapping[str, Any]]] = {}
         income_map: dict[str, list[Mapping[str, Any]]] = {}
+        order_counts_map: dict[str, Counter[str]] = {}
         api_calls = 0
 
         from_ts = params["from_ts"]
@@ -934,6 +945,13 @@ def run(event_in: dict | None = None, now: datetime | None = None) -> dict[str, 
             orders_map[symbol] = list(orders or [])
             trades_map[symbol] = list(trades or [])
             income_map[symbol] = list(income or [])
+            order_counts = Counter()
+            for trade in trades or []:
+                order_id = trade.get("orderId")
+                if order_id is None:
+                    continue
+                order_counts[str(order_id)] += 1
+            order_counts_map[symbol] = order_counts
             api_calls += 4
 
             highs = [
@@ -964,6 +982,7 @@ def run(event_in: dict | None = None, now: datetime | None = None) -> dict[str, 
             orders_lookup,
             client=client,
             range_start=from_ts,
+            order_counts=order_counts_map,
         )
         skipped += skipped_roundtrips
         processed = len(base_roundtrips)
