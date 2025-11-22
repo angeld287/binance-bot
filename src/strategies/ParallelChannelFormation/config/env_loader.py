@@ -18,6 +18,7 @@ class ChannelEnv:
     min_vertical_gap_pct: float
     min_duration_bars: int
     confidence_threshold: float
+    enable_compression_filter: bool
     ema_distance_filter_enabled: bool
     ema_distance_threshold_pct: float
     tp_mode: str
@@ -76,6 +77,9 @@ def load_env(*, settings=None) -> ChannelEnv:
     confidence = (
         _get_value("CHANNEL_CONFIDENCE_THRESHOLD", defaults=defaults, coerce=float) or 0.0
     )
+    compression_filter_enabled = parse_bool(
+        os.getenv("ENABLE_COMPRESSION_FILTER"), default=False
+    )
     ema_distance_enabled = parse_bool(
         os.getenv("PARALLEL_CHANNEL_EMA_DISTANCE_FILTER_ENABLED"),
         default=True,
@@ -132,6 +136,7 @@ def load_env(*, settings=None) -> ChannelEnv:
         min_vertical_gap_pct=float(gap_pct),
         min_duration_bars=int(duration),
         confidence_threshold=float(confidence),
+        enable_compression_filter=bool(compression_filter_enabled),
         ema_distance_filter_enabled=bool(ema_distance_enabled),
         ema_distance_threshold_pct=float(ema_distance_threshold),
         tp_mode=tp_mode,
