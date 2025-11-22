@@ -92,6 +92,7 @@ def compression_filter_allows_entry(
 ) -> tuple[bool, Mapping[str, float | int | str] | None]:
     """Return filter decision and meta information for compression detection."""
 
+    active_logger = logger_override or logger
     enabled = parse_bool(os.getenv(_ENABLE_ENV), default=enabled)
     if not enabled:
         return True, None
@@ -103,17 +104,41 @@ def compression_filter_allows_entry(
 
     closes_seq = list(closes or [])
     if len(closes_seq) <= lookback:
+        active_logger.debug(
+            {
+                "strategy": "ParallelChannelFormation",
+                "symbol": symbol or "",
+                "state": "compression_filter",
+                "reason": "insufficient_data",
+            }
+        )
         return True, None
 
     fast_series = _ema_series(closes_seq, ema_fast_length)
     slow_series = _ema_series(closes_seq, ema_slow_length)
 
     if len(slow_series) <= lookback or len(fast_series) <= lookback:
+        active_logger.debug(
+            {
+                "strategy": "ParallelChannelFormation",
+                "symbol": symbol or "",
+                "state": "compression_filter",
+                "reason": "insufficient_data",
+            }
+        )
         return True, None
 
     slow_now = slow_series[-1]
     slow_past = slow_series[-(lookback + 1)]
     if slow_past == 0:
+        active_logger.debug(
+            {
+                "strategy": "ParallelChannelFormation",
+                "symbol": symbol or "",
+                "state": "compression_filter",
+                "reason": "insufficient_data",
+            }
+        )
         return True, None
     ema_slow_slope_pct = (slow_now - slow_past) / slow_past
     ema_slow_slope_abs = abs(ema_slow_slope_pct)
@@ -124,6 +149,14 @@ def compression_filter_allows_entry(
             continue
         distance_values.append(abs(fast - slow) / slow)
     if not distance_values:
+        active_logger.debug(
+            {
+                "strategy": "ParallelChannelFormation",
+                "symbol": symbol or "",
+                "state": "compression_filter",
+                "reason": "insufficient_data",
+            }
+        )
         return True, None
     avg_ema_distance_pct = sum(distance_values) / len(distance_values)
 
@@ -131,14 +164,43 @@ def compression_filter_allows_entry(
     slow_tail = slow_series[-lookback:]
     side_flips = _count_side_flips(closes_tail, slow_tail)
 
-    is_compression = (
-        ema_slow_slope_abs <= max_slope_pct
-        and avg_ema_distance_pct <= max_distance_pct
-        and side_flips >= min_side_flips
-    )
+    distance_ok = avg_ema_distance_pct <= max_distance_pct
+    slope_ok = ema_slow_slope_abs <= max_slope_pct
+    flips_ok = side_flips >= min_side_flips
+    is_compression = slope_ok and distance_ok and flips_ok
+
+    log_payload = {
+        "strategy": "ParallelChannelFormation",
+        "symbol": symbol or "",
+        "state": "compression_filter",
+        "passed": not is_compression,
+        "metrics": {
+            "avg_ema_distance_pct": avg_ema_distance_pct,
+            "ema_slow_slope_pct": ema_slow_slope_pct,
+            "ema_slow_slope_abs": ema_slow_slope_abs,
+            "side_flips": side_flips,
+        },
+        "conditions": {
+            "distance_ok": distance_ok,
+            "slope_ok": slope_ok,
+            "flips_ok": flips_ok,
+        },
+        "thresholds": {
+            "COMPRESSION_MAX_EMA_DISTANCE_PCT": max_distance_pct,
+            "COMPRESSION_MAX_EMA_SLOPE_PCT": max_slope_pct,
+            "COMPRESSION_MIN_SIDE_FLIPS": min_side_flips,
+        },
+        "context": {
+            "ema_fast_length": ema_fast_length,
+            "ema_slow_length": ema_slow_length,
+            "lookback": lookback,
+        },
+    }
 
     if is_compression:
-        active_logger = logger_override or logger
+        active_logger.info(log_payload)
+
+    if is_compression:
         active_logger.info(
             (
                 "entry blocked by CompressionFilter: symbol=%s, "
@@ -156,6 +218,7 @@ def compression_filter_allows_entry(
             "side_flips": side_flips,
         }
 
+    active_logger.debug(log_payload)
     return True, None
 
 
