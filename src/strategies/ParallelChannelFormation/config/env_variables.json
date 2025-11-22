@@ -19,6 +19,10 @@
     "default": 1.5,
     "description": "Minimum RR or confidence score expected from the detector."
   },
+  "ENABLE_COMPRESSION_FILTER": {
+    "default": false,
+    "description": "Toggle to block entries when the market is in a short-term compression around EMAs."
+  },
   "TP_MODE": {
     "default": "opuesto_inmediato",
     "description": "Take-profit selection policy."

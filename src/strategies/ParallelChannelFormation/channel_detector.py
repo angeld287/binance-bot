@@ -2273,6 +2273,8 @@ def run(
         atr=market_data.atr,
         meta={**(indicators or {}), **ohlc_meta},
         side=channel.get("side"),
+        symbol=symbol,
+        enable_compression_filter=env.enable_compression_filter,
     )
     if LOG_CHANNEL_META:
         rr_value = channel.get("rr")

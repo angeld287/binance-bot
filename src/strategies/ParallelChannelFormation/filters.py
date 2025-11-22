@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import os
+import logging
 
 from typing import Any, Mapping
 
 from strategies.breakout_dual_tf.filters.ema_distance import compute_ema_distance
+from .validators.compression_filter import compression_filter_allows_entry
 
+
+logger = logging.getLogger("bot.strategy.parallel_channel")
 
 def apply_filters(
     *,
@@ -19,6 +23,8 @@ def apply_filters(
     atr: float | None,
     meta: Mapping[str, Any],
     side: str | None,
+    symbol: str | None,
+    enable_compression_filter: bool,
 ) -> tuple[bool, str | None, Mapping[str, Any] | None]:
     """Apply RR/EMA/volatility filters returning decision and reason."""
 
@@ -62,6 +68,19 @@ def apply_filters(
                 return False, "ema_filter", _build_ema_meta()
             if side_norm == "SHORT" and ema_fast > ema_slow:
                 return False, "ema_filter", _build_ema_meta()
+
+    compression_allowed, compression_meta = compression_filter_allows_entry(
+        enabled=enable_compression_filter,
+        closes=meta.get("ema_closes") if isinstance(meta, Mapping) else None,
+        ema_fast_length=int(meta.get("ema_fast_length", 7)) if isinstance(meta, Mapping) else 7,
+        ema_slow_length=int(meta.get("ema_slow_length", 25)) if isinstance(meta, Mapping) else 25,
+        ema_fast_value=ema_fast,
+        ema_slow_value=ema_slow,
+        symbol=symbol,
+        logger_override=logger,
+    )
+    if not compression_allowed:
+        return False, "compression_filter", compression_meta
 
     if volume_avg is not None and volume_avg <= 0:
         return False, "volume_filter", None
